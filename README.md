@@ -58,3 +58,22 @@ dart run
 cd clients/gaovm_cli
 dart run bin/gaovm_cli.dart --help
 ```
+
+## E2E Happy Path (macOS 14+)
+
+An end-to-end happy path script is provided at `scripts/e2e_macos14_happy_path.sh`.
+
+Required inputs:
+
+- `KERNEL_PATH` (ARM64 Linux kernel image for `VZLinuxBootLoader`)
+- Optional `INITRD_PATH`
+- `DISK_PATH` (guest disk image path; GaoVM creates a sparse file if missing)
+
+Example:
+
+```bash
+KERNEL_PATH=/path/to/vmlinuz \
+INITRD_PATH=/path/to/initrd \
+DISK_PATH=$HOME/gaovm/demo.img \
+bash scripts/e2e_macos14_happy_path.sh
+```

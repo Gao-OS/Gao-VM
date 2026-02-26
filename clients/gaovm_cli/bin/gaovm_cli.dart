@@ -196,7 +196,7 @@ _CliConfig _parseArgs(List<String> args) {
 
 void _printUsage() {
   stdout.writeln('Usage: gaovm_cli [--socket-path PATH] [--verbose] <command>');
-  stdout.writeln('Commands: ping, list, status, start, stop, events, doctor, driver-exec, config-get, config-set, config-patch');
+  stdout.writeln('Commands: ping, list, status, start, stop, open-display, close-display, events, doctor, driver-exec, config-get, config-set, config-patch');
   stdout.writeln('config-set: gaovm_cli config-set --json \'{\"cpu\":2,...}\'');
   stdout.writeln('config-patch: gaovm_cli config-patch --json \'{\"graphics\":{\"enabled\":false}}\'');
   stdout.writeln('driver-exec: gaovm_cli driver-exec --method ping [--params-json \'{...}\']');
