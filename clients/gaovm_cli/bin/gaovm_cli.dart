@@ -75,6 +75,24 @@ Future<void> main(List<String> args) async {
         });
         _printJson(result['result']);
         break;
+      case 'doctor':
+        final result = await client.request('doctor');
+        _printJson(result['result']);
+        break;
+      case 'driver-exec':
+        if (config.method == null || config.method!.isEmpty) {
+          throw StateError('driver-exec requires --method');
+        }
+        Object? params;
+        if (config.paramsJson != null) {
+          params = jsonDecode(config.paramsJson!);
+        }
+        final result = await client.request('driver.exec', params: {
+          'method': config.method,
+          if (params != null) 'params': params,
+        });
+        _printJson(result['result']);
+        break;
       default:
         stderr.writeln('Unknown command: ${config.command}');
         _printUsage();
@@ -102,6 +120,8 @@ class _CliConfig {
     required this.socketPath,
     required this.command,
     required this.configJson,
+    required this.method,
+    required this.paramsJson,
     required this.showHelp,
     required this.verbose,
   });
@@ -109,6 +129,8 @@ class _CliConfig {
   final String socketPath;
   final String command;
   final String? configJson;
+  final String? method;
+  final String? paramsJson;
   final bool showHelp;
   final bool verbose;
 }
@@ -118,6 +140,8 @@ _CliConfig _parseArgs(List<String> args) {
   var verbose = false;
   var command = 'status';
   String? configJson;
+  String? method;
+  String? paramsJson;
   var showHelp = false;
 
   for (var i = 0; i < args.length; i++) {
@@ -130,6 +154,12 @@ _CliConfig _parseArgs(List<String> args) {
         break;
       case '--json':
         configJson = args[++i];
+        break;
+      case '--method':
+        method = args[++i];
+        break;
+      case '--params-json':
+        paramsJson = args[++i];
         break;
       case '--help':
       case '-h':
@@ -149,6 +179,8 @@ _CliConfig _parseArgs(List<String> args) {
     socketPath: socketPath,
     command: command,
     configJson: configJson,
+    method: method,
+    paramsJson: paramsJson,
     showHelp: showHelp,
     verbose: verbose,
   );
@@ -156,9 +188,10 @@ _CliConfig _parseArgs(List<String> args) {
 
 void _printUsage() {
   stdout.writeln('Usage: gaovm_cli [--socket-path PATH] [--verbose] <command>');
-  stdout.writeln('Commands: ping, list, status, start, stop, events, config-get, config-set, config-patch');
+  stdout.writeln('Commands: ping, list, status, start, stop, events, doctor, driver-exec, config-get, config-set, config-patch');
   stdout.writeln('config-set: gaovm_cli config-set --json \'{\"cpu\":2,...}\'');
   stdout.writeln('config-patch: gaovm_cli config-patch --json \'{\"graphics\":{\"enabled\":false}}\'');
+  stdout.writeln('driver-exec: gaovm_cli driver-exec --method ping [--params-json \'{...}\']');
 }
 
 void _printJson(Object? value) {
@@ -185,6 +218,8 @@ class _GaovmCliClient {
     'hello',
     'ping',
     'subscribe_events',
+    'doctor',
+    'driver.exec',
     'list_vms',
     'vm.start',
     'vm.stop',

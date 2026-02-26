@@ -233,7 +233,6 @@ class DriverSupervisor {
   final AtomicJsonFile _desiredStateFile;
 
   Process? _process;
-  ServerSocket? _handshakeListener;
   RpcChannel? _driverChannel;
   Timer? _heartbeatTimer;
   Timer? _reconcileTimer;
@@ -313,24 +312,23 @@ class DriverSupervisor {
     try {
       final runDir = Directory('$stateDir/run');
       await runDir.create(recursive: true);
-      final socketPath = '${runDir.path}/driver_control.sock';
+      final socketPath = '${runDir.path}/driver.sock';
       final existing = File(socketPath);
       if (await existing.exists()) {
         await existing.delete();
       }
       _driverSocketPath = socketPath;
       _authToken = _generateToken();
-      _handshakeListener = await ServerSocket.bind(
-        InternetAddress(socketPath, type: InternetAddressType.unix),
-        0,
-      );
+      final driverLogPath = '$stateDir/logs/gaovm-driver-vz.log';
 
       final process = await Process.start(driverBinary, [
         '--socket-path',
         socketPath,
-        '--auth-token',
-        _authToken!,
-      ], runInShell: false);
+      ], runInShell: false, environment: {
+        ...Platform.environment,
+        'GAOVM_AUTH_TOKEN': _authToken!,
+        'GAOVM_DRIVER_LOG_PATH': driverLogPath,
+      });
       _process = process;
       process.stderr.transform(utf8.decoder).listen((data) {
         unawaited(logger?.warn('driver stderr: ${data.trimRight()}') ?? Future<void>.value());
@@ -342,7 +340,7 @@ class DriverSupervisor {
       });
       unawaited(process.exitCode.then(_onDriverExit));
 
-      final socket = await _handshakeListener!.first.timeout(const Duration(seconds: 10));
+      final socket = await _connectToDriverWithRetry(socketPath);
       final channel = RpcChannel(socket);
       await _performHandshake(channel, expectedToken: _authToken!);
       _driverChannel = channel;
@@ -369,10 +367,25 @@ class DriverSupervisor {
       await _scheduleRestartOrPermanentFailure();
       await _persistRuntimeState();
     } finally {
-      await _handshakeListener?.close();
-      _handshakeListener = null;
       _startInProgress = false;
     }
+  }
+
+  Future<Socket> _connectToDriverWithRetry(String socketPath) async {
+    final deadline = DateTime.now().add(const Duration(seconds: 10));
+    Object? lastError;
+    while (DateTime.now().isBefore(deadline)) {
+      try {
+        return await Socket.connect(
+          InternetAddress(socketPath, type: InternetAddressType.unix),
+          0,
+        );
+      } catch (error) {
+        lastError = error;
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+      }
+    }
+    throw StateError('Timed out connecting to driver socket $socketPath: ${lastError ?? 'unknown error'}');
   }
 
   Future<void> _performHandshake(RpcChannel channel, {required String expectedToken}) async {
@@ -615,8 +628,6 @@ class DriverSupervisor {
     if (clearProcess) {
       _process = null;
     }
-    await _handshakeListener?.close();
-    _handshakeListener = null;
     final socketPath = _driverSocketPath;
     if (socketPath != null) {
       final file = File(socketPath);
@@ -645,8 +656,38 @@ class DriverSupervisor {
       'restartPending': _restartTimer != null,
       'driverPid': _process?.pid,
       'driverSocketPath': _driverSocketPath,
+      'driverBinary': driverBinary,
       'lastFailure': _lastFailure,
     });
+  }
+
+  Future<Map<String, Object?>> driverExec(String method, {Object? params}) async {
+    final channel = _driverChannel;
+    if (channel == null) {
+      throw StateError('Driver is not running');
+    }
+    final response = await channel.sendRequest(method, params: params).timeout(const Duration(seconds: 5));
+    if (response['error'] != null) {
+      throw StateError('Driver error: ${response['error']}');
+    }
+    return response;
+  }
+
+  Future<Map<String, Object?>> doctor() async {
+    final driverFile = File(driverBinary);
+    final socketFile = _driverSocketPath == null ? null : File(_driverSocketPath!);
+    return {
+      'ok': true,
+      'daemon': status(),
+      'checks': {
+        'driverBinaryPath': driverBinary,
+        'driverBinaryExists': await driverFile.exists(),
+        'driverSocketPath': _driverSocketPath,
+        'driverSocketExists': socketFile == null ? false : await socketFile.exists(),
+        'stateDir': stateDir,
+        'stateDirExists': await Directory(stateDir).exists(),
+      },
+    };
   }
 
   String _generateToken() {
@@ -735,6 +776,8 @@ class _ClientSession {
     'hello',
     'ping',
     'subscribe_events',
+    'doctor',
+    'driver.exec',
     'list_vms',
     'vm.start',
     'vm.stop',
@@ -861,6 +904,25 @@ class _ClientSession {
           emitEvent: server.emitEvent,
         );
         return JsonRpcProtocol.result(id: id, result: result);
+      case 'doctor':
+        return JsonRpcProtocol.result(id: id, result: await server.supervisor.doctor());
+      case 'driver.exec':
+        final driverMethod = params['method']?.toString();
+        if (driverMethod == null || driverMethod.isEmpty) {
+          return JsonRpcProtocol.error(
+            id: id,
+            code: JsonRpcErrorCode.invalidParams,
+            message: 'driver.exec requires params.method',
+          );
+        }
+        final response = await server.supervisor.driverExec(
+          driverMethod,
+          params: params['params'],
+        );
+        return JsonRpcProtocol.result(id: id, result: {
+          'method': driverMethod,
+          'driverResult': response['result'],
+        });
       default:
         return JsonRpcProtocol.error(
           id: id,

@@ -63,7 +63,7 @@ _Config _parseArgs(List<String> args) {
   var socketPath = Directory.current.uri.resolve('state/run/daemon.sock').toFilePath();
   var driverBinary = Platform.environment['GAOVM_DRIVER_BIN'] ??
       Directory.current.uri
-          .resolve('../../drivers/vz_macos/.build/debug/vz_macos')
+          .resolve('../../drivers/vz_macos/.build/debug/gaovm-driver-vz')
           .toFilePath();
 
   for (var i = 0; i < args.length; i++) {
