@@ -27,6 +27,28 @@ class AsyncMutex {
   }
 }
 
+class RestartWindowLimiter {
+  RestartWindowLimiter({required this.limit, required this.window});
+
+  final int limit;
+  final Duration window;
+  final List<DateTime> _events = <DateTime>[];
+
+  bool recordAndIsLimited(DateTime now) {
+    _events.add(now);
+    final cutoff = now.subtract(window);
+    _events.removeWhere((ts) => ts.isBefore(cutoff));
+    return _events.length >= limit;
+  }
+
+  void reset() => _events.clear();
+
+  int countInWindow(DateTime now) {
+    final cutoff = now.subtract(window);
+    return _events.where((ts) => !ts.isBefore(cutoff)).length;
+  }
+}
+
 class RpcChannel {
   RpcChannel(this.socket)
       : _remote = '${socket.remoteAddress.address}:${socket.remotePort}' {
@@ -250,6 +272,8 @@ class DriverSupervisor {
   static const List<String> daemonCapabilities = ['hello', 'ping'];
   static const List<String> requiredCapabilities = ['hello', 'ping'];
   static const String protocolVersion = 'gaovm.v1.2';
+  static const int restartWindowLimit = 5;
+  static const Duration restartWindowDuration = Duration(minutes: 5);
 
   final String driverBinary;
   final String stateDir;
@@ -270,6 +294,10 @@ class DriverSupervisor {
   String? _lastFailure;
   String? _driverSocketPath;
   String? _authToken;
+  final RestartWindowLimiter _restartWindowLimiter = RestartWindowLimiter(
+    limit: restartWindowLimit,
+    window: restartWindowDuration,
+  );
 
   Future<void> restoreDesiredState() async {
     final file = File('$stateDir/desired_state.json');
@@ -657,6 +685,23 @@ class DriverSupervisor {
       unawaited(logger?.error(
               'driver permanent failure after $_restartAttempts attempts: ${_lastFailure ?? 'unknown'}') ??
           Future<void>.value());
+      await _persistRuntimeState();
+      return;
+    }
+    final now = DateTime.now();
+    if (_restartWindowLimiter.recordAndIsLimited(now)) {
+      _desiredRunning = false;
+      _lastFailure =
+          'Driver restart rate limit exceeded: $restartWindowLimit restarts within '
+          '${restartWindowDuration.inMinutes} minutes';
+      await _persistDesiredState();
+      _emit('driver.permanent_failure', {
+        'reason': _lastFailure,
+        'attempts': _restartAttempts,
+        'windowLimit': restartWindowLimit,
+        'windowSeconds': restartWindowDuration.inSeconds,
+      });
+      unawaited(logger?.error(_lastFailure!) ?? Future<void>.value());
       await _persistRuntimeState();
       return;
     }
