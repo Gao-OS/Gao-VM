@@ -1,0 +1,9 @@
+name: gaovm_rpc
+description: GaoVM length-prefixed JSON-RPC primitives
+version: 0.1.0
+publish_to: none
+environment:
+  sdk: ^3.0.0
+
+dev_dependencies:
+  test: ^1.25.0
