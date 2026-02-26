@@ -1,0 +1,5 @@
+# Dart tool state (generated)
+**/.dart_tool/
+
+# Swift Package Manager build output (generated)
+**/.build/
