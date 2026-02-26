@@ -7,3 +7,5 @@ environment:
 dependencies:
   gaovm_rpc:
     path: ../../libs/gaovm_rpc
+dev_dependencies:
+  test: ^1.25.0

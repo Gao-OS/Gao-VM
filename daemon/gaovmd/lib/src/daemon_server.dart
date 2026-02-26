@@ -11,6 +11,22 @@ import 'vm_config_store.dart';
 
 typedef EventEmitter = void Function(String type, Map<String, Object?> payload);
 
+class AsyncMutex {
+  Future<void> _tail = Future<void>.value();
+
+  Future<T> run<T>(Future<T> Function() action) {
+    final completer = Completer<T>();
+    _tail = _tail.catchError((_) {}).then((_) async {
+      try {
+        completer.complete(await action());
+      } catch (error, stackTrace) {
+        completer.completeError(error, stackTrace);
+      }
+    }).catchError((_) {});
+    return completer.future;
+  }
+}
+
 class RpcChannel {
   RpcChannel(this.socket)
       : _remote = '${socket.remoteAddress.address}:${socket.remotePort}' {
@@ -33,7 +49,8 @@ class RpcChannel {
   final Map<String, List<Completer<Map<String, Object?>>>> _requestWaiters = {};
   final Completer<void> _closed = Completer<void>();
   StreamSubscription<Map<String, Object?>>? _subscription;
-  Future<Map<String, Object?>?> Function(Map<String, Object?> request)? onRequest;
+  Future<Map<String, Object?>?> Function(Map<String, Object?> request)?
+      onRequest;
   int _nextId = -1;
   bool _isClosed = false;
   Future<void> _writeQueue = Future<void>.value();
@@ -44,7 +61,8 @@ class RpcChannel {
     final id = _nextId--;
     final completer = Completer<Map<String, Object?>>();
     _pendingResponses[id] = completer;
-    unawaited(_send(JsonRpcProtocol.request(id: id, method: method, params: params)));
+    unawaited(
+        _send(JsonRpcProtocol.request(id: id, method: method, params: params)));
     return completer.future;
   }
 
@@ -70,7 +88,8 @@ class RpcChannel {
     ));
   }
 
-  Future<Map<String, Object?>> waitForRequest(String method, {Duration? timeout}) {
+  Future<Map<String, Object?>> waitForRequest(String method,
+      {Duration? timeout}) {
     final completer = Completer<Map<String, Object?>>();
     _requestWaiters.putIfAbsent(method, () => []).add(completer);
     final future = completer.future;
@@ -98,14 +117,21 @@ class RpcChannel {
     if (_isClosed) {
       throw StateError('Channel is closed ($_remote)');
     }
-    _writeQueue = _writeQueue.then((_) async {
+    late Future<void> op;
+    op = _writeQueue.catchError((_) {}).then((_) async {
       if (_isClosed) {
         throw StateError('Channel is closed ($_remote)');
       }
-      socket.add(_codec.encodeObject(object));
-      await socket.flush();
+      try {
+        socket.add(_codec.encodeObject(object));
+        await socket.flush();
+      } catch (error) {
+        _closeWithError(StateError('Socket write failed ($_remote): $error'));
+        rethrow;
+      }
     });
-    await _writeQueue;
+    _writeQueue = op.catchError((_) {});
+    await op;
   }
 
   void _onMessage(Map<String, Object?> message) {
@@ -299,7 +325,10 @@ class DriverSupervisor {
   }
 
   Future<void> _reconcileTick() async {
-    if (_desiredRunning && _driverChannel == null && !_startInProgress && _restartTimer == null) {
+    if (_desiredRunning &&
+        _driverChannel == null &&
+        !_startInProgress &&
+        _restartTimer == null) {
       await _startDriverIfNeeded();
     }
   }
@@ -321,21 +350,27 @@ class DriverSupervisor {
       _authToken = _generateToken();
       final driverLogPath = '$stateDir/logs/gaovm-driver-vz.log';
 
-      final process = await Process.start(driverBinary, [
-        '--socket-path',
-        socketPath,
-      ], runInShell: false, environment: {
-        ...Platform.environment,
-        'GAOVM_AUTH_TOKEN': _authToken!,
-        'GAOVM_DRIVER_LOG_PATH': driverLogPath,
-      });
+      final process = await Process.start(
+          driverBinary,
+          [
+            '--socket-path',
+            socketPath,
+          ],
+          runInShell: false,
+          environment: {
+            ...Platform.environment,
+            'GAOVM_AUTH_TOKEN': _authToken!,
+            'GAOVM_DRIVER_LOG_PATH': driverLogPath,
+          });
       _process = process;
       process.stderr.transform(utf8.decoder).listen((data) {
-        unawaited(logger?.warn('driver stderr: ${data.trimRight()}') ?? Future<void>.value());
+        unawaited(logger?.warn('driver stderr: ${data.trimRight()}') ??
+            Future<void>.value());
         stderr.write('[vz_macos stderr] $data');
       });
       process.stdout.transform(utf8.decoder).listen((data) {
-        unawaited(logger?.info('driver stdout: ${data.trimRight()}') ?? Future<void>.value());
+        unawaited(logger?.info('driver stdout: ${data.trimRight()}') ??
+            Future<void>.value());
         stdout.write('[vz_macos stdout] $data');
       });
       unawaited(process.exitCode.then(_onDriverExit));
@@ -353,12 +388,15 @@ class DriverSupervisor {
         'pid': process.pid,
         'socketPath': socketPath,
       });
-      unawaited(logger?.info('driver started pid=${process.pid} socket=$socketPath') ?? Future<void>.value());
+      unawaited(logger
+              ?.info('driver started pid=${process.pid} socket=$socketPath') ??
+          Future<void>.value());
       await _persistRuntimeState();
     } catch (error) {
       _lastFailure = 'Driver start failed: $error';
       _emit('driver.start_failed', {'error': error.toString()});
-      unawaited(logger?.error('driver start failed: $error') ?? Future<void>.value());
+      unawaited(
+          logger?.error('driver start failed: $error') ?? Future<void>.value());
       final process = _process;
       if (process != null) {
         process.kill(ProcessSignal.sigkill);
@@ -385,11 +423,14 @@ class DriverSupervisor {
         await Future<void>.delayed(const Duration(milliseconds: 200));
       }
     }
-    throw StateError('Timed out connecting to driver socket $socketPath: ${lastError ?? 'unknown error'}');
+    throw StateError(
+        'Timed out connecting to driver socket $socketPath: ${lastError ?? 'unknown error'}');
   }
 
-  Future<void> _performHandshake(RpcChannel channel, {required String expectedToken}) async {
-    final helloRequest = await channel.waitForRequest('hello', timeout: const Duration(seconds: 5));
+  Future<void> _performHandshake(RpcChannel channel,
+      {required String expectedToken}) async {
+    final helloRequest = await channel.waitForRequest('hello',
+        timeout: const Duration(seconds: 5));
     final params = _asMap(helloRequest['params']);
     final protocol = params['protocol'];
     final token = params['authToken'];
@@ -445,7 +486,8 @@ class DriverSupervisor {
     }).timeout(const Duration(seconds: 5));
 
     if (daemonHelloResponse['error'] != null) {
-      throw StateError('Driver rejected daemon hello: ${daemonHelloResponse['error']}');
+      throw StateError(
+          'Driver rejected daemon hello: ${daemonHelloResponse['error']}');
     }
     final result = _asMap(daemonHelloResponse['result']);
     final daemonAccepted = _asStringList(result['acceptedCapabilities']);
@@ -575,7 +617,8 @@ class DriverSupervisor {
       'pid': exitedPid,
       'exitCode': exitCode,
     });
-    unawaited(logger?.warn('driver exited pid=$exitedPid code=$exitCode') ?? Future<void>.value());
+    unawaited(logger?.warn('driver exited pid=$exitedPid code=$exitCode') ??
+        Future<void>.value());
     if (_desiredRunning && !_stopInProgress) {
       _lastFailure = 'Driver exited unexpectedly with code $exitCode';
       await _scheduleRestartOrPermanentFailure();
@@ -590,6 +633,10 @@ class DriverSupervisor {
     _heartbeatTimer?.cancel();
     _heartbeatTimer = null;
     _driverChannel = null;
+    if (_desiredRunning && !_stopInProgress) {
+      _lastFailure = 'Driver control channel closed unexpectedly';
+      await _scheduleRestartOrPermanentFailure();
+    }
     await _persistRuntimeState();
   }
 
@@ -607,7 +654,9 @@ class DriverSupervisor {
         'reason': _lastFailure ?? 'restart attempts exhausted',
         'attempts': _restartAttempts,
       });
-      unawaited(logger?.error('driver permanent failure after $_restartAttempts attempts: ${_lastFailure ?? 'unknown'}') ?? Future<void>.value());
+      unawaited(logger?.error(
+              'driver permanent failure after $_restartAttempts attempts: ${_lastFailure ?? 'unknown'}') ??
+          Future<void>.value());
       await _persistRuntimeState();
       return;
     }
@@ -661,12 +710,15 @@ class DriverSupervisor {
     });
   }
 
-  Future<Map<String, Object?>> driverExec(String method, {Object? params}) async {
+  Future<Map<String, Object?>> driverExec(String method,
+      {Object? params}) async {
     final channel = _driverChannel;
     if (channel == null) {
       throw StateError('Driver is not running');
     }
-    final response = await channel.sendRequest(method, params: params).timeout(const Duration(seconds: 5));
+    final response = await channel
+        .sendRequest(method, params: params)
+        .timeout(const Duration(seconds: 5));
     if (response['error'] != null) {
       throw StateError('Driver error: ${response['error']}');
     }
@@ -675,7 +727,8 @@ class DriverSupervisor {
 
   Future<Map<String, Object?>> doctor() async {
     final driverFile = File(driverBinary);
-    final socketFile = _driverSocketPath == null ? null : File(_driverSocketPath!);
+    final socketFile =
+        _driverSocketPath == null ? null : File(_driverSocketPath!);
     return {
       'ok': true,
       'daemon': status(),
@@ -683,7 +736,8 @@ class DriverSupervisor {
         'driverBinaryPath': driverBinary,
         'driverBinaryExists': await driverFile.exists(),
         'driverSocketPath': _driverSocketPath,
-        'driverSocketExists': socketFile == null ? false : await socketFile.exists(),
+        'driverSocketExists':
+            socketFile == null ? false : await socketFile.exists(),
         'stateDir': stateDir,
         'stateDirExists': await Directory(stateDir).exists(),
       },
@@ -714,7 +768,12 @@ class DaemonRpcServer {
   final VmConfigStore configStore;
   final RotatingLogger? logger;
   final List<_ClientSession> _clients = [];
+  final AsyncMutex lifecycleMutex = AsyncMutex();
   ServerSocket? _server;
+
+  Future<T> runLifecycleOperation<T>(Future<T> Function() action) {
+    return lifecycleMutex.run(action);
+  }
 
   Future<void> start() async {
     final socketFile = File(socketPath);
@@ -751,7 +810,8 @@ class DaemonRpcServer {
     await supervisor.dispose();
   }
 
-  void emitEvent(String type, Map<String, Object?> payload) => _emitEvent(type, payload);
+  void emitEvent(String type, Map<String, Object?> payload) =>
+      _emitEvent(type, payload);
 
   void _emitEvent(String type, Map<String, Object?> payload) {
     final event = <String, Object?>{
@@ -760,7 +820,9 @@ class DaemonRpcServer {
       'ts': DateTime.now().toUtc().toIso8601String(),
     };
     stdout.writeln('[event] ${jsonEncode(event)}');
-    unawaited(logger?.debug('event ${event['type']}: ${jsonEncode(event['payload'])}') ?? Future<void>.value());
+    unawaited(logger?.debug(
+            'event ${event['type']}: ${jsonEncode(event['payload'])}') ??
+        Future<void>.value());
     for (final client in _clients) {
       if (client.subscribed) {
         unawaited(client.channel.sendNotification('event', params: event));
@@ -770,7 +832,8 @@ class DaemonRpcServer {
 }
 
 class _ClientSession {
-  _ClientSession({required this.server, required Socket socket}) : channel = RpcChannel(socket);
+  _ClientSession({required this.server, required Socket socket})
+      : channel = RpcChannel(socket);
 
   static const List<String> daemonCapabilities = [
     'hello',
@@ -803,7 +866,16 @@ class _ClientSession {
 
   Future<void> close() => channel.close();
 
-  Future<Map<String, Object?>?> _handleRequest(Map<String, Object?> request) async {
+  Map<String, Object?> _invalidParams(Object? id, String message) {
+    return JsonRpcProtocol.error(
+      id: id,
+      code: JsonRpcErrorCode.invalidParams,
+      message: message,
+    );
+  }
+
+  Future<Map<String, Object?>?> _handleRequest(
+      Map<String, Object?> request) async {
     final method = request['method'] as String;
     final id = request['id'];
     final params = _asMap(request['params']);
@@ -878,24 +950,36 @@ class _ClientSession {
           }
         ]);
       case 'vm.start':
-        if (server.supervisor.status()['actual'] != 'running') {
-          await server.configStore.activatePendingIfPresent(emitEvent: server.emitEvent);
-        }
-        await server.supervisor.start();
-        final cfg = await server.configStore.getCurrentConfig();
-        await server.supervisor.driverExec('vm.configure', params: {'config': cfg});
-        await server.supervisor.driverExec('vm.start');
-        return JsonRpcProtocol.result(id: id, result: server.supervisor.status());
-      case 'vm.stop':
-        if (server.supervisor.status()['actual'] == 'running') {
+        return server.runLifecycleOperation(() async {
           try {
-            await server.supervisor.driverExec('vm.stop');
-          } catch (_) {
-            // Continue with supervisor stop; process shutdown will stop the VM.
+            if (server.supervisor.status()['actual'] != 'running') {
+              await server.configStore
+                  .activatePendingIfPresent(emitEvent: server.emitEvent);
+            }
+            await server.supervisor.start();
+            final cfg = await server.configStore.getCurrentConfig();
+            await server.supervisor
+                .driverExec('vm.configure', params: {'config': cfg});
+            await server.supervisor.driverExec('vm.start');
+            return JsonRpcProtocol.result(
+                id: id, result: server.supervisor.status());
+          } on ConfigValidationException catch (error) {
+            return _invalidParams(id, error.message);
           }
-        }
-        await server.supervisor.stop();
-        return JsonRpcProtocol.result(id: id, result: server.supervisor.status());
+        });
+      case 'vm.stop':
+        return server.runLifecycleOperation(() async {
+          if (server.supervisor.status()['actual'] == 'running') {
+            try {
+              await server.supervisor.driverExec('vm.stop');
+            } catch (_) {
+              // Continue with supervisor stop; process shutdown will stop the VM.
+            }
+          }
+          await server.supervisor.stop();
+          return JsonRpcProtocol.result(
+              id: id, result: server.supervisor.status());
+        });
       case 'vm.status':
         final base = Map<String, Object?>.from(server.supervisor.status());
         if (base['actual'] == 'running') {
@@ -914,25 +998,39 @@ class _ClientSession {
         final response = await server.supervisor.driverExec('close_display');
         return JsonRpcProtocol.result(id: id, result: response['result']);
       case 'vm.config.get':
-        return JsonRpcProtocol.result(id: id, result: await server.configStore.getConfigSnapshot());
+        return JsonRpcProtocol.result(
+            id: id, result: await server.configStore.getConfigSnapshot());
       case 'vm.config.set':
-        final config = _asMap(params['config']);
-        final result = await server.configStore.setConfig(
-          config,
-          isRunning: server.supervisor.status()['actual'] == 'running',
-          emitEvent: server.emitEvent,
-        );
-        return JsonRpcProtocol.result(id: id, result: result);
+        return server.runLifecycleOperation(() async {
+          try {
+            final config = _asMap(params['config']);
+            final result = await server.configStore.setConfig(
+              config,
+              isRunning: server.supervisor.status()['actual'] == 'running',
+              emitEvent: server.emitEvent,
+            );
+            return JsonRpcProtocol.result(id: id, result: result);
+          } on ConfigValidationException catch (error) {
+            return _invalidParams(id, error.message);
+          }
+        });
       case 'vm.config.patch':
-        final patch = _asMap(params['patch']);
-        final result = await server.configStore.patchConfig(
-          patch,
-          isRunning: server.supervisor.status()['actual'] == 'running',
-          emitEvent: server.emitEvent,
-        );
-        return JsonRpcProtocol.result(id: id, result: result);
+        return server.runLifecycleOperation(() async {
+          try {
+            final patch = _asMap(params['patch']);
+            final result = await server.configStore.patchConfig(
+              patch,
+              isRunning: server.supervisor.status()['actual'] == 'running',
+              emitEvent: server.emitEvent,
+            );
+            return JsonRpcProtocol.result(id: id, result: result);
+          } on ConfigValidationException catch (error) {
+            return _invalidParams(id, error.message);
+          }
+        });
       case 'doctor':
-        return JsonRpcProtocol.result(id: id, result: await server.supervisor.doctor());
+        return JsonRpcProtocol.result(
+            id: id, result: await server.supervisor.doctor());
       case 'driver.exec':
         final driverMethod = params['method']?.toString();
         if (driverMethod == null || driverMethod.isEmpty) {
@@ -980,7 +1078,8 @@ List<String> _asStringList(Object? value) {
   return value.map((e) => e.toString()).toList(growable: false);
 }
 
-List<String> _negotiateCapabilities(List<String> offered, List<String> supported) {
+List<String> _negotiateCapabilities(
+    List<String> offered, List<String> supported) {
   final supportedSet = supported.toSet();
   return offered.where(supportedSet.contains).toList(growable: false);
 }

@@ -3,7 +3,17 @@ import 'dart:io';
 
 import 'atomic_json_file.dart';
 
-typedef ConfigEventEmitter = void Function(String type, Map<String, Object?> payload);
+typedef ConfigEventEmitter = void Function(
+    String type, Map<String, Object?> payload);
+
+class ConfigValidationException implements Exception {
+  ConfigValidationException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => 'ConfigValidationException: $message';
+}
 
 class VmConfigStore {
   VmConfigStore({required this.stateDir});
@@ -63,7 +73,8 @@ class VmConfigStore {
     final base = isRunning && pending != null ? pending : current;
     final merged = _deepMergeMap(base, patch);
     _validateFullConfig(merged);
-    final result = await _writeConfig(merged, isRunning: isRunning, emitEvent: emitEvent);
+    final result =
+        await _writeConfig(merged, isRunning: isRunning, emitEvent: emitEvent);
     return {
       ...result,
       'patchedFrom': isRunning && pending != null ? 'pending' : 'current',
@@ -82,7 +93,9 @@ class VmConfigStore {
     if (isRunning && restartRequired) {
       await AtomicJsonFile(_pendingPath).write(nextConfig);
       emitEvent(
-        pendingBefore == null ? 'event.pending_config_written' : 'event.pending_config_replaced',
+        pendingBefore == null
+            ? 'event.pending_config_written'
+            : 'event.pending_config_replaced',
         {
           'restartRequired': true,
           'currentConfigUnchanged': true,
@@ -117,7 +130,8 @@ class VmConfigStore {
     };
   }
 
-  Future<bool> activatePendingIfPresent({required ConfigEventEmitter emitEvent}) async {
+  Future<bool> activatePendingIfPresent(
+      {required ConfigEventEmitter emitEvent}) async {
     final pending = await getPendingConfig();
     if (pending == null) {
       return false;
@@ -137,7 +151,8 @@ class VmConfigStore {
     final text = await file.readAsString();
     final decoded = jsonDecode(text);
     if (decoded is! Map) {
-      throw StateError('Config file must contain a JSON object: ${file.path}');
+      throw ConfigValidationException(
+          'Config file must contain a JSON object: ${file.path}');
     }
     return Map<String, Object?>.from(decoded);
   }
@@ -145,15 +160,20 @@ class VmConfigStore {
   void _validateFullConfig(Map<String, Object?> config) {
     final allowedTop = {'cpu', 'memory', 'boot', 'disk', 'network', 'graphics'};
     final actualTop = config.keys.toSet();
-    if (!actualTop.containsAll(allowedTop) || !allowedTop.containsAll(actualTop)) {
-      throw StateError('Config must contain exactly keys: ${allowedTop.toList()..sort()}');
+    if (!actualTop.containsAll(allowedTop) ||
+        !allowedTop.containsAll(actualTop)) {
+      throw ConfigValidationException(
+        'Config must contain exactly keys: ${allowedTop.toList()..sort()}',
+      );
     }
 
     _requireInt(config, 'cpu', min: 1);
     _requireInt(config, 'memory', min: 134217728);
 
     final boot = _requireObject(config, 'boot');
-    _requireExactKeys(boot, {'loader', 'kernelPath', 'initrdPath', 'commandLine'}, path: 'boot');
+    _requireExactKeys(
+        boot, {'loader', 'kernelPath', 'initrdPath', 'commandLine'},
+        path: 'boot');
     _requireString(boot, 'loader', path: 'boot');
     _requireStringOrNull(boot, 'kernelPath', path: 'boot');
     _requireStringOrNull(boot, 'initrdPath', path: 'boot');
@@ -164,7 +184,8 @@ class VmConfigStore {
     _requireStringOrNull(disk, 'path', path: 'disk');
     final diskSize = disk['sizeMiB'];
     if (diskSize != null && (diskSize is! int || diskSize < 64)) {
-      throw StateError('disk.sizeMiB must be null or an integer >= 64');
+      throw ConfigValidationException(
+          'disk.sizeMiB must be null or an integer >= 64');
     }
 
     final network = _requireObject(config, 'network');
@@ -172,7 +193,8 @@ class VmConfigStore {
     _requireString(network, 'mode', path: 'network');
 
     final graphics = _requireObject(config, 'graphics');
-    _requireExactKeys(graphics, {'enabled', 'width', 'height'}, path: 'graphics');
+    _requireExactKeys(graphics, {'enabled', 'width', 'height'},
+        path: 'graphics');
     _requireBool(graphics, 'enabled', path: 'graphics');
     _requireInt(graphics, 'width', min: 64);
     _requireInt(graphics, 'height', min: 64);
@@ -180,21 +202,23 @@ class VmConfigStore {
 
   void _validatePatch(Map<String, Object?> patch) {
     if (patch.isEmpty) {
-      throw StateError('Config patch must not be empty');
+      throw ConfigValidationException('Config patch must not be empty');
     }
     final allowedTop = {'cpu', 'memory', 'boot', 'disk', 'network', 'graphics'};
     for (final entry in patch.entries) {
       if (!allowedTop.contains(entry.key)) {
-        throw StateError('Unsupported config patch key: ${entry.key}');
+        throw ConfigValidationException(
+            'Unsupported config patch key: ${entry.key}');
       }
       switch (entry.key) {
         case 'cpu':
           if (entry.value is! int || (entry.value as int) < 1) {
-            throw StateError('cpu must be an integer >= 1');
+            throw ConfigValidationException('cpu must be an integer >= 1');
           }
         case 'memory':
           if (entry.value is! int || (entry.value as int) < 134217728) {
-            throw StateError('memory must be an integer >= 134217728');
+            throw ConfigValidationException(
+                'memory must be an integer >= 134217728');
           }
         case 'boot':
           _validatePatchObject(
@@ -204,53 +228,66 @@ class VmConfigStore {
           );
           final boot = Map<String, Object?>.from(entry.value as Map);
           if (boot.containsKey('loader') && boot['loader'] is! String) {
-            throw StateError('boot.loader must be a string');
+            throw ConfigValidationException('boot.loader must be a string');
           }
           if (boot.containsKey('kernelPath') &&
               boot['kernelPath'] != null &&
               boot['kernelPath'] is! String) {
-            throw StateError('boot.kernelPath must be a string or null');
+            throw ConfigValidationException(
+                'boot.kernelPath must be a string or null');
           }
           if (boot.containsKey('initrdPath') &&
               boot['initrdPath'] != null &&
               boot['initrdPath'] is! String) {
-            throw StateError('boot.initrdPath must be a string or null');
+            throw ConfigValidationException(
+                'boot.initrdPath must be a string or null');
           }
           if (boot.containsKey('commandLine') &&
               boot['commandLine'] != null &&
               boot['commandLine'] is! String) {
-            throw StateError('boot.commandLine must be a string or null');
+            throw ConfigValidationException(
+                'boot.commandLine must be a string or null');
           }
         case 'disk':
-          _validatePatchObject(entry.value, allowedKeys: {'path', 'sizeMiB'}, path: 'disk');
+          _validatePatchObject(entry.value,
+              allowedKeys: {'path', 'sizeMiB'}, path: 'disk');
           final disk = Map<String, Object?>.from(entry.value as Map);
-          if (disk.containsKey('path') && disk['path'] != null && disk['path'] is! String) {
-            throw StateError('disk.path must be a string or null');
+          if (disk.containsKey('path') &&
+              disk['path'] != null &&
+              disk['path'] is! String) {
+            throw ConfigValidationException(
+                'disk.path must be a string or null');
           }
           if (disk.containsKey('sizeMiB') &&
               disk['sizeMiB'] != null &&
               (disk['sizeMiB'] is! int || (disk['sizeMiB'] as int) < 64)) {
-            throw StateError('disk.sizeMiB must be null or an integer >= 64');
+            throw ConfigValidationException(
+                'disk.sizeMiB must be null or an integer >= 64');
           }
         case 'network':
-          _validatePatchObject(entry.value, allowedKeys: {'mode'}, path: 'network');
+          _validatePatchObject(entry.value,
+              allowedKeys: {'mode'}, path: 'network');
           final network = Map<String, Object?>.from(entry.value as Map);
           if (network.containsKey('mode') && network['mode'] is! String) {
-            throw StateError('network.mode must be a string');
+            throw ConfigValidationException('network.mode must be a string');
           }
         case 'graphics':
-          _validatePatchObject(entry.value, allowedKeys: {'enabled', 'width', 'height'}, path: 'graphics');
+          _validatePatchObject(entry.value,
+              allowedKeys: {'enabled', 'width', 'height'}, path: 'graphics');
           final graphics = Map<String, Object?>.from(entry.value as Map);
           if (graphics.containsKey('enabled') && graphics['enabled'] is! bool) {
-            throw StateError('graphics.enabled must be a bool');
+            throw ConfigValidationException('graphics.enabled must be a bool');
           }
           if (graphics.containsKey('width') &&
               (graphics['width'] is! int || (graphics['width'] as int) < 64)) {
-            throw StateError('graphics.width must be an integer >= 64');
+            throw ConfigValidationException(
+                'graphics.width must be an integer >= 64');
           }
           if (graphics.containsKey('height') &&
-              (graphics['height'] is! int || (graphics['height'] as int) < 64)) {
-            throw StateError('graphics.height must be an integer >= 64');
+              (graphics['height'] is! int ||
+                  (graphics['height'] as int) < 64)) {
+            throw ConfigValidationException(
+                'graphics.height must be an integer >= 64');
           }
       }
     }
@@ -262,20 +299,21 @@ class VmConfigStore {
     required String path,
   }) {
     if (value is! Map) {
-      throw StateError('$path patch must be a JSON object');
+      throw ConfigValidationException('$path patch must be a JSON object');
     }
     final obj = Map<String, Object?>.from(value);
     if (obj.isEmpty) {
-      throw StateError('$path patch must not be empty');
+      throw ConfigValidationException('$path patch must not be empty');
     }
     for (final key in obj.keys) {
       if (!allowedKeys.contains(key)) {
-        throw StateError('Unsupported $path patch key: $key');
+        throw ConfigValidationException('Unsupported $path patch key: $key');
       }
     }
   }
 
-  Map<String, Object?> _deepMergeMap(Map<String, Object?> base, Map<String, Object?> patch) {
+  Map<String, Object?> _deepMergeMap(
+      Map<String, Object?> base, Map<String, Object?> patch) {
     final out = <String, Object?>{};
     for (final entry in base.entries) {
       out[entry.key] = _cloneJsonValue(entry.value);
@@ -312,43 +350,50 @@ class VmConfigStore {
   Map<String, Object?> _requireObject(Map<String, Object?> parent, String key) {
     final value = parent[key];
     if (value is! Map) {
-      throw StateError('$key must be an object');
+      throw ConfigValidationException('$key must be an object');
     }
     return Map<String, Object?>.from(value);
   }
 
-  void _requireExactKeys(Map<String, Object?> obj, Set<String> keys, {required String path}) {
+  void _requireExactKeys(Map<String, Object?> obj, Set<String> keys,
+      {required String path}) {
     final actual = obj.keys.toSet();
     if (!actual.containsAll(keys) || !keys.containsAll(actual)) {
-      throw StateError('$path must contain exactly keys: ${keys.toList()..sort()}');
+      throw ConfigValidationException(
+          '$path must contain exactly keys: ${keys.toList()..sort()}');
     }
   }
 
   void _requireInt(Map<String, Object?> obj, String key, {required int min}) {
     final value = obj[key];
     if (value is! int || value < min) {
-      throw StateError('$key must be an integer >= $min');
+      throw ConfigValidationException('$key must be an integer >= $min');
     }
   }
 
   void _requireString(Map<String, Object?> obj, String key, {String? path}) {
     final value = obj[key];
     if (value is! String) {
-      throw StateError('${path == null ? key : '$path.$key'} must be a string');
+      throw ConfigValidationException(
+          '${path == null ? key : '$path.$key'} must be a string');
     }
   }
 
-  void _requireStringOrNull(Map<String, Object?> obj, String key, {String? path}) {
+  void _requireStringOrNull(Map<String, Object?> obj, String key,
+      {String? path}) {
     final value = obj[key];
     if (value != null && value is! String) {
-      throw StateError('${path == null ? key : '$path.$key'} must be a string or null');
+      throw ConfigValidationException(
+        '${path == null ? key : '$path.$key'} must be a string or null',
+      );
     }
   }
 
   void _requireBool(Map<String, Object?> obj, String key, {String? path}) {
     final value = obj[key];
     if (value is! bool) {
-      throw StateError('${path == null ? key : '$path.$key'} must be a bool');
+      throw ConfigValidationException(
+          '${path == null ? key : '$path.$key'} must be a bool');
     }
   }
 
@@ -378,14 +423,17 @@ class VmConfigStore {
   }
 }
 
-bool _hasRestartRequiredChange(Map<String, Object?> current, Map<String, Object?> next) {
+bool _hasRestartRequiredChange(
+    Map<String, Object?> current, Map<String, Object?> next) {
   if (!_jsonEquals(current['cpu'], next['cpu'])) return true;
   if (!_jsonEquals(current['memory'], next['memory'])) return true;
   if (!_jsonEquals(current['boot'], next['boot'])) return true;
-  if (!_jsonEquals(_getPath(current, ['disk', 'path']), _getPath(next, ['disk', 'path']))) {
+  if (!_jsonEquals(
+      _getPath(current, ['disk', 'path']), _getPath(next, ['disk', 'path']))) {
     return true;
   }
-  if (!_jsonEquals(_getPath(current, ['network', 'mode']), _getPath(next, ['network', 'mode']))) {
+  if (!_jsonEquals(_getPath(current, ['network', 'mode']),
+      _getPath(next, ['network', 'mode']))) {
     return true;
   }
   if (!_jsonEquals(current['graphics'], next['graphics'])) return true;
