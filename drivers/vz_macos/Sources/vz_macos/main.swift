@@ -260,6 +260,8 @@ final class UnixListener {
 
 final class VmRuntime {
     private let logger: RotatingLogger
+    private let vmQueue = DispatchQueue(label: "gaovm.driver.vm")
+    private let vmQueueKey = DispatchSpecificKey<UInt8>()
     private var config: [String: Any]?
 #if canImport(Virtualization)
     private var virtualMachine: VZVirtualMachine?
@@ -272,13 +274,16 @@ final class VmRuntime {
 
     init(logger: RotatingLogger) {
         self.logger = logger
+        vmQueue.setSpecific(key: vmQueueKey, value: 1)
     }
 
     func configure(with config: [String: Any]) throws -> [String: Any] {
-        _ = try normalizedConfig(config)
-        self.config = config
-        logger.log(.info, "vm configured")
-        return status()
+        try onVmQueue {
+            _ = try normalizedConfig(config)
+            self.config = config
+            logger.log(.info, "vm configured")
+            return statusLocked()
+        }
     }
 
     func start() throws -> [String: Any] {
@@ -289,40 +294,44 @@ final class VmRuntime {
         guard let config else {
             throw DriverError.invalidArgs("vm is not configured")
         }
-        let spec = try normalizedConfig(config)
-        if let vm = virtualMachine {
-            switch vm.state {
-            case .running, .starting, .pausing, .paused, .resuming, .stopping, .saving, .restoring:
-                return status()
-            case .stopped, .error:
-                break
-            @unknown default:
-                break
+        return try onVmQueue {
+            let spec = try normalizedConfig(config)
+            if let vm = virtualMachine {
+                switch vm.state {
+                case .running, .starting, .pausing, .paused, .resuming, .stopping, .saving, .restoring:
+                    return statusLocked()
+                case .stopped, .error:
+                    break
+                @unknown default:
+                    break
+                }
             }
-        }
 
-        try ensureSparseDisk(spec.diskPath, sizeMiB: spec.diskSizeMiB)
-        let vmConfig = try buildConfiguration(spec)
-        let vm = VZVirtualMachine(configuration: vmConfig)
-        virtualMachine = vm
+            try ensureSparseDisk(spec.diskPath, sizeMiB: spec.diskSizeMiB)
+            let vmConfig = try buildConfiguration(spec)
+            let vm = VZVirtualMachine(configuration: vmConfig)
+            virtualMachine = vm
 
-        let sem = DispatchSemaphore(value: 0)
-        var startError: Error?
-        vm.start { result in
-            switch result {
-            case .success:
-                break
-            case .failure(let err):
-                startError = err
+            let sem = DispatchSemaphore(value: 0)
+            var startError: Error?
+            vm.start { result in
+                switch result {
+                case .success:
+                    break
+                case .failure(let err):
+                    startError = err
+                }
+                sem.signal()
             }
-            sem.signal()
+            if sem.wait(timeout: .now() + 30) == .timedOut {
+                throw DriverError.io("vm start timed out after 30s")
+            }
+            if let startError {
+                throw startError
+            }
+            logger.log(.info, "vm started")
+            return statusLocked()
         }
-        _ = sem.wait(timeout: .now() + 30)
-        if let startError {
-            throw startError
-        }
-        logger.log(.info, "vm started")
-        return status()
 #else
         throw DriverError.invalidArgs("Virtualization.framework unavailable")
 #endif
@@ -333,39 +342,49 @@ final class VmRuntime {
         guard #available(macOS 14.0, *) else {
             throw DriverError.invalidArgs("Virtualization.framework requires macOS 14+")
         }
-        guard let vm = virtualMachine else {
-            return status()
-        }
+        return try onVmQueue {
+            guard let vm = virtualMachine else {
+                return statusLocked()
+            }
 
-        if vm.canRequestStop {
-            try vm.requestStop()
-            logger.log(.info, "vm stop requested")
+            switch vm.state {
+            case .stopped:
+                return statusLocked()
+            case .error:
+                logger.log(.warn, "vm stop requested while VM is in error state")
+                return statusLocked()
+            default:
+                break
+            }
+
+            if vm.canRequestStop {
+                try vm.requestStop()
+                logger.log(.info, "vm stop requested")
+                if waitForStoppedState(vm, timeoutSeconds: 30) {
+                    logger.log(.info, "vm stopped after graceful requestStop")
+                    return statusLocked()
+                }
+                logger.log(.warn, "vm did not stop within 30s after requestStop; attempting force stop")
+            } else {
+                logger.log(.warn, "vm cannot requestStop; attempting force stop")
+            }
+
+            try forceStop(vm, timeoutSeconds: 5)
+            if waitForStoppedState(vm, timeoutSeconds: 5) {
+                logger.log(.info, "vm force-stopped")
+                return statusLocked()
+            }
+            throw DriverError.io("vm stop timed out: VM did not reach stopped state")
         }
-        return status()
 #else
         throw DriverError.invalidArgs("Virtualization.framework unavailable")
 #endif
     }
 
     func status() -> [String: Any] {
-        var out: [String: Any] = [
-            "configured": config != nil,
-            "graphicsWindowOpen": isDisplayOpen()
-        ]
-#if canImport(Virtualization)
-        if let vm = virtualMachine {
-            out["state"] = vmStateName(vm.state)
-            out["canStart"] = vm.canStart
-            out["canPause"] = vm.canPause
-            out["canResume"] = vm.canResume
-            out["canRequestStop"] = vm.canRequestStop
-        } else {
-            out["state"] = "not_created"
+        return onVmQueue {
+            statusLocked()
         }
-#else
-        out["state"] = "virtualization_unavailable"
-#endif
-        return out
     }
 
     func openDisplay() throws -> [String: Any] {
@@ -373,10 +392,13 @@ final class VmRuntime {
             throw DriverError.invalidArgs("display requires macOS 14+")
         }
 #if canImport(AppKit) && canImport(Virtualization)
-        guard let vm = virtualMachine else {
-            throw DriverError.invalidArgs("vm is not created")
+        let (vm, spec): (VZVirtualMachine, NormalizedVmConfig) = try onVmQueue {
+            guard let vm = virtualMachine else {
+                throw DriverError.invalidArgs("vm is not created")
+            }
+            let spec = try currentNormalizedConfig()
+            return (vm, spec)
         }
-        let spec = try currentNormalizedConfig()
         guard spec.graphicsEnabled else {
             throw DriverError.invalidArgs("graphics is disabled in config")
         }
@@ -590,6 +612,71 @@ final class VmRuntime {
         }
         return try normalizedConfig(config)
     }
+
+    private func onVmQueue<T>(_ work: () throws -> T) rethrows -> T {
+        if DispatchQueue.getSpecific(key: vmQueueKey) != nil {
+            return try work()
+        }
+        return try vmQueue.sync(execute: work)
+    }
+
+#if canImport(Virtualization)
+    private func statusLocked() -> [String: Any] {
+        var out: [String: Any] = [
+            "configured": config != nil,
+            "graphicsWindowOpen": isDisplayOpen()
+        ]
+        if let vm = virtualMachine {
+            out["state"] = vmStateName(vm.state)
+            out["canStart"] = vm.canStart
+            out["canPause"] = vm.canPause
+            out["canResume"] = vm.canResume
+            out["canRequestStop"] = vm.canRequestStop
+        } else {
+            out["state"] = "not_created"
+        }
+        return out
+    }
+
+    private func waitForStoppedState(_ vm: VZVirtualMachine, timeoutSeconds: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while Date() < deadline {
+            switch vm.state {
+            case .stopped:
+                return true
+            case .error:
+                return false
+            default:
+                usleep(200_000)
+            }
+        }
+        return vm.state == .stopped
+    }
+
+    @available(macOS 14.0, *)
+    private func forceStop(_ vm: VZVirtualMachine, timeoutSeconds: TimeInterval) throws {
+        let sem = DispatchSemaphore(value: 0)
+        var stopError: Error?
+        vm.stop { error in
+            stopError = error
+            sem.signal()
+        }
+        if sem.wait(timeout: .now() + timeoutSeconds) == .timedOut {
+            throw DriverError.io("vm force stop callback timed out after \(Int(timeoutSeconds))s")
+        }
+        if let stopError {
+            throw stopError
+        }
+    }
+#else
+    private func statusLocked() -> [String: Any] {
+        [
+            "configured": config != nil,
+            "graphicsWindowOpen": isDisplayOpen(),
+            "state": "virtualization_unavailable"
+        ]
+    }
+#endif
 
     private func isDisplayOpen() -> Bool {
 #if canImport(AppKit) && canImport(Virtualization)
@@ -929,7 +1016,8 @@ do {
 #if canImport(AppKit)
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
-    DispatchQueue.global(qos: .userInitiated).async {
+    let driverQueue = DispatchQueue(label: "gaovm.driver.rpc", qos: .userInitiated)
+    driverQueue.async {
         do {
             try driver.run()
         } catch {
