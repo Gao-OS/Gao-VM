@@ -244,13 +244,294 @@ final class UnixListener {
     deinit { close() }
 }
 
+final class VmRuntime {
+    private let logger: RotatingLogger
+    private var config: [String: Any]?
+#if canImport(Virtualization)
+    private var virtualMachine: VZVirtualMachine?
+#endif
+
+    init(logger: RotatingLogger) {
+        self.logger = logger
+    }
+
+    func configure(with config: [String: Any]) throws -> [String: Any] {
+        _ = try normalizedConfig(config)
+        self.config = config
+        logger.log(.info, "vm configured")
+        return status()
+    }
+
+    func start() throws -> [String: Any] {
+#if canImport(Virtualization)
+        guard #available(macOS 14.0, *) else {
+            throw DriverError.invalidArgs("Virtualization.framework requires macOS 14+")
+        }
+        guard let config else {
+            throw DriverError.invalidArgs("vm is not configured")
+        }
+        let spec = try normalizedConfig(config)
+        if let vm = virtualMachine {
+            switch vm.state {
+            case .running, .starting, .pausing, .paused, .resuming, .stopping, .saving, .restoring:
+                return status()
+            case .stopped, .error:
+                break
+            @unknown default:
+                break
+            }
+        }
+
+        try ensureSparseDisk(spec.diskPath, sizeMiB: spec.diskSizeMiB)
+        let vmConfig = try buildConfiguration(spec)
+        let vm = VZVirtualMachine(configuration: vmConfig)
+        virtualMachine = vm
+
+        let sem = DispatchSemaphore(value: 0)
+        var startError: Error?
+        vm.start { result in
+            switch result {
+            case .success:
+                break
+            case .failure(let err):
+                startError = err
+            }
+            sem.signal()
+        }
+        _ = sem.wait(timeout: .now() + 30)
+        if let startError {
+            throw startError
+        }
+        logger.log(.info, "vm started")
+        return status()
+#else
+        throw DriverError.invalidArgs("Virtualization.framework unavailable")
+#endif
+    }
+
+    func stop() throws -> [String: Any] {
+#if canImport(Virtualization)
+        guard #available(macOS 14.0, *) else {
+            throw DriverError.invalidArgs("Virtualization.framework requires macOS 14+")
+        }
+        guard let vm = virtualMachine else {
+            return status()
+        }
+
+        if vm.canRequestStop {
+            try vm.requestStop()
+            logger.log(.info, "vm stop requested")
+        }
+        return status()
+#else
+        throw DriverError.invalidArgs("Virtualization.framework unavailable")
+#endif
+    }
+
+    func status() -> [String: Any] {
+        var out: [String: Any] = [
+            "configured": config != nil,
+            "graphicsWindowOpen": false
+        ]
+#if canImport(Virtualization)
+        if let vm = virtualMachine {
+            out["state"] = vmStateName(vm.state)
+            out["canStart"] = vm.canStart
+            out["canPause"] = vm.canPause
+            out["canResume"] = vm.canResume
+            out["canRequestStop"] = vm.canRequestStop
+        } else {
+            out["state"] = "not_created"
+        }
+#else
+        out["state"] = "virtualization_unavailable"
+#endif
+        return out
+    }
+
+    func openDisplay() throws -> [String: Any] {
+        // Implemented in M7 (display window lifecycle).
+        return [
+            "ok": true,
+            "supported": false,
+            "message": "display not implemented yet"
+        ]
+    }
+
+    func closeDisplay() throws -> [String: Any] {
+        return [
+            "ok": true,
+            "supported": false,
+            "message": "display not implemented yet"
+        ]
+    }
+
+#if canImport(Virtualization)
+    @available(macOS 14.0, *)
+    private func buildConfiguration(_ spec: NormalizedVmConfig) throws -> VZVirtualMachineConfiguration {
+        let cfg = VZVirtualMachineConfiguration()
+        cfg.cpuCount = spec.cpu
+        cfg.memorySize = UInt64(spec.memoryBytes)
+
+        let bootLoader = VZLinuxBootLoader(kernelURL: URL(fileURLWithPath: spec.kernelPath))
+        if let initrd = spec.initrdPath {
+            bootLoader.initialRamdiskURL = URL(fileURLWithPath: initrd)
+        }
+        if let cmdline = spec.commandLine, !cmdline.isEmpty {
+            bootLoader.commandLine = cmdline
+        }
+        cfg.bootLoader = bootLoader
+
+        let nat = VZNATNetworkDeviceAttachment()
+        let net = VZVirtioNetworkDeviceConfiguration()
+        net.attachment = nat
+        cfg.networkDevices = [net]
+
+        let diskAttachment = try VZDiskImageStorageDeviceAttachment(
+            url: URL(fileURLWithPath: spec.diskPath),
+            readOnly: false
+        )
+        cfg.storageDevices = [VZVirtioBlockDeviceConfiguration(attachment: diskAttachment)]
+        cfg.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
+
+        if spec.graphicsEnabled {
+            let graphics = VZVirtioGraphicsDeviceConfiguration()
+            graphics.scanouts = [
+                VZVirtioGraphicsScanoutConfiguration(
+                    widthInPixels: spec.graphicsWidth,
+                    heightInPixels: spec.graphicsHeight
+                )
+            ]
+            cfg.graphicsDevices = [graphics]
+            cfg.keyboards = [VZUSBKeyboardConfiguration()]
+            cfg.pointingDevices = [VZUSBScreenCoordinatePointingDeviceConfiguration()]
+        } else {
+            cfg.graphicsDevices = []
+            cfg.keyboards = []
+            cfg.pointingDevices = []
+        }
+
+        try cfg.validate()
+        return cfg
+    }
+#endif
+
+    private func ensureSparseDisk(_ path: String, sizeMiB: Int) throws {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: path) { return }
+        let url = URL(fileURLWithPath: path)
+        try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        guard fm.createFile(atPath: path, contents: nil) else {
+            throw DriverError.io("failed to create disk image: \(path)")
+        }
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
+        try handle.truncate(atOffset: UInt64(sizeMiB) * 1024 * 1024)
+        logger.log(.info, "created sparse disk at \(path) sizeMiB=\(sizeMiB)")
+    }
+
+    private func normalizedConfig(_ root: [String: Any]) throws -> NormalizedVmConfig {
+        func dict(_ parent: [String: Any], _ key: String) throws -> [String: Any] {
+            guard let value = parent[key] as? [String: Any] else {
+                throw DriverError.invalidArgs("config.\(key) must be object")
+            }
+            return value
+        }
+        func int(_ parent: [String: Any], _ key: String) throws -> Int {
+            if let value = parent[key] as? Int { return value }
+            if let value = parent[key] as? NSNumber { return value.intValue }
+            throw DriverError.invalidArgs("config.\(key) must be int")
+        }
+        func strOpt(_ parent: [String: Any], _ key: String) -> String? {
+            if let value = parent[key] as? String, !value.isEmpty { return value }
+            return nil
+        }
+        func bool(_ parent: [String: Any], _ key: String) throws -> Bool {
+            if let value = parent[key] as? Bool { return value }
+            if let value = parent[key] as? NSNumber { return value.boolValue }
+            throw DriverError.invalidArgs("config.\(key) must be bool")
+        }
+
+        let cpu = try int(root, "cpu")
+        let memory = try int(root, "memory")
+        let boot = try dict(root, "boot")
+        let disk = try dict(root, "disk")
+        let network = try dict(root, "network")
+        let graphics = try dict(root, "graphics")
+
+        guard (boot["loader"] as? String) == "linux" || (boot["loader"] as? String) == "auto" else {
+            throw DriverError.invalidArgs("config.boot.loader must be linux or auto")
+        }
+        guard let kernelPath = strOpt(boot, "kernelPath") else {
+            throw DriverError.invalidArgs("config.boot.kernelPath is required for VZLinuxBootLoader")
+        }
+        guard let diskPath = strOpt(disk, "path") else {
+            throw DriverError.invalidArgs("config.disk.path is required")
+        }
+        let diskSizeMiB = (disk["sizeMiB"] as? Int) ?? (disk["sizeMiB"] as? NSNumber)?.intValue ?? 8192
+        let networkMode = (network["mode"] as? String) ?? "shared"
+        guard networkMode == "shared" else {
+            throw DriverError.invalidArgs("Only network.mode=shared is supported in v1.2")
+        }
+
+        return NormalizedVmConfig(
+            cpu: cpu,
+            memoryBytes: memory,
+            kernelPath: kernelPath,
+            initrdPath: strOpt(boot, "initrdPath"),
+            commandLine: strOpt(boot, "commandLine"),
+            diskPath: diskPath,
+            diskSizeMiB: diskSizeMiB,
+            graphicsEnabled: try bool(graphics, "enabled"),
+            graphicsWidth: (graphics["width"] as? Int) ?? (graphics["width"] as? NSNumber)?.intValue ?? 1280,
+            graphicsHeight: (graphics["height"] as? Int) ?? (graphics["height"] as? NSNumber)?.intValue ?? 800
+        )
+    }
+
+#if canImport(Virtualization)
+    private func vmStateName(_ state: VZVirtualMachine.State) -> String {
+        switch state {
+        case .stopped: return "stopped"
+        case .running: return "running"
+        case .paused: return "paused"
+        case .error: return "error"
+        case .starting: return "starting"
+        case .pausing: return "pausing"
+        case .resuming: return "resuming"
+        case .stopping: return "stopping"
+        case .saving: return "saving"
+        case .restoring: return "restoring"
+        @unknown default: return "unknown"
+        }
+    }
+#endif
+}
+
+struct NormalizedVmConfig {
+    let cpu: Int
+    let memoryBytes: Int
+    let kernelPath: String
+    let initrdPath: String?
+    let commandLine: String?
+    let diskPath: String
+    let diskSizeMiB: Int
+    let graphicsEnabled: Bool
+    let graphicsWidth: Int
+    let graphicsHeight: Int
+}
+
 final class Driver {
     static let protocolVersion = "gaovm.v1.2"
-    static let capabilities = ["hello", "ping"]
+    static let capabilities = [
+        "hello", "ping",
+        "vm.configure", "vm.start", "vm.stop", "vm.status",
+        "open_display", "close_display"
+    ]
     static let requiredCapabilities = ["hello", "ping"]
 
     private let config: Config
     private let logger: RotatingLogger
+    private let vmRuntime: VmRuntime
     private let codec = LengthPrefixedJsonRpc()
     private var listener: UnixListener?
     private var socket: UnixSocket?
@@ -262,6 +543,7 @@ final class Driver {
     init(config: Config, logger: RotatingLogger) {
         self.config = config
         self.logger = logger
+        self.vmRuntime = VmRuntime(logger: logger)
     }
 
     func run() throws {
@@ -410,14 +692,41 @@ final class Driver {
         }
 
         lastAuthenticatedDaemonRPC = Date()
-        switch method {
-        case "ping":
-            try sendResult(id: id, result: [
-                "ok": true,
-                "ts": ISO8601DateFormatter().string(from: Date())
-            ])
-        default:
-            try sendError(id: id, code: -32601, message: "method not found: \(method)")
+        do {
+            switch method {
+            case "ping":
+                try sendResult(id: id, result: [
+                    "ok": true,
+                    "ts": ISO8601DateFormatter().string(from: Date())
+                ])
+            case "vm.configure":
+                guard let params = message["params"] as? [String: Any],
+                      let cfg = params["config"] as? [String: Any] else {
+                    try sendError(id: id, code: -32602, message: "vm.configure requires params.config object")
+                    return
+                }
+                let result = try vmRuntime.configure(with: cfg)
+                try sendResult(id: id, result: result)
+            case "vm.start":
+                let result = try vmRuntime.start()
+                try sendResult(id: id, result: result)
+            case "vm.stop":
+                let result = try vmRuntime.stop()
+                try sendResult(id: id, result: result)
+            case "vm.status":
+                try sendResult(id: id, result: vmRuntime.status())
+            case "open_display":
+                let result = try vmRuntime.openDisplay()
+                try sendResult(id: id, result: result)
+            case "close_display":
+                let result = try vmRuntime.closeDisplay()
+                try sendResult(id: id, result: result)
+            default:
+                try sendError(id: id, code: -32601, message: "method not found: \(method)")
+            }
+        } catch {
+            logger.log(.error, "request \(method) failed: \(error)")
+            try sendError(id: id, code: -32603, message: "\(error)")
         }
     }
 

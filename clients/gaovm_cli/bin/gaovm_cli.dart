@@ -39,6 +39,14 @@ Future<void> main(List<String> args) async {
         final result = await client.request('vm.stop');
         _printJson(result['result']);
         break;
+      case 'open-display':
+        final result = await client.request('vm.open_display');
+        _printJson(result['result']);
+        break;
+      case 'close-display':
+        final result = await client.request('vm.close_display');
+        _printJson(result['result']);
+        break;
       case 'events':
         final result = await client.request('subscribe_events');
         _printJson(result['result']);
@@ -224,6 +232,8 @@ class _GaovmCliClient {
     'vm.start',
     'vm.stop',
     'vm.status',
+    'vm.open_display',
+    'vm.close_display',
     'vm.config.get',
     'vm.config.set',
     'vm.config.patch',

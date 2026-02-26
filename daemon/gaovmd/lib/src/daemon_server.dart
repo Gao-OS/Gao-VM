@@ -782,6 +782,8 @@ class _ClientSession {
     'vm.start',
     'vm.stop',
     'vm.status',
+    'vm.open_display',
+    'vm.close_display',
     'vm.config.get',
     'vm.config.set',
     'vm.config.patch',
@@ -880,12 +882,37 @@ class _ClientSession {
           await server.configStore.activatePendingIfPresent(emitEvent: server.emitEvent);
         }
         await server.supervisor.start();
+        final cfg = await server.configStore.getCurrentConfig();
+        await server.supervisor.driverExec('vm.configure', params: {'config': cfg});
+        await server.supervisor.driverExec('vm.start');
         return JsonRpcProtocol.result(id: id, result: server.supervisor.status());
       case 'vm.stop':
+        if (server.supervisor.status()['actual'] == 'running') {
+          try {
+            await server.supervisor.driverExec('vm.stop');
+          } catch (_) {
+            // Continue with supervisor stop; process shutdown will stop the VM.
+          }
+        }
         await server.supervisor.stop();
         return JsonRpcProtocol.result(id: id, result: server.supervisor.status());
       case 'vm.status':
-        return JsonRpcProtocol.result(id: id, result: server.supervisor.status());
+        final base = Map<String, Object?>.from(server.supervisor.status());
+        if (base['actual'] == 'running') {
+          try {
+            final response = await server.supervisor.driverExec('vm.status');
+            base['driverVm'] = response['result'];
+          } catch (error) {
+            base['driverVmError'] = error.toString();
+          }
+        }
+        return JsonRpcProtocol.result(id: id, result: base);
+      case 'vm.open_display':
+        final response = await server.supervisor.driverExec('open_display');
+        return JsonRpcProtocol.result(id: id, result: response['result']);
+      case 'vm.close_display':
+        final response = await server.supervisor.driverExec('close_display');
+        return JsonRpcProtocol.result(id: id, result: response['result']);
       case 'vm.config.get':
         return JsonRpcProtocol.result(id: id, result: await server.configStore.getConfigSnapshot());
       case 'vm.config.set':

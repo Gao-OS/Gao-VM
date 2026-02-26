@@ -153,20 +153,29 @@ class VmConfigStore {
     _requireInt(config, 'memory', min: 134217728);
 
     final boot = _requireObject(config, 'boot');
-    _requireExactKeys(boot, {'loader'}, path: 'boot');
+    _requireExactKeys(boot, {'loader', 'kernelPath', 'initrdPath', 'commandLine'}, path: 'boot');
     _requireString(boot, 'loader', path: 'boot');
+    _requireStringOrNull(boot, 'kernelPath', path: 'boot');
+    _requireStringOrNull(boot, 'initrdPath', path: 'boot');
+    _requireStringOrNull(boot, 'commandLine', path: 'boot');
 
     final disk = _requireObject(config, 'disk');
-    _requireExactKeys(disk, {'path'}, path: 'disk');
+    _requireExactKeys(disk, {'path', 'sizeMiB'}, path: 'disk');
     _requireStringOrNull(disk, 'path', path: 'disk');
+    final diskSize = disk['sizeMiB'];
+    if (diskSize != null && (diskSize is! int || diskSize < 64)) {
+      throw StateError('disk.sizeMiB must be null or an integer >= 64');
+    }
 
     final network = _requireObject(config, 'network');
     _requireExactKeys(network, {'mode'}, path: 'network');
     _requireString(network, 'mode', path: 'network');
 
     final graphics = _requireObject(config, 'graphics');
-    _requireExactKeys(graphics, {'enabled'}, path: 'graphics');
+    _requireExactKeys(graphics, {'enabled', 'width', 'height'}, path: 'graphics');
     _requireBool(graphics, 'enabled', path: 'graphics');
+    _requireInt(graphics, 'width', min: 64);
+    _requireInt(graphics, 'height', min: 64);
   }
 
   void _validatePatch(Map<String, Object?> patch) {
@@ -188,16 +197,40 @@ class VmConfigStore {
             throw StateError('memory must be an integer >= 134217728');
           }
         case 'boot':
-          _validatePatchObject(entry.value, allowedKeys: {'loader'}, path: 'boot');
+          _validatePatchObject(
+            entry.value,
+            allowedKeys: {'loader', 'kernelPath', 'initrdPath', 'commandLine'},
+            path: 'boot',
+          );
           final boot = Map<String, Object?>.from(entry.value as Map);
           if (boot.containsKey('loader') && boot['loader'] is! String) {
             throw StateError('boot.loader must be a string');
           }
+          if (boot.containsKey('kernelPath') &&
+              boot['kernelPath'] != null &&
+              boot['kernelPath'] is! String) {
+            throw StateError('boot.kernelPath must be a string or null');
+          }
+          if (boot.containsKey('initrdPath') &&
+              boot['initrdPath'] != null &&
+              boot['initrdPath'] is! String) {
+            throw StateError('boot.initrdPath must be a string or null');
+          }
+          if (boot.containsKey('commandLine') &&
+              boot['commandLine'] != null &&
+              boot['commandLine'] is! String) {
+            throw StateError('boot.commandLine must be a string or null');
+          }
         case 'disk':
-          _validatePatchObject(entry.value, allowedKeys: {'path'}, path: 'disk');
+          _validatePatchObject(entry.value, allowedKeys: {'path', 'sizeMiB'}, path: 'disk');
           final disk = Map<String, Object?>.from(entry.value as Map);
           if (disk.containsKey('path') && disk['path'] != null && disk['path'] is! String) {
             throw StateError('disk.path must be a string or null');
+          }
+          if (disk.containsKey('sizeMiB') &&
+              disk['sizeMiB'] != null &&
+              (disk['sizeMiB'] is! int || (disk['sizeMiB'] as int) < 64)) {
+            throw StateError('disk.sizeMiB must be null or an integer >= 64');
           }
         case 'network':
           _validatePatchObject(entry.value, allowedKeys: {'mode'}, path: 'network');
@@ -206,10 +239,18 @@ class VmConfigStore {
             throw StateError('network.mode must be a string');
           }
         case 'graphics':
-          _validatePatchObject(entry.value, allowedKeys: {'enabled'}, path: 'graphics');
+          _validatePatchObject(entry.value, allowedKeys: {'enabled', 'width', 'height'}, path: 'graphics');
           final graphics = Map<String, Object?>.from(entry.value as Map);
           if (graphics.containsKey('enabled') && graphics['enabled'] is! bool) {
             throw StateError('graphics.enabled must be a bool');
+          }
+          if (graphics.containsKey('width') &&
+              (graphics['width'] is! int || (graphics['width'] as int) < 64)) {
+            throw StateError('graphics.width must be an integer >= 64');
+          }
+          if (graphics.containsKey('height') &&
+              (graphics['height'] is! int || (graphics['height'] as int) < 64)) {
+            throw StateError('graphics.height must be an integer >= 64');
           }
       }
     }
@@ -316,16 +357,22 @@ class VmConfigStore {
       'cpu': 2,
       'memory': 2147483648,
       'boot': {
-        'loader': 'auto',
+        'loader': 'linux',
+        'kernelPath': null,
+        'initrdPath': null,
+        'commandLine': null,
       },
       'disk': {
         'path': null,
+        'sizeMiB': 8192,
       },
       'network': {
         'mode': 'shared',
       },
       'graphics': {
         'enabled': true,
+        'width': 1280,
+        'height': 800,
       },
     };
   }
