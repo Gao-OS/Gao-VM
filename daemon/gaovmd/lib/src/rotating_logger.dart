@@ -19,6 +19,7 @@ class RotatingLogger {
   final int maxBytes;
   final int maxRotations;
   final LogLevel minLevel;
+  Future<void> _writeQueue = Future<void>.value();
 
   Future<void> error(String message) => log(LogLevel.error, message);
   Future<void> warn(String message) => log(LogLevel.warn, message);
@@ -29,12 +30,17 @@ class RotatingLogger {
     if (level.index > minLevel.index) {
       return;
     }
-    final file = File(path);
-    await file.parent.create(recursive: true);
-    await _rotateIfNeeded(file);
-    final line = '[${DateTime.now().toUtc().toIso8601String()}] '
-        '[${level.name}] $message\n';
-    await file.writeAsString(line, mode: FileMode.append, flush: true);
+    late Future<void> op;
+    op = _writeQueue.catchError((_) {}).then((_) async {
+      final file = File(path);
+      await file.parent.create(recursive: true);
+      await _rotateIfNeeded(file);
+      final line = '[${DateTime.now().toUtc().toIso8601String()}] '
+          '[${level.name}] $message\n';
+      await file.writeAsString(line, mode: FileMode.append, flush: true);
+    });
+    _writeQueue = op.catchError((_) {});
+    await op;
   }
 
   Future<void> _rotateIfNeeded(File file) async {

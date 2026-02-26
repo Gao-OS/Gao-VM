@@ -880,6 +880,10 @@ class _ClientSession {
   _ClientSession({required this.server, required Socket socket})
       : channel = RpcChannel(socket);
 
+  static final bool _driverExecEnabled =
+      const bool.fromEnvironment('gaovm.enable_driver_exec') ||
+          Platform.environment['GAOVM_ENABLE_DRIVER_EXEC'] == '1';
+
   static const List<String> daemonCapabilities = [
     'hello',
     'ping',
@@ -1077,6 +1081,14 @@ class _ClientSession {
         return JsonRpcProtocol.result(
             id: id, result: await server.supervisor.doctor());
       case 'driver.exec':
+        if (!_driverExecEnabled) {
+          return JsonRpcProtocol.error(
+            id: id,
+            code: JsonRpcErrorCode.methodNotFound,
+            message:
+                'driver.exec is disabled (set GAOVM_ENABLE_DRIVER_EXEC=1 for debug use)',
+          );
+        }
         final driverMethod = params['method']?.toString();
         if (driverMethod == null || driverMethod.isEmpty) {
           return JsonRpcProtocol.error(

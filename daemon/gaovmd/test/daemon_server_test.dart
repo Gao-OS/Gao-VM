@@ -46,6 +46,22 @@ void main() {
       expect(harness.supervisor.maxConcurrentLifecycleCalls, 1);
       expect(harness.supervisor.startCallCount, 2);
     });
+
+    test('driver.exec is disabled by default', () async {
+      final harness = await _TestHarness.start();
+      addTearDown(harness.close);
+
+      final client = await harness.connectClient();
+      addTearDown(client.close);
+
+      final response = await client.sendRequest('driver.exec', params: {
+        'method': 'vm.status',
+      });
+      final error = Map<String, Object?>.from(response['error']! as Map);
+
+      expect(error['code'], JsonRpcErrorCode.methodNotFound);
+      expect(error['message'], contains('disabled'));
+    });
   });
 }
 
