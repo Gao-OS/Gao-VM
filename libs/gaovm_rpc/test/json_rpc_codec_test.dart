@@ -29,7 +29,8 @@ void main() {
       final secondFrame = codec.encodeObject(second);
 
       final controller = StreamController<List<int>>();
-      final decodedFuture = codec.decodeObjectStream(controller.stream).toList();
+      final decodedFuture =
+          codec.decodeObjectStream(controller.stream).toList();
 
       controller.add(firstFrame.sublist(0, 2));
       controller.add(firstFrame.sublist(2, 7));
@@ -55,6 +56,44 @@ void main() {
       expect(
         codec.decodeObjectStream(stream).drain<void>(),
         throwsA(isA<JsonRpcFrameException>()),
+      );
+    });
+
+    test('rejects oversized frame header before payload allocation', () async {
+      const tinyCodec = LengthPrefixedJsonRpcCodec(maxFrameSize: 8);
+      final header = Uint8List(4);
+      ByteData.sublistView(header).setUint32(0, 9, Endian.big);
+
+      expect(
+        tinyCodec
+            .decodeObjectStream(Stream<List<int>>.value(header))
+            .drain<void>(),
+        throwsA(
+          isA<JsonRpcFrameException>().having(
+            (e) => e.message,
+            'message',
+            contains('exceeds maxFrameSize'),
+          ),
+        ),
+      );
+    });
+
+    test('throws explicit error on truncated frame', () async {
+      final msg = JsonRpcProtocol.request(id: 1, method: 'ping');
+      final frame = codec.encodeObject(msg);
+      final truncated = frame.sublist(0, frame.length - 1);
+
+      expect(
+        codec
+            .decodeObjectStream(Stream<List<int>>.value(truncated))
+            .drain<void>(),
+        throwsA(
+          isA<JsonRpcFrameException>().having(
+            (e) => e.message,
+            'message',
+            contains('Incomplete frame'),
+          ),
+        ),
       );
     });
   });

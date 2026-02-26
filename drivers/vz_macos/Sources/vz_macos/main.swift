@@ -101,11 +101,16 @@ final class RotatingLogger {
 }
 
 final class LengthPrefixedJsonRpc {
+    static let maxFrameSize = 16 * 1024 * 1024
+
     func encode(_ object: [String: Any]) throws -> Data {
         guard JSONSerialization.isValidJSONObject(object) else {
             throw DriverError.protocolViolation("invalid JSON object")
         }
         let payload = try JSONSerialization.data(withJSONObject: object, options: [])
+        if payload.count > Self.maxFrameSize {
+            throw DriverError.protocolViolation("frame length \(payload.count) exceeds maxFrameSize \(Self.maxFrameSize)")
+        }
         var len = UInt32(payload.count).bigEndian
         var data = Data(bytes: &len, count: 4)
         data.append(payload)
@@ -145,7 +150,7 @@ final class UnixSocket {
         }
     }
 
-    func readExact(_ count: Int) throws -> Data {
+    func readExact(_ count: Int, context: String? = nil) throws -> Data {
         var data = Data(count: count)
         var offset = 0
         while offset < count {
@@ -153,7 +158,13 @@ final class UnixSocket {
                 guard let base = rawBuf.baseAddress else { return -1 }
                 return Darwin.read(fd, base.advanced(by: offset), count - offset)
             }
-            if n == 0 { throw DriverError.eof }
+            if n == 0 {
+                if offset == 0 {
+                    throw DriverError.eof
+                }
+                let label = context ?? "read"
+                throw DriverError.protocolViolation("incomplete \(label): expected \(count) bytes, got \(offset)")
+            }
             if n < 0 {
                 if errno == EINTR { continue }
                 throw DriverError.io("read() failed: \(String(cString: strerror(errno)))")
@@ -688,14 +699,17 @@ final class Driver {
 
     private func readFrame() throws -> [String: Any] {
         guard let socket else { throw DriverError.io("no control socket") }
-        let header = try socket.readExact(4)
+        let header = try socket.readExact(4, context: "frame header")
         let length = header.withUnsafeBytes { rawBuf -> UInt32 in
             rawBuf.load(as: UInt32.self).bigEndian
         }
         if length == 0 {
             throw DriverError.protocolViolation("zero-length frame not allowed")
         }
-        let payload = try socket.readExact(Int(length))
+        if length > UInt32(LengthPrefixedJsonRpc.maxFrameSize) {
+            throw DriverError.protocolViolation("frame length \(length) exceeds maxFrameSize \(LengthPrefixedJsonRpc.maxFrameSize)")
+        }
+        let payload = try socket.readExact(Int(length), context: "frame payload")
         return try codec.decode(payload)
     }
 

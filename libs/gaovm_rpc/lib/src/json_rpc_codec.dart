@@ -12,10 +12,19 @@ class JsonRpcFrameException implements Exception {
 }
 
 class LengthPrefixedJsonRpcCodec {
-  const LengthPrefixedJsonRpcCodec();
+  static const int defaultMaxFrameSize = 16 * 1024 * 1024;
+
+  const LengthPrefixedJsonRpcCodec({this.maxFrameSize = defaultMaxFrameSize});
+
+  final int maxFrameSize;
 
   Uint8List encodeObject(Map<String, Object?> object) {
     final payload = utf8.encode(jsonEncode(object));
+    if (payload.length > maxFrameSize) {
+      throw JsonRpcFrameException(
+        'Frame length ${payload.length} exceeds maxFrameSize $maxFrameSize.',
+      );
+    }
     final out = Uint8List(4 + payload.length);
     final bd = ByteData.sublistView(out);
     bd.setUint32(0, payload.length, Endian.big);
@@ -23,7 +32,8 @@ class LengthPrefixedJsonRpcCodec {
     return out;
   }
 
-  Stream<Map<String, Object?>> decodeObjectStream(Stream<List<int>> byteStream) async* {
+  Stream<Map<String, Object?>> decodeObjectStream(
+      Stream<List<int>> byteStream) async* {
     final buffer = BytesBuilder(copy: false);
     await for (final chunk in byteStream) {
       if (chunk.isEmpty) {
@@ -40,6 +50,11 @@ class LengthPrefixedJsonRpcCodec {
         if (length == 0) {
           throw JsonRpcFrameException('Zero-length frame is not allowed.');
         }
+        if (length > maxFrameSize) {
+          throw JsonRpcFrameException(
+            'Frame length $length exceeds maxFrameSize $maxFrameSize.',
+          );
+        }
         if (bytes.length < 4 + length) {
           break;
         }
@@ -51,13 +66,20 @@ class LengthPrefixedJsonRpcCodec {
         }
         final decoded = jsonDecode(utf8.decode(payload));
         if (decoded is List) {
-          throw JsonRpcFrameException('JSON-RPC batch requests are not supported.');
+          throw JsonRpcFrameException(
+              'JSON-RPC batch requests are not supported.');
         }
         if (decoded is! Map) {
-          throw JsonRpcFrameException('Top-level JSON value must be an object.');
+          throw JsonRpcFrameException(
+              'Top-level JSON value must be an object.');
         }
         yield Map<String, Object?>.from(decoded);
       }
+    }
+    final remaining = buffer.length;
+    if (remaining != 0) {
+      throw JsonRpcFrameException(
+          'Incomplete frame: $remaining bytes remaining.');
     }
   }
 }
