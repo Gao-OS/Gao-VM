@@ -5,6 +5,7 @@ publish_to: none
 environment:
   sdk: ^3.0.0
 dependencies:
+  ffi: ^2.1.4
   gaovm_rpc:
     path: ../../libs/gaovm_rpc
 dev_dependencies:

@@ -53,7 +53,8 @@ class JsonRpcProtocol {
     return out;
   }
 
-  static Map<String, Object?> result({required Object? id, required Object? result}) =>
+  static Map<String, Object?> result(
+          {required Object? id, required Object? result}) =>
       <String, Object?>{
         'jsonrpc': version,
         'id': id,
@@ -78,5 +79,37 @@ class JsonRpcProtocol {
       'id': id,
       'error': err,
     };
+  }
+}
+
+class JsonValue {
+  static Map<String, Object?> asMap(Object? value) {
+    if (value == null) {
+      return <String, Object?>{};
+    }
+    if (value is! Map) {
+      throw StateError('Expected JSON object, got ${value.runtimeType}');
+    }
+    return Map<String, Object?>.from(value);
+  }
+
+  static List<String> asStringList(Object? value) {
+    if (value == null) {
+      return const [];
+    }
+    if (value is! List) {
+      throw StateError('Expected JSON array, got ${value.runtimeType}');
+    }
+    return value.map((e) => e.toString()).toList(growable: false);
+  }
+
+  static bool containsAllStrings(List<String> actual, List<String> required) {
+    final set = actual.toSet();
+    for (final item in required) {
+      if (!set.contains(item)) {
+        return false;
+      }
+    }
+    return true;
   }
 }

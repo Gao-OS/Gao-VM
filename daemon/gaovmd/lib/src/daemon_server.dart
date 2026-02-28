@@ -294,6 +294,7 @@ class DriverSupervisor {
   String? _lastFailure;
   String? _driverSocketPath;
   String? _authToken;
+  int _driverSessionGeneration = 0;
   final RestartWindowLimiter _restartWindowLimiter = RestartWindowLimiter(
     limit: restartWindowLimit,
     window: restartWindowDuration,
@@ -390,6 +391,7 @@ class DriverSupervisor {
             'GAOVM_AUTH_TOKEN': _authToken!,
             'GAOVM_DRIVER_LOG_PATH': driverLogPath,
           });
+      final generation = ++_driverSessionGeneration;
       _process = process;
       process.stderr.transform(utf8.decoder).listen((data) {
         unawaited(logger?.warn('driver stderr: ${data.trimRight()}') ??
@@ -401,7 +403,8 @@ class DriverSupervisor {
             Future<void>.value());
         stdout.write('[vz_macos stdout] $data');
       });
-      unawaited(process.exitCode.then(_onDriverExit));
+      unawaited(process.exitCode
+          .then((exitCode) => _onDriverExit(exitCode, generation: generation)));
 
       final socket = await _connectToDriverWithRetry(socketPath);
       final channel = RpcChannel(socket);
@@ -411,7 +414,8 @@ class DriverSupervisor {
       _lastFailure = null;
       _installDriverRequestHandler(channel);
       _startHeartbeat(channel);
-      unawaited(channel.done.then((_) => _onDriverChannelClosed()));
+      unawaited(channel.done
+          .then((_) => _onDriverChannelClosed(generation: generation)));
       _emit('driver.started', {
         'pid': process.pid,
         'socketPath': socketPath,
@@ -421,6 +425,7 @@ class DriverSupervisor {
           Future<void>.value());
       await _persistRuntimeState();
     } catch (error) {
+      _driverSessionGeneration++;
       _lastFailure = 'Driver start failed: $error';
       _emit('driver.start_failed', {'error': error.toString()});
       unawaited(
@@ -459,10 +464,10 @@ class DriverSupervisor {
       {required String expectedToken}) async {
     final helloRequest = await channel.waitForRequest('hello',
         timeout: const Duration(seconds: 5));
-    final params = _asMap(helloRequest['params']);
+    final params = JsonValue.asMap(helloRequest['params']);
     final protocol = params['protocol'];
     final token = params['authToken'];
-    final driverCaps = _asStringList(params['capabilities']);
+    final driverCaps = JsonValue.asStringList(params['capabilities']);
 
     if (protocol != protocolVersion) {
       await channel.sendError(
@@ -483,7 +488,7 @@ class DriverSupervisor {
     }
 
     final accepted = _negotiateCapabilities(driverCaps, daemonCapabilities);
-    if (!_containsAll(accepted, requiredCapabilities)) {
+    if (!JsonValue.containsAllStrings(accepted, requiredCapabilities)) {
       await channel.sendError(
         id: helloRequest['id'],
         code: JsonRpcErrorCode.capabilityMismatch,
@@ -517,9 +522,10 @@ class DriverSupervisor {
       throw StateError(
           'Driver rejected daemon hello: ${daemonHelloResponse['error']}');
     }
-    final result = _asMap(daemonHelloResponse['result']);
-    final daemonAccepted = _asStringList(result['acceptedCapabilities']);
-    if (!_containsAll(daemonAccepted, requiredCapabilities)) {
+    final result = JsonValue.asMap(daemonHelloResponse['result']);
+    final daemonAccepted =
+        JsonValue.asStringList(result['acceptedCapabilities']);
+    if (!JsonValue.containsAllStrings(daemonAccepted, requiredCapabilities)) {
       throw StateError('Capability mismatch (daemon -> driver hello)');
     }
   }
@@ -535,7 +541,7 @@ class DriverSupervisor {
         });
       }
       if (method == 'hello') {
-        final params = _asMap(request['params']);
+        final params = JsonValue.asMap(request['params']);
         final token = params['authToken'];
         if (token != _authToken) {
           return JsonRpcProtocol.error(
@@ -544,9 +550,9 @@ class DriverSupervisor {
             message: 'Auth token mismatch',
           );
         }
-        final caps = _asStringList(params['capabilities']);
+        final caps = JsonValue.asStringList(params['capabilities']);
         final accepted = _negotiateCapabilities(caps, daemonCapabilities);
-        if (!_containsAll(accepted, requiredCapabilities)) {
+        if (!JsonValue.containsAllStrings(accepted, requiredCapabilities)) {
           return JsonRpcProtocol.error(
             id: id,
             code: JsonRpcErrorCode.capabilityMismatch,
@@ -594,6 +600,7 @@ class DriverSupervisor {
     }
     _stopInProgress = true;
     try {
+      _driverSessionGeneration++;
       _heartbeatTimer?.cancel();
       _heartbeatTimer = null;
       final process = _process;
@@ -628,10 +635,11 @@ class DriverSupervisor {
     }
   }
 
-  Future<void> _onDriverExit(int exitCode) async {
-    if (_process == null) {
+  Future<void> _onDriverExit(int exitCode, {required int generation}) async {
+    if (generation != _driverSessionGeneration) {
       return;
     }
+    _driverSessionGeneration++;
     _heartbeatTimer?.cancel();
     _heartbeatTimer = null;
     final exitedPid = _process?.pid;
@@ -654,10 +662,11 @@ class DriverSupervisor {
     await _persistRuntimeState();
   }
 
-  Future<void> _onDriverChannelClosed() async {
-    if (_driverChannel == null) {
+  Future<void> _onDriverChannelClosed({required int generation}) async {
+    if (generation != _driverSessionGeneration) {
       return;
     }
+    _driverSessionGeneration++;
     _heartbeatTimer?.cancel();
     _heartbeatTimer = null;
     _driverChannel = null;
@@ -927,7 +936,7 @@ class _ClientSession {
       Map<String, Object?> request) async {
     final method = request['method'] as String;
     final id = request['id'];
-    final params = _asMap(request['params']);
+    final params = JsonValue.asMap(request['params']);
 
     if (method == 'hello') {
       final protocol = params['protocol'];
@@ -939,9 +948,9 @@ class _ClientSession {
           data: {'expected': protocolVersion, 'actual': protocol},
         );
       }
-      final clientCaps = _asStringList(params['capabilities']);
+      final clientCaps = JsonValue.asStringList(params['capabilities']);
       final accepted = _negotiateCapabilities(clientCaps, daemonCapabilities);
-      if (!_containsAll(accepted, requiredCapabilities)) {
+      if (!JsonValue.containsAllStrings(accepted, requiredCapabilities)) {
         return JsonRpcProtocol.error(
           id: id,
           code: JsonRpcErrorCode.capabilityMismatch,
@@ -1052,7 +1061,7 @@ class _ClientSession {
       case 'vm.config.set':
         return server.runLifecycleOperation(() async {
           try {
-            final config = _asMap(params['config']);
+            final config = JsonValue.asMap(params['config']);
             final result = await server.configStore.setConfig(
               config,
               isRunning: server.supervisor.status()['actual'] == 'running',
@@ -1066,7 +1075,7 @@ class _ClientSession {
       case 'vm.config.patch':
         return server.runLifecycleOperation(() async {
           try {
-            final patch = _asMap(params['patch']);
+            final patch = JsonValue.asMap(params['patch']);
             final result = await server.configStore.patchConfig(
               patch,
               isRunning: server.supervisor.status()['actual'] == 'running',
@@ -1115,38 +1124,8 @@ class _ClientSession {
   }
 }
 
-Map<String, Object?> _asMap(Object? value) {
-  if (value == null) {
-    return <String, Object?>{};
-  }
-  if (value is! Map) {
-    throw StateError('Expected JSON object, got ${value.runtimeType}');
-  }
-  return Map<String, Object?>.from(value);
-}
-
-List<String> _asStringList(Object? value) {
-  if (value == null) {
-    return const [];
-  }
-  if (value is! List) {
-    throw StateError('Expected JSON array, got ${value.runtimeType}');
-  }
-  return value.map((e) => e.toString()).toList(growable: false);
-}
-
 List<String> _negotiateCapabilities(
     List<String> offered, List<String> supported) {
   final supportedSet = supported.toSet();
   return offered.where(supportedSet.contains).toList(growable: false);
-}
-
-bool _containsAll(List<String> actual, List<String> required) {
-  final set = actual.toSet();
-  for (final capability in required) {
-    if (!set.contains(capability)) {
-      return false;
-    }
-  }
-  return true;
 }

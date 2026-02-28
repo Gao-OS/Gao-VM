@@ -734,12 +734,16 @@ final class Driver {
     private let logger: RotatingLogger
     private let vmRuntime: VmRuntime
     private let codec = LengthPrefixedJsonRpc()
+    private let handlerQueue = DispatchQueue(label: "gaovm.driver.requests", qos: .userInitiated, attributes: .concurrent)
+    private let sendQueue = DispatchQueue(label: "gaovm.driver.send")
+    private let stateQueue = DispatchQueue(label: "gaovm.driver.state")
     private var listener: UnixListener?
     private var socket: UnixSocket?
     private var nextID: Int = 1
-    private var pendingHelloID: Int?
+    private var pendingRequests: [Int: String] = [:]
     private var authenticated = false
     private var lastAuthenticatedDaemonRPC = Date()
+    private var fatalError: Error?
 
     init(config: Config, logger: RotatingLogger) {
         self.config = config
@@ -765,11 +769,11 @@ final class Driver {
         try sendHello()
 
         while true {
-            if authenticated {
-                let elapsed = Date().timeIntervalSince(lastAuthenticatedDaemonRPC)
-                if elapsed > 15 {
-                    try gracefulExit(reason: "heartbeat timeout (no authenticated daemon RPC within 15s)", code: 12)
-                }
+            if let fatal = takeFatalError() {
+                throw fatal
+            }
+            if isHeartbeatExpired() {
+                try gracefulExit(reason: "heartbeat timeout (no authenticated daemon RPC within 15s)", code: 12)
             }
 
             let readable = try socket.pollReadable(timeoutMs: 1000)
@@ -780,7 +784,14 @@ final class Driver {
             } catch DriverError.eof {
                 try gracefulExit(reason: "control socket EOF", code: 0)
             }
-            try handle(message: message)
+            handlerQueue.async { [weak self] in
+                guard let self else { return }
+                do {
+                    try self.handle(message: message)
+                } catch {
+                    self.recordFatal(error)
+                }
+            }
         }
     }
 
@@ -803,12 +814,16 @@ final class Driver {
     private func send(_ object: [String: Any]) throws {
         guard let socket else { throw DriverError.io("no control socket") }
         let data = try codec.encode(object)
-        try socket.writeAll(data)
+        try sendQueue.sync {
+            try socket.writeAll(data)
+        }
     }
 
     private func sendHello() throws {
         let id = nextRequestID()
-        pendingHelloID = id
+        stateQueue.sync {
+            pendingRequests[id] = "hello"
+        }
         try send([
             "jsonrpc": "2.0",
             "id": id,
@@ -845,7 +860,8 @@ final class Driver {
         guard let idNum = message["id"] as? Int ?? (message["id"] as? NSNumber)?.intValue else {
             throw DriverError.protocolViolation("response id missing or invalid")
         }
-        if idNum == pendingHelloID {
+        let pendingMethod = stateQueue.sync { pendingRequests.removeValue(forKey: idNum) }
+        if pendingMethod == "hello" {
             guard let result = message["result"] as? [String: Any] else {
                 throw DriverError.handshakeFailed("hello response missing result")
             }
@@ -853,6 +869,7 @@ final class Driver {
             logger.log(.info, "hello response accepted")
             return
         }
+        throw DriverError.protocolViolation("unexpected response id: \(idNum)")
     }
 
     private func handleRequest(method: String, message: [String: Any]) throws {
@@ -879,8 +896,7 @@ final class Driver {
                 try sendError(id: id, code: -32012, message: "capability mismatch")
                 return
             }
-            authenticated = true
-            lastAuthenticatedDaemonRPC = Date()
+            markAuthenticatedRpc()
             logger.log(.info, "daemon hello accepted; authenticated")
             try sendResult(id: id, result: [
                 "protocol": Self.protocolVersion,
@@ -890,12 +906,12 @@ final class Driver {
             return
         }
 
-        if !authenticated {
+        if !isAuthenticated() {
             try sendError(id: id, code: -32010, message: "hello handshake required")
             return
         }
 
-        lastAuthenticatedDaemonRPC = Date()
+        markAuthenticatedRpc()
         do {
             switch method {
             case "ping":
@@ -961,8 +977,50 @@ final class Driver {
     }
 
     private func nextRequestID() -> Int {
-        defer { nextID += 1 }
-        return nextID
+        stateQueue.sync {
+            defer { nextID += 1 }
+            return nextID
+        }
+    }
+
+    private func isAuthenticated() -> Bool {
+        stateQueue.sync { authenticated }
+    }
+
+    private func markAuthenticatedRpc() {
+        stateQueue.sync {
+            authenticated = true
+            lastAuthenticatedDaemonRPC = Date()
+        }
+    }
+
+    private func isHeartbeatExpired() -> Bool {
+        stateQueue.sync {
+            guard authenticated else { return false }
+            return Date().timeIntervalSince(lastAuthenticatedDaemonRPC) > 15
+        }
+    }
+
+    private func recordFatal(_ error: Error) {
+        let shouldStore = stateQueue.sync { () -> Bool in
+            if fatalError != nil {
+                return false
+            }
+            fatalError = error
+            return true
+        }
+        if shouldStore {
+            logger.log(.error, "fatal driver loop error: \(error)")
+            socket?.close()
+        }
+    }
+
+    private func takeFatalError() -> Error? {
+        stateQueue.sync {
+            let out = fatalError
+            fatalError = nil
+            return out
+        }
     }
 
     private func gracefulExit(reason: String, code: Int32) throws -> Never {

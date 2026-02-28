@@ -144,7 +144,8 @@ class _CliConfig {
 }
 
 _CliConfig _parseArgs(List<String> args) {
-  var socketPath = Directory.current.uri.resolve('state/run/daemon.sock').toFilePath();
+  var socketPath =
+      Directory.current.uri.resolve('state/run/daemon.sock').toFilePath();
   var verbose = false;
   var command = 'status';
   String? configJson;
@@ -196,10 +197,13 @@ _CliConfig _parseArgs(List<String> args) {
 
 void _printUsage() {
   stdout.writeln('Usage: gaovm_cli [--socket-path PATH] [--verbose] <command>');
-  stdout.writeln('Commands: ping, list, status, start, stop, open-display, close-display, events, doctor, driver-exec, config-get, config-set, config-patch');
+  stdout.writeln(
+      'Commands: ping, list, status, start, stop, open-display, close-display, events, doctor, driver-exec, config-get, config-set, config-patch');
   stdout.writeln('config-set: gaovm_cli config-set --json \'{\"cpu\":2,...}\'');
-  stdout.writeln('config-patch: gaovm_cli config-patch --json \'{\"graphics\":{\"enabled\":false}}\'');
-  stdout.writeln('driver-exec: gaovm_cli driver-exec --method ping [--params-json \'{...}\']');
+  stdout.writeln(
+      'config-patch: gaovm_cli config-patch --json \'{\"graphics\":{\"enabled\":false}}\'');
+  stdout.writeln(
+      'driver-exec: gaovm_cli driver-exec --method ping [--params-json \'{...}\']');
 }
 
 void _printJson(Object? value) {
@@ -275,11 +279,12 @@ class _GaovmCliClient {
       'capabilities': _capabilities,
       'requiredCapabilities': _requiredCapabilities,
     }).timeout(const Duration(seconds: 5));
-    final result = _asMap(response['result']);
+    final result = JsonValue.asMap(response['result']);
     _validateHelloResult(result);
     _helloDone = true;
     if (!_daemonHelloSeen) {
-      throw StateError('Bidirectional hello failed: daemon did not send hello request');
+      throw StateError(
+          'Bidirectional hello failed: daemon did not send hello request');
     }
   }
 
@@ -287,11 +292,19 @@ class _GaovmCliClient {
     final id = _nextId++;
     final completer = Completer<Map<String, Object?>>();
     _pending[id] = completer;
-    unawaited(_send(JsonRpcProtocol.request(id: id, method: method, params: params)));
+    unawaited(
+        _send(JsonRpcProtocol.request(id: id, method: method, params: params))
+            .catchError((Object error, StackTrace stackTrace) {
+      final pending = _pending.remove(id);
+      if (pending != null && !pending.isCompleted) {
+        pending.completeError(error, stackTrace);
+      }
+      _closeWithError(error);
+    }));
     return completer.future.then((message) {
       final err = message['error'];
       if (err != null) {
-        final errMap = _asMap(err);
+        final errMap = JsonValue.asMap(err);
         throw _RpcException(
           code: (errMap['code'] as num?)?.toInt() ?? -32000,
           message: errMap['message']?.toString() ?? 'Unknown RPC error',
@@ -352,7 +365,7 @@ class _GaovmCliClient {
     final method = request['method'] as String;
     final id = request['id'];
     if (method == 'hello') {
-      final params = _asMap(request['params']);
+      final params = JsonValue.asMap(request['params']);
       final protocol = params['protocol'];
       if (protocol != _protocol) {
         await _send(JsonRpcProtocol.error(
@@ -363,9 +376,10 @@ class _GaovmCliClient {
         ));
         return;
       }
-      final offered = _asStringList(params['capabilities']);
-      final accepted = offered.where(_capabilities.contains).toList(growable: false);
-      if (!_containsAll(accepted, _requiredCapabilities)) {
+      final offered = JsonValue.asStringList(params['capabilities']);
+      final accepted =
+          offered.where(_capabilities.contains).toList(growable: false);
+      if (!JsonValue.containsAllStrings(accepted, _requiredCapabilities)) {
         await _send(JsonRpcProtocol.error(
           id: id,
           code: JsonRpcErrorCode.capabilityMismatch,
@@ -414,14 +428,16 @@ class _GaovmCliClient {
     if (verbose) {
       stdout.writeln('>> ${jsonEncode(object)}');
     }
-    _writeQueue = _writeQueue.then((_) async {
+    late Future<void> op;
+    op = _writeQueue.catchError((_) {}).then((_) async {
       if (_isClosed || _socket == null) {
         throw StateError('not connected');
       }
       _socket!.add(_codec.encodeObject(object));
       await _socket!.flush();
     });
-    await _writeQueue;
+    _writeQueue = op.catchError((_) {});
+    await op;
   }
 
   void _validateHelloResult(Map<String, Object?> result) {
@@ -429,9 +445,10 @@ class _GaovmCliClient {
     if (protocol != _protocol) {
       throw StateError('Protocol mismatch: $protocol');
     }
-    final accepted = _asStringList(result['acceptedCapabilities']);
-    if (!_containsAll(accepted, _requiredCapabilities)) {
-      throw StateError('Capability mismatch: accepted=$accepted required=$_requiredCapabilities');
+    final accepted = JsonValue.asStringList(result['acceptedCapabilities']);
+    if (!JsonValue.containsAllStrings(accepted, _requiredCapabilities)) {
+      throw StateError(
+          'Capability mismatch: accepted=$accepted required=$_requiredCapabilities');
     }
   }
 
@@ -450,34 +467,4 @@ class _GaovmCliClient {
     }
     _pending.clear();
   }
-}
-
-Map<String, Object?> _asMap(Object? value) {
-  if (value == null) {
-    return <String, Object?>{};
-  }
-  if (value is! Map) {
-    throw StateError('Expected JSON object, got ${value.runtimeType}');
-  }
-  return Map<String, Object?>.from(value);
-}
-
-List<String> _asStringList(Object? value) {
-  if (value == null) {
-    return const [];
-  }
-  if (value is! List) {
-    throw StateError('Expected JSON array, got ${value.runtimeType}');
-  }
-  return value.map((e) => e.toString()).toList(growable: false);
-}
-
-bool _containsAll(List<String> actual, List<String> required) {
-  final set = actual.toSet();
-  for (final item in required) {
-    if (!set.contains(item)) {
-      return false;
-    }
-  }
-  return true;
 }
