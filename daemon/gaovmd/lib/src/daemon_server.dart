@@ -339,6 +339,8 @@ class DriverSupervisor {
 
   Future<void> start() async {
     _desiredRunning = true;
+    _restartAttempts = 0;
+    _restartWindowLimiter.reset();
     await _persistDesiredState();
     await _persistRuntimeState();
     await _startDriverIfNeeded();
@@ -765,14 +767,14 @@ class DriverSupervisor {
   }
 
   Future<Map<String, Object?>> driverExec(String method,
-      {Object? params}) async {
+      {Object? params, Duration timeout = const Duration(seconds: 5)}) async {
     final channel = _driverChannel;
     if (channel == null) {
       throw StateError('Driver is not running');
     }
     final response = await channel
         .sendRequest(method, params: params)
-        .timeout(const Duration(seconds: 5));
+        .timeout(timeout);
     if (response['error'] != null) {
       throw StateError('Driver error: ${response['error']}');
     }
@@ -1016,9 +1018,11 @@ class _ClientSession {
             }
             await server.supervisor.start();
             final cfg = await server.configStore.getCurrentConfig();
-            await server.supervisor
-                .driverExec('vm.configure', params: {'config': cfg});
-            await server.supervisor.driverExec('vm.start');
+            await server.supervisor.driverExec('vm.configure',
+                params: {'config': cfg},
+                timeout: const Duration(seconds: 60));
+            await server.supervisor.driverExec('vm.start',
+                timeout: const Duration(seconds: 60));
             return JsonRpcProtocol.result(
                 id: id, result: server.supervisor.status());
           } on ConfigValidationException catch (error) {
@@ -1029,7 +1033,8 @@ class _ClientSession {
         return server.runLifecycleOperation(() async {
           if (server.supervisor.status()['actual'] == 'running') {
             try {
-              await server.supervisor.driverExec('vm.stop');
+              await server.supervisor.driverExec('vm.stop',
+                  timeout: const Duration(seconds: 60));
             } catch (_) {
               // Continue with supervisor stop; process shutdown will stop the VM.
             }

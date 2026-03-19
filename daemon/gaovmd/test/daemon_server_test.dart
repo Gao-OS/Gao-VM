@@ -168,7 +168,7 @@ class _FakeDriverSupervisor extends DriverSupervisor {
 
   @override
   Future<Map<String, Object?>> driverExec(String method,
-      {Object? params}) async {
+      {Object? params, Duration timeout = const Duration(seconds: 5)}) async {
     return _trackLifecycle(() async {
       await Future<void>.delayed(const Duration(milliseconds: 40));
       if (method == 'vm.stop') {
