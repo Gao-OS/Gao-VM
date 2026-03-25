@@ -62,6 +62,303 @@ void main() {
       expect(error['code'], JsonRpcErrorCode.methodNotFound);
       expect(error['message'], contains('disabled'));
     });
+
+    test('ping returns ok and timestamp', () async {
+      final harness = await _TestHarness.start();
+      addTearDown(harness.close);
+
+      final client = await harness.connectClient();
+      addTearDown(client.close);
+
+      final response = await client.sendRequest('ping');
+      expect(response['error'], isNull);
+      final result = Map<String, Object?>.from(response['result']! as Map);
+      expect(result['ok'], true);
+      expect(result['ts'], isA<String>());
+    });
+
+    test('subscribe_events returns ok', () async {
+      final harness = await _TestHarness.start();
+      addTearDown(harness.close);
+
+      final client = await harness.connectClient();
+      addTearDown(client.close);
+
+      final response = await client.sendRequest('subscribe_events');
+      expect(response['error'], isNull);
+      final result = Map<String, Object?>.from(response['result']! as Map);
+      expect(result['ok'], true);
+    });
+
+    test('list_vms returns default VM entry', () async {
+      final harness = await _TestHarness.start();
+      addTearDown(harness.close);
+
+      final client = await harness.connectClient();
+      addTearDown(client.close);
+
+      final response = await client.sendRequest('list_vms');
+      expect(response['error'], isNull);
+      final result = response['result'] as List;
+      expect(result.length, 1);
+      final vm = Map<String, Object?>.from(result.first as Map);
+      expect(vm['id'], 'default');
+      expect(vm['desired'], 'stopped');
+      expect(vm['actual'], 'stopped');
+    });
+
+    test('vm.start transitions to running', () async {
+      final harness = await _TestHarness.start();
+      addTearDown(harness.close);
+
+      final client = await harness.connectClient();
+      addTearDown(client.close);
+
+      final response = await client.sendRequest('vm.start');
+      expect(response['error'], isNull);
+      final result = Map<String, Object?>.from(response['result']! as Map);
+      expect(result['actual'], 'running');
+      expect(result['desired'], 'running');
+    });
+
+    test('vm.stop transitions to stopped', () async {
+      final harness = await _TestHarness.start();
+      addTearDown(harness.close);
+
+      final client = await harness.connectClient();
+      addTearDown(client.close);
+
+      await client.sendRequest('vm.start');
+      final response = await client.sendRequest('vm.stop');
+      expect(response['error'], isNull);
+      final result = Map<String, Object?>.from(response['result']! as Map);
+      expect(result['actual'], 'stopped');
+      expect(result['desired'], 'stopped');
+    });
+
+    test('vm.status returns status', () async {
+      final harness = await _TestHarness.start();
+      addTearDown(harness.close);
+
+      final client = await harness.connectClient();
+      addTearDown(client.close);
+
+      final response = await client.sendRequest('vm.status');
+      expect(response['error'], isNull);
+      final result = Map<String, Object?>.from(response['result']! as Map);
+      expect(result['desired'], 'stopped');
+      expect(result['actual'], 'stopped');
+    });
+
+    test('vm.status includes driverVm when running', () async {
+      final harness = await _TestHarness.start();
+      addTearDown(harness.close);
+
+      final client = await harness.connectClient();
+      addTearDown(client.close);
+
+      await client.sendRequest('vm.start');
+      final response = await client.sendRequest('vm.status');
+      expect(response['error'], isNull);
+      final result = Map<String, Object?>.from(response['result']! as Map);
+      expect(result['actual'], 'running');
+      expect(result['driverVm'], isNotNull);
+    });
+
+    test('vm.open_display delegates to driver', () async {
+      final harness = await _TestHarness.start();
+      addTearDown(harness.close);
+
+      final client = await harness.connectClient();
+      addTearDown(client.close);
+
+      await client.sendRequest('vm.start');
+      final response = await client.sendRequest('vm.open_display');
+      expect(response['error'], isNull);
+      final result = Map<String, Object?>.from(response['result']! as Map);
+      expect(result['ok'], true);
+    });
+
+    test('vm.close_display delegates to driver', () async {
+      final harness = await _TestHarness.start();
+      addTearDown(harness.close);
+
+      final client = await harness.connectClient();
+      addTearDown(client.close);
+
+      await client.sendRequest('vm.start');
+      final response = await client.sendRequest('vm.close_display');
+      expect(response['error'], isNull);
+      final result = Map<String, Object?>.from(response['result']! as Map);
+      expect(result['ok'], true);
+    });
+
+    test('vm.config.get returns config snapshot', () async {
+      final harness = await _TestHarness.start();
+      addTearDown(harness.close);
+
+      final client = await harness.connectClient();
+      addTearDown(client.close);
+
+      final response = await client.sendRequest('vm.config.get');
+      expect(response['error'], isNull);
+      final result = Map<String, Object?>.from(response['result']! as Map);
+      expect(result['current'], isNotNull);
+      expect(result['hasPending'], false);
+    });
+
+    test('vm.config.set applies config', () async {
+      final harness = await _TestHarness.start();
+      addTearDown(harness.close);
+
+      final client = await harness.connectClient();
+      addTearDown(client.close);
+
+      final config = {
+        'cpu': 4,
+        'memory': 2147483648,
+        'boot': {
+          'loader': 'linux',
+          'kernelPath': null,
+          'initrdPath': null,
+          'commandLine': null,
+        },
+        'disk': {'path': null, 'sizeMiB': 8192},
+        'network': {'mode': 'shared'},
+        'graphics': {'enabled': true, 'width': 1280, 'height': 800},
+      };
+      final response = await client.sendRequest('vm.config.set', params: {
+        'config': config,
+      });
+      expect(response['error'], isNull);
+      final result = Map<String, Object?>.from(response['result']! as Map);
+      expect(result['applied'], true);
+    });
+
+    test('vm.config.patch applies partial update', () async {
+      final harness = await _TestHarness.start();
+      addTearDown(harness.close);
+
+      final client = await harness.connectClient();
+      addTearDown(client.close);
+
+      final response = await client.sendRequest('vm.config.patch', params: {
+        'patch': {'cpu': 8},
+      });
+      expect(response['error'], isNull);
+      final result = Map<String, Object?>.from(response['result']! as Map);
+      expect(result['applied'], true);
+    });
+
+    test('doctor returns health checks', () async {
+      final harness = await _TestHarness.start();
+      addTearDown(harness.close);
+
+      final client = await harness.connectClient();
+      addTearDown(client.close);
+
+      final response = await client.sendRequest('doctor');
+      expect(response['error'], isNull);
+      final result = Map<String, Object?>.from(response['result']! as Map);
+      expect(result['ok'], true);
+      expect(result['daemon'], isNotNull);
+    });
+
+    test('unknown method returns methodNotFound', () async {
+      final harness = await _TestHarness.start();
+      addTearDown(harness.close);
+
+      final client = await harness.connectClient();
+      addTearDown(client.close);
+
+      final response = await client.sendRequest('nonexistent.method');
+      final error = Map<String, Object?>.from(response['error']! as Map);
+      expect(error['code'], JsonRpcErrorCode.methodNotFound);
+    });
+  });
+
+  group('Handshake protocol', () {
+    test('rejects method before handshake', () async {
+      final harness = await _TestHarness.start();
+      addTearDown(harness.close);
+
+      final socket = await Socket.connect(
+        InternetAddress(harness.socketPath, type: InternetAddressType.unix),
+        0,
+      );
+      final channel = RpcChannel(socket);
+      addTearDown(channel.close);
+
+      // Send ping without hello first.
+      final response = await channel.sendRequest('ping');
+      final error = Map<String, Object?>.from(response['error']! as Map);
+      expect(error['code'], JsonRpcErrorCode.handshakeFailed);
+      expect(error['message'], contains('hello handshake required'));
+    });
+
+    test('rejects protocol mismatch', () async {
+      final harness = await _TestHarness.start();
+      addTearDown(harness.close);
+
+      final socket = await Socket.connect(
+        InternetAddress(harness.socketPath, type: InternetAddressType.unix),
+        0,
+      );
+      final channel = RpcChannel(socket);
+      addTearDown(channel.close);
+
+      final response = await channel.sendRequest('hello', params: {
+        'protocol': 'gaovm.v999',
+        'capabilities': ['hello', 'ping'],
+        'requiredCapabilities': ['hello', 'ping'],
+      });
+      final error = Map<String, Object?>.from(response['error']! as Map);
+      expect(error['code'], JsonRpcErrorCode.handshakeFailed);
+      expect(error['message'], contains('Protocol mismatch'));
+    });
+
+    test('rejects capability mismatch', () async {
+      final harness = await _TestHarness.start();
+      addTearDown(harness.close);
+
+      final socket = await Socket.connect(
+        InternetAddress(harness.socketPath, type: InternetAddressType.unix),
+        0,
+      );
+      final channel = RpcChannel(socket);
+      addTearDown(channel.close);
+
+      // Offer no capabilities — required caps won't intersect.
+      final response = await channel.sendRequest('hello', params: {
+        'protocol': 'gaovm.v1.2',
+        'capabilities': [],
+        'requiredCapabilities': [],
+      });
+      final error = Map<String, Object?>.from(response['error']! as Map);
+      expect(error['code'], JsonRpcErrorCode.capabilityMismatch);
+    });
+
+    test('multiple clients can connect simultaneously', () async {
+      final harness = await _TestHarness.start();
+      addTearDown(harness.close);
+
+      final clientA = await harness.connectClient();
+      final clientB = await harness.connectClient();
+      final clientC = await harness.connectClient();
+      addTearDown(clientA.close);
+      addTearDown(clientB.close);
+      addTearDown(clientC.close);
+
+      final results = await Future.wait([
+        clientA.sendRequest('ping'),
+        clientB.sendRequest('ping'),
+        clientC.sendRequest('ping'),
+      ]);
+
+      for (final response in results) {
+        expect(response['error'], isNull);
+      }
+    });
   });
 }
 
