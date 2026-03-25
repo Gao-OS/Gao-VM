@@ -277,6 +277,65 @@ void main() {
     });
   });
 
+  group('Event subscription', () {
+    test('subscribed client receives events on vm.start', () async {
+      final harness = await _TestHarness.start();
+      addTearDown(harness.close);
+
+      final subscriber = await harness.connectClient();
+      addTearDown(subscriber.close);
+
+      // Subscribe to events.
+      await subscriber.sendRequest('subscribe_events');
+
+      // Collect incoming notifications.
+      final events = <Map<String, Object?>>[];
+      subscriber.onRequest = (request) async {
+        if (request['method'] == 'event') {
+          events.add(Map<String, Object?>.from(request['params'] as Map));
+        }
+        return null;
+      };
+
+      // Trigger events via another client.
+      final controller = await harness.connectClient();
+      addTearDown(controller.close);
+      await controller.sendRequest('vm.start');
+
+      // Give time for events to propagate.
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+
+      // Should have received at least config.updated and driver.started-like events.
+      expect(events, isNotEmpty);
+      expect(events.any((e) => e['type'] != null), isTrue);
+    });
+
+    test('non-subscribed client does not receive events', () async {
+      final harness = await _TestHarness.start();
+      addTearDown(harness.close);
+
+      final observer = await harness.connectClient();
+      addTearDown(observer.close);
+
+      // Do NOT subscribe to events.
+      final events = <Map<String, Object?>>[];
+      observer.onRequest = (request) async {
+        if (request['method'] == 'event') {
+          events.add(Map<String, Object?>.from(request['params'] as Map));
+        }
+        return null;
+      };
+
+      final controller = await harness.connectClient();
+      addTearDown(controller.close);
+      await controller.sendRequest('vm.start');
+
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+
+      expect(events, isEmpty);
+    });
+  });
+
   group('Handshake protocol', () {
     test('rejects method before handshake', () async {
       final harness = await _TestHarness.start();
@@ -451,6 +510,7 @@ class _FakeDriverSupervisor extends DriverSupervisor {
     await _trackLifecycle(() async {
       await Future<void>.delayed(const Duration(milliseconds: 40));
       _actualRunning = true;
+      _emitter?.call('driver.started', {'pid': 12345});
     });
   }
 
@@ -488,8 +548,12 @@ class _FakeDriverSupervisor extends DriverSupervisor {
         'checks': const <String, Object?>{},
       };
 
+  EventEmitter? _emitter;
+
   @override
-  void attachEventEmitter(EventEmitter emitEvent) {}
+  void attachEventEmitter(EventEmitter emitEvent) {
+    _emitter = emitEvent;
+  }
 
   Future<T> _trackLifecycle<T>(Future<T> Function() op) async {
     _inFlightLifecycleCalls += 1;
