@@ -1055,11 +1055,15 @@ class _ClientSession {
         }
         return JsonRpcProtocol.result(id: id, result: base);
       case 'vm.open_display':
-        final response = await server.supervisor.driverExec('open_display');
-        return JsonRpcProtocol.result(id: id, result: response['result']);
+        return server.runLifecycleOperation(() async {
+          final response = await server.supervisor.driverExec('open_display');
+          return JsonRpcProtocol.result(id: id, result: response['result']);
+        });
       case 'vm.close_display':
-        final response = await server.supervisor.driverExec('close_display');
-        return JsonRpcProtocol.result(id: id, result: response['result']);
+        return server.runLifecycleOperation(() async {
+          final response = await server.supervisor.driverExec('close_display');
+          return JsonRpcProtocol.result(id: id, result: response['result']);
+        });
       case 'vm.config.get':
         return JsonRpcProtocol.result(
             id: id, result: await server.configStore.getConfigSnapshot());

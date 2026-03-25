@@ -277,6 +277,54 @@ void main() {
     });
   });
 
+  group('Display lifecycle serialization', () {
+    test('vm.open_display is serialized with vm.start', () async {
+      final harness = await _TestHarness.start();
+      addTearDown(harness.close);
+
+      final client = await harness.connectClient();
+      addTearDown(client.close);
+
+      // Start VM first.
+      await client.sendRequest('vm.start');
+
+      // Fire vm.open_display and vm.start concurrently.
+      final results = await Future.wait([
+        client.sendRequest('vm.open_display'),
+        client.sendRequest('vm.start'),
+      ]);
+
+      // Both should succeed without error.
+      for (final response in results) {
+        expect(response['error'], isNull);
+      }
+
+      // Lifecycle calls should be serialized (max 1 concurrent).
+      expect(harness.supervisor.maxConcurrentLifecycleCalls, 1);
+    });
+
+    test('vm.close_display is serialized with vm.stop', () async {
+      final harness = await _TestHarness.start();
+      addTearDown(harness.close);
+
+      final client = await harness.connectClient();
+      addTearDown(client.close);
+
+      await client.sendRequest('vm.start');
+
+      final results = await Future.wait([
+        client.sendRequest('vm.close_display'),
+        client.sendRequest('vm.stop'),
+      ]);
+
+      for (final response in results) {
+        expect(response['error'], isNull);
+      }
+
+      expect(harness.supervisor.maxConcurrentLifecycleCalls, 1);
+    });
+  });
+
   group('Event subscription', () {
     test('subscribed client receives events on vm.start', () async {
       final harness = await _TestHarness.start();
