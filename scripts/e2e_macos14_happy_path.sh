@@ -17,7 +17,7 @@ set -euo pipefail
 INITRD_PATH="${INITRD_PATH:-}"
 STATE_DIR="${STATE_DIR:-$PWD/.tmp/e2e-state}"
 SOCK_PATH="${SOCK_PATH:-$STATE_DIR/run/daemon.sock}"
-DRIVER_BIN="${DRIVER_BIN:-$PWD/drivers/vz_macos/.build/debug/gaovm-driver-vz}"
+DRIVER_BIN="${DRIVER_BIN:-$PWD/drivers/vz_macos/.build/$(uname -m)-apple-macosx/debug/gaovm-driver-vz}"
 
 mkdir -p "$STATE_DIR"
 

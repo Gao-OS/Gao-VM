@@ -3,3 +3,4 @@
 
 # Swift Package Manager build output (generated)
 **/.build/
+.pi/
