@@ -13,6 +13,11 @@ let package = Package(
         .executableTarget(
             name: "vz_macos",
             path: "Sources/vz_macos"
+        ),
+        .testTarget(
+            name: "vz_macosTests",
+            dependencies: ["vz_macos"],
+            path: "Tests/vz_macosTests"
         )
     ]
 )

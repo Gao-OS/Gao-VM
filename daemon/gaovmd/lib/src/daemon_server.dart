@@ -83,8 +83,17 @@ class RpcChannel {
     final id = _nextId--;
     final completer = Completer<Map<String, Object?>>();
     _pendingResponses[id] = completer;
-    unawaited(
-        _send(JsonRpcProtocol.request(id: id, method: method, params: params)));
+    unawaited(() async {
+      try {
+        await _send(
+            JsonRpcProtocol.request(id: id, method: method, params: params));
+      } catch (error, stackTrace) {
+        if (identical(_pendingResponses.remove(id), completer) &&
+            !completer.isCompleted) {
+          completer.completeError(error, stackTrace);
+        }
+      }
+    }());
     return completer.future;
   }
 
@@ -259,9 +268,15 @@ class DriverSupervisor {
   DriverSupervisor({
     required this.driverBinary,
     required this.stateDir,
+    this.driverArguments = const [],
+    Future<Map<String, Object?>> Function()? loadVmConfig,
+    Duration Function(int attempt)? restartDelay,
+    this.restartStabilityDuration = const Duration(seconds: 30),
     this.logger,
     EventEmitter? emitEvent,
-  })  : _emitEvent = emitEvent,
+  })  : _loadVmConfig = loadVmConfig,
+        _restartDelay = restartDelay,
+        _emitEvent = emitEvent,
         _runtimeStateFile = AtomicJsonFile('$stateDir/daemon_state.json'),
         _desiredStateFile = AtomicJsonFile('$stateDir/desired_state.json') {
     _reconcileTimer = Timer.periodic(const Duration(seconds: 5), (_) {
@@ -277,7 +292,11 @@ class DriverSupervisor {
 
   final String driverBinary;
   final String stateDir;
+  final List<String> driverArguments;
+  final Duration restartStabilityDuration;
   final RotatingLogger? logger;
+  Future<Map<String, Object?>> Function()? _loadVmConfig;
+  final Duration Function(int attempt)? _restartDelay;
   EventEmitter? _emitEvent;
   final AtomicJsonFile _runtimeStateFile;
   final AtomicJsonFile _desiredStateFile;
@@ -287,7 +306,10 @@ class DriverSupervisor {
   Timer? _heartbeatTimer;
   Timer? _reconcileTimer;
   Timer? _restartTimer;
+  Timer? _restartStabilityTimer;
   bool _desiredRunning = false;
+  bool _reconcileVmOnConnect = false;
+  String _vmState = 'stopped';
   bool _startInProgress = false;
   bool _stopInProgress = false;
   int _restartAttempts = 0;
@@ -310,8 +332,10 @@ class DriverSupervisor {
     final decoded = jsonDecode(await file.readAsString());
     if (decoded is Map && decoded['desired'] == 'running') {
       _desiredRunning = true;
+      _reconcileVmOnConnect = true;
     } else {
       _desiredRunning = false;
+      _reconcileVmOnConnect = false;
     }
     await _persistRuntimeState();
   }
@@ -320,16 +344,24 @@ class DriverSupervisor {
     _emitEvent = emitEvent;
   }
 
+  void attachVmConfigLoader(
+      Future<Map<String, Object?>> Function() loadVmConfig) {
+    _loadVmConfig ??= loadVmConfig;
+  }
+
   Future<void> dispose() async {
     _reconcileTimer?.cancel();
     _heartbeatTimer?.cancel();
     _restartTimer?.cancel();
+    _restartStabilityTimer?.cancel();
     await stop();
   }
 
   Map<String, Object?> status() => {
         'desired': _desiredRunning ? 'running' : 'stopped',
-        'actual': _driverChannel != null ? 'running' : 'stopped',
+        'actual': _vmState == 'running' ? 'running' : 'stopped',
+        'driverActual': _driverChannel != null ? 'running' : 'stopped',
+        'vmState': _vmState,
         'restartAttempts': _restartAttempts,
         'maxRestartAttempts': 5,
         'driverPid': _process?.pid,
@@ -339,6 +371,9 @@ class DriverSupervisor {
 
   Future<void> start() async {
     _desiredRunning = true;
+    _reconcileVmOnConnect = false;
+    _restartStabilityTimer?.cancel();
+    _restartStabilityTimer = null;
     _restartAttempts = 0;
     _restartWindowLimiter.reset();
     await _persistDesiredState();
@@ -348,6 +383,9 @@ class DriverSupervisor {
 
   Future<void> stop() async {
     _desiredRunning = false;
+    _reconcileVmOnConnect = false;
+    _restartStabilityTimer?.cancel();
+    _restartStabilityTimer = null;
     _restartTimer?.cancel();
     _restartTimer = null;
     await _persistDesiredState();
@@ -384,6 +422,7 @@ class DriverSupervisor {
       final process = await Process.start(
           driverBinary,
           [
+            ...driverArguments,
             '--socket-path',
             socketPath,
           ],
@@ -412,10 +451,14 @@ class DriverSupervisor {
       final channel = RpcChannel(socket);
       await _performHandshake(channel, expectedToken: _authToken!);
       _driverChannel = channel;
-      _restartAttempts = 0;
-      _lastFailure = null;
       _installDriverRequestHandler(channel);
       _startHeartbeat(channel);
+      await _refreshVmStateFromDriver(channel);
+      if (_reconcileVmOnConnect) {
+        await _reconcileVmDesiredState();
+      }
+      _lastFailure = null;
+      _scheduleRestartAccountingReset();
       unawaited(channel.done
           .then((_) => _onDriverChannelClosed(generation: generation)));
       _emit('driver.started', {
@@ -432,11 +475,18 @@ class DriverSupervisor {
       _emit('driver.start_failed', {'error': error.toString()});
       unawaited(
           logger?.error('driver start failed: $error') ?? Future<void>.value());
+      _heartbeatTimer?.cancel();
+      _heartbeatTimer = null;
+      final channel = _driverChannel;
+      _driverChannel = null;
+      if (channel != null) {
+        await channel.close();
+      }
       final process = _process;
       if (process != null) {
         process.kill(ProcessSignal.sigkill);
       }
-      await _teardownDriverArtifacts();
+      await _teardownDriverArtifacts(clearProcess: true);
       await _scheduleRestartOrPermanentFailure();
       await _persistRuntimeState();
     } finally {
@@ -607,8 +657,16 @@ class DriverSupervisor {
       _heartbeatTimer = null;
       final process = _process;
       final channel = _driverChannel;
-      _driverChannel = null;
       if (channel != null) {
+        if (_vmState != 'stopped') {
+          try {
+            await driverExec('vm.stop');
+          } catch (error) {
+            _lastFailure = 'Failed to stop VM before driver shutdown: $error';
+            unawaited(logger?.warn(_lastFailure!) ?? Future<void>.value());
+          }
+        }
+        _driverChannel = null;
         await channel.close();
       }
       if (process != null) {
@@ -671,7 +729,10 @@ class DriverSupervisor {
     _driverSessionGeneration++;
     _heartbeatTimer?.cancel();
     _heartbeatTimer = null;
+    _restartStabilityTimer?.cancel();
+    _restartStabilityTimer = null;
     _driverChannel = null;
+    _vmState = 'stopped';
     if (_desiredRunning && !_stopInProgress) {
       _lastFailure = 'Driver control channel closed unexpectedly';
       await _scheduleRestartOrPermanentFailure();
@@ -700,7 +761,8 @@ class DriverSupervisor {
       return;
     }
     final now = DateTime.now();
-    if (_restartWindowLimiter.recordAndIsLimited(now)) {
+    _restartWindowLimiter.recordAndIsLimited(now);
+    if (_restartWindowLimiter.countInWindow(now) > restartWindowLimit) {
       _desiredRunning = false;
       _lastFailure =
           'Driver restart rate limit exceeded: $restartWindowLimit restarts within '
@@ -718,18 +780,26 @@ class DriverSupervisor {
     }
 
     _restartAttempts += 1;
-    final backoffSeconds = min(1 << (_restartAttempts - 1), 30);
+    final restartDelay = _restartDelay?.call(_restartAttempts) ??
+        Duration(seconds: min(1 << (_restartAttempts - 1), 30));
+    if (restartDelay.isNegative) {
+      throw StateError('Restart delay must not be negative: $restartDelay');
+    }
     _emit('driver.restart_scheduled', {
       'attempt': _restartAttempts,
-      'delaySeconds': backoffSeconds,
+      'delaySeconds': restartDelay.inSeconds,
+      'delayMilliseconds': restartDelay.inMilliseconds,
     });
-    _restartTimer = Timer(Duration(seconds: backoffSeconds), () {
+    _restartTimer = Timer(restartDelay, () {
       _restartTimer = null;
       unawaited(_startDriverIfNeeded());
     });
   }
 
   Future<void> _teardownDriverArtifacts({bool clearProcess = false}) async {
+    _restartStabilityTimer?.cancel();
+    _restartStabilityTimer = null;
+    _vmState = 'stopped';
     if (clearProcess) {
       _process = null;
     }
@@ -755,7 +825,9 @@ class DriverSupervisor {
     return _runtimeStateFile.write({
       'updatedAt': DateTime.now().toUtc().toIso8601String(),
       'desired': _desiredRunning ? 'running' : 'stopped',
-      'actual': _driverChannel != null ? 'running' : 'stopped',
+      'actual': _vmState == 'running' ? 'running' : 'stopped',
+      'driverActual': _driverChannel != null ? 'running' : 'stopped',
+      'vmState': _vmState,
       'restartAttempts': _restartAttempts,
       'maxRestartAttempts': 5,
       'restartPending': _restartTimer != null,
@@ -766,17 +838,104 @@ class DriverSupervisor {
     });
   }
 
+  Future<void> _reconcileVmDesiredState() async {
+    final loadVmConfig = _loadVmConfig;
+    if (!_desiredRunning || loadVmConfig == null) {
+      return;
+    }
+
+    final config = await loadVmConfig();
+    if (!_desiredRunning) {
+      return;
+    }
+    await driverExec(
+      'vm.configure',
+      params: {'config': config},
+      timeout: const Duration(seconds: 60),
+    );
+    if (!_desiredRunning) {
+      return;
+    }
+    await driverExec('vm.start', timeout: const Duration(seconds: 60));
+    await driverExec('vm.status');
+    if (_vmState != 'running') {
+      throw StateError(
+          'VM reconcile completed with unexpected state: $_vmState');
+    }
+    _emit('vm.reconciled', {'state': _vmState});
+  }
+
+  void _scheduleRestartAccountingReset() {
+    _restartStabilityTimer?.cancel();
+    _restartStabilityTimer = null;
+    if (!_desiredRunning || _driverChannel == null || _vmState != 'running') {
+      return;
+    }
+    final generation = _driverSessionGeneration;
+    _restartStabilityTimer = Timer(restartStabilityDuration, () {
+      _restartStabilityTimer = null;
+      if (generation != _driverSessionGeneration ||
+          !_desiredRunning ||
+          _driverChannel == null ||
+          _vmState != 'running') {
+        return;
+      }
+      _restartAttempts = 0;
+      _restartWindowLimiter.reset();
+      _lastFailure = null;
+      _emit('driver.restart_accounting_reset', {
+        'stableSeconds': restartStabilityDuration.inSeconds,
+      });
+      unawaited(_persistRuntimeState());
+    });
+  }
+
+  Future<void> _refreshVmStateFromDriver(RpcChannel channel) async {
+    final response = await channel
+        .sendRequest('vm.status')
+        .timeout(const Duration(seconds: 5));
+    if (response['error'] != null) {
+      throw StateError('Driver vm.status error: ${response['error']}');
+    }
+    if (!_updateVmStateFromResponse(response)) {
+      throw StateError('Driver vm.status response is missing state');
+    }
+  }
+
+  bool _updateVmStateFromResponse(Map<String, Object?> response) {
+    final result = response['result'];
+    if (result is! Map) {
+      return false;
+    }
+    final state = result['state'];
+    if (state is! String || state.isEmpty) {
+      return false;
+    }
+    _vmState = state;
+    return true;
+  }
+
   Future<Map<String, Object?>> driverExec(String method,
       {Object? params, Duration timeout = const Duration(seconds: 5)}) async {
     final channel = _driverChannel;
     if (channel == null) {
       throw StateError('Driver is not running');
     }
-    final response = await channel
-        .sendRequest(method, params: params)
-        .timeout(timeout);
+    final response =
+        await channel.sendRequest(method, params: params).timeout(timeout);
     if (response['error'] != null) {
       throw StateError('Driver error: ${response['error']}');
+    }
+    if (method.startsWith('vm.') && _updateVmStateFromResponse(response)) {
+      await _persistRuntimeState();
+    }
+    if (method == 'vm.start') {
+      _reconcileVmOnConnect = true;
+      _scheduleRestartAccountingReset();
+    } else if (method == 'vm.stop') {
+      _reconcileVmOnConnect = false;
+      _restartStabilityTimer?.cancel();
+      _restartStabilityTimer = null;
     }
     return response;
   }
@@ -817,7 +976,9 @@ class DaemonRpcServer {
     required this.supervisor,
     required this.configStore,
     this.logger,
-  });
+  }) {
+    supervisor.attachVmConfigLoader(configStore.getCurrentConfig);
+  }
 
   final String socketPath;
   final DriverSupervisor supervisor;
@@ -918,6 +1079,7 @@ class _ClientSession {
   final RpcChannel channel;
   bool subscribed = false;
   bool _handshakeComplete = false;
+  bool _handshakeInProgress = false;
 
   Future<void> run() async {
     channel.onRequest = _handleRequest;
@@ -941,6 +1103,15 @@ class _ClientSession {
     final params = JsonValue.asMap(request['params']);
 
     if (method == 'hello') {
+      if (_handshakeComplete || _handshakeInProgress) {
+        return JsonRpcProtocol.error(
+          id: id,
+          code: JsonRpcErrorCode.handshakeFailed,
+          message:
+              'Bidirectional hello handshake already in progress or complete',
+        );
+      }
+
       final protocol = params['protocol'];
       if (protocol != protocolVersion) {
         return JsonRpcProtocol.error(
@@ -960,31 +1131,74 @@ class _ClientSession {
           data: {'required': requiredCapabilities},
         );
       }
-      _handshakeComplete = true;
-      // Bidirectional hello: daemon also initiates a hello request to the client.
-      unawaited(() async {
-        try {
-          await channel.sendRequest('hello', params: {
-            'protocol': protocolVersion,
-            'capabilities': daemonCapabilities,
-            'requiredCapabilities': requiredCapabilities,
-          });
-        } catch (_) {
-          // Best-effort for bootstrap clients; client hello response is not yet required for CLI stub.
+
+      _handshakeInProgress = true;
+      try {
+        final peerResponse = await channel.sendRequest('hello', params: {
+          'protocol': protocolVersion,
+          'capabilities': daemonCapabilities,
+          'requiredCapabilities': requiredCapabilities,
+        }).timeout(const Duration(seconds: 5));
+        final peerError = peerResponse['error'];
+        if (peerError != null) {
+          return JsonRpcProtocol.error(
+            id: id,
+            code: JsonRpcErrorCode.handshakeFailed,
+            message: 'Client rejected daemon hello',
+            data: peerError,
+          );
         }
-      }());
-      return JsonRpcProtocol.result(id: id, result: {
-        'protocol': protocolVersion,
-        'capabilities': daemonCapabilities,
-        'acceptedCapabilities': accepted,
-      });
+
+        final peerResult = JsonValue.asMap(peerResponse['result']);
+        final peerProtocol = peerResult['protocol'];
+        if (peerProtocol != protocolVersion) {
+          return JsonRpcProtocol.error(
+            id: id,
+            code: JsonRpcErrorCode.handshakeFailed,
+            message: 'Reverse hello protocol mismatch',
+            data: {'expected': protocolVersion, 'actual': peerProtocol},
+          );
+        }
+        final peerAccepted =
+            JsonValue.asStringList(peerResult['acceptedCapabilities']);
+        if (!JsonValue.containsAllStrings(peerAccepted, requiredCapabilities)) {
+          return JsonRpcProtocol.error(
+            id: id,
+            code: JsonRpcErrorCode.capabilityMismatch,
+            message: 'Reverse hello capability mismatch',
+            data: {'required': requiredCapabilities},
+          );
+        }
+
+        _handshakeComplete = true;
+        return JsonRpcProtocol.result(id: id, result: {
+          'protocol': protocolVersion,
+          'capabilities': daemonCapabilities,
+          'acceptedCapabilities': accepted,
+        });
+      } on TimeoutException {
+        return JsonRpcProtocol.error(
+          id: id,
+          code: JsonRpcErrorCode.handshakeFailed,
+          message: 'Timed out waiting for client hello response',
+        );
+      } catch (error) {
+        return JsonRpcProtocol.error(
+          id: id,
+          code: JsonRpcErrorCode.handshakeFailed,
+          message: 'Client hello response failed',
+          data: {'error': error.toString()},
+        );
+      } finally {
+        _handshakeInProgress = false;
+      }
     }
 
     if (!_handshakeComplete) {
       return JsonRpcProtocol.error(
         id: id,
         code: JsonRpcErrorCode.handshakeFailed,
-        message: 'hello handshake required before method $method',
+        message: 'bidirectional hello handshake required before method $method',
       );
     }
 
@@ -1019,10 +1233,9 @@ class _ClientSession {
             await server.supervisor.start();
             final cfg = await server.configStore.getCurrentConfig();
             await server.supervisor.driverExec('vm.configure',
-                params: {'config': cfg},
-                timeout: const Duration(seconds: 60));
-            await server.supervisor.driverExec('vm.start',
-                timeout: const Duration(seconds: 60));
+                params: {'config': cfg}, timeout: const Duration(seconds: 60));
+            await server.supervisor
+                .driverExec('vm.start', timeout: const Duration(seconds: 60));
             return JsonRpcProtocol.result(
                 id: id, result: server.supervisor.status());
           } on ConfigValidationException catch (error) {
@@ -1033,8 +1246,8 @@ class _ClientSession {
         return server.runLifecycleOperation(() async {
           if (server.supervisor.status()['actual'] == 'running') {
             try {
-              await server.supervisor.driverExec('vm.stop',
-                  timeout: const Duration(seconds: 60));
+              await server.supervisor
+                  .driverExec('vm.stop', timeout: const Duration(seconds: 60));
             } catch (_) {
               // Continue with supervisor stop; process shutdown will stop the VM.
             }

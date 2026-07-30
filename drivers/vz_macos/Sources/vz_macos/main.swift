@@ -721,6 +721,14 @@ struct NormalizedVmConfig {
     let graphicsHeight: Int
 }
 
+func authenticationDeadlineExpired(
+    since lastAuthenticatedRPC: Date,
+    now: Date = Date(),
+    timeout: TimeInterval = 15
+) -> Bool {
+    now.timeIntervalSince(lastAuthenticatedRPC) > timeout
+}
+
 final class Driver {
     static let protocolVersion = "gaovm.v1.2"
     static let capabilities = [
@@ -765,6 +773,7 @@ final class Driver {
         logger.log(.info, "listening for daemon connection")
         let socket = try listener.acceptOne()
         self.socket = socket
+        markControlConnectionAccepted()
         logger.log(.info, "daemon connected")
         try sendHello()
 
@@ -994,10 +1003,16 @@ final class Driver {
         }
     }
 
+    private func markControlConnectionAccepted() {
+        stateQueue.sync {
+            authenticated = false
+            lastAuthenticatedDaemonRPC = Date()
+        }
+    }
+
     private func isHeartbeatExpired() -> Bool {
         stateQueue.sync {
-            guard authenticated else { return false }
-            return Date().timeIntervalSince(lastAuthenticatedDaemonRPC) > 15
+            authenticationDeadlineExpired(since: lastAuthenticatedDaemonRPC)
         }
     }
 
@@ -1026,6 +1041,13 @@ final class Driver {
     private func gracefulExit(reason: String, code: Int32) throws -> Never {
         logger.log(.warn, reason)
         fputs("[gaovm-driver-vz] \(reason)\n", stderr)
+        do {
+            _ = try vmRuntime.stop()
+            logger.log(.info, "VM stopped before driver exit")
+        } catch {
+            logger.log(.error, "failed to stop VM before driver exit: \(error)")
+            fputs("[gaovm-driver-vz] failed to stop VM before exit: \(error)\n", stderr)
+        }
         socket?.close()
         listener?.close()
         Foundation.exit(code)

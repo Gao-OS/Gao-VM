@@ -54,8 +54,7 @@ void main() {
       };
 
       await client.sendNotification('notify', params: {'data': 1});
-      final result =
-          await received.future.timeout(const Duration(seconds: 2));
+      final result = await received.future.timeout(const Duration(seconds: 2));
       expect(result, 'got it');
     });
 
@@ -68,7 +67,8 @@ void main() {
       final waiting = server.waitForRequest('special');
 
       // Client sends the request. Don't await — it would block waiting for response.
-      final clientFuture = client.sendRequest('special', params: {'key': 'value'});
+      final clientFuture =
+          client.sendRequest('special', params: {'key': 'value'});
 
       final request = await waiting.timeout(const Duration(seconds: 2));
       expect(request['method'], 'special');
@@ -99,6 +99,18 @@ void main() {
       final doneFuture = client.done;
       await client.close();
       await doneFuture.timeout(const Duration(seconds: 2));
+    });
+
+    test('sendRequest after close completes with an error', () async {
+      final (client, server) = await _createChannelPair();
+      addTearDown(server.close);
+
+      await client.close();
+
+      await expectLater(
+        client.sendRequest('late').timeout(const Duration(seconds: 1)),
+        throwsStateError,
+      );
     });
 
     test('handler error returns internalError to caller', () async {

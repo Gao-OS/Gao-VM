@@ -34,10 +34,123 @@ void main() {
         expect(s['driverPid'], isNull);
         expect(s['lastFailure'], isNull);
       });
+
+      test('distinguishes a connected driver from a stopped VM', () async {
+        final fixturePath =
+            '${Directory.current.path}/test/fixtures/fake_driver.dart';
+        final supervisor = DriverSupervisor(
+          driverBinary: Platform.resolvedExecutable,
+          driverArguments: [fixturePath],
+          stateDir: tempDir.path,
+        );
+        addTearDown(supervisor.dispose);
+
+        await supervisor.start();
+
+        final s = supervisor.status();
+        expect(s['desired'], 'running');
+        expect(s['driverActual'], 'running');
+        expect(s['vmState'], 'stopped');
+        expect(s['actual'], 'stopped');
+      });
+
+      test('tracks VM state from driver RPC responses', () async {
+        final fixturePath =
+            '${Directory.current.path}/test/fixtures/fake_driver.dart';
+        final supervisor = DriverSupervisor(
+          driverBinary: Platform.resolvedExecutable,
+          driverArguments: [fixturePath],
+          stateDir: tempDir.path,
+        );
+        addTearDown(supervisor.dispose);
+
+        await supervisor.start();
+        await supervisor.driverExec('vm.configure', params: {
+          'config': <String, Object?>{},
+        });
+        expect(supervisor.status()['vmState'], 'configured');
+        expect(supervisor.status()['actual'], 'stopped');
+
+        await supervisor.driverExec('vm.start');
+        expect(supervisor.status()['vmState'], 'running');
+        expect(supervisor.status()['actual'], 'running');
+
+        await supervisor.driverExec('vm.stop');
+        expect(supervisor.status()['vmState'], 'stopped');
+        expect(supervisor.status()['actual'], 'stopped');
+      });
+    });
+
+    group('desired-state reconcile', () {
+      test('reconfigures and restarts the VM after driver restart', () async {
+        final fixturePath =
+            '${Directory.current.path}/test/fixtures/fake_driver.dart';
+        final supervisor = DriverSupervisor(
+          driverBinary: Platform.resolvedExecutable,
+          driverArguments: [fixturePath],
+          stateDir: tempDir.path,
+          loadVmConfig: () async => <String, Object?>{'version': 1},
+        );
+        addTearDown(supervisor.dispose);
+
+        await supervisor.start();
+        await supervisor.driverExec('vm.configure', params: {
+          'config': <String, Object?>{'version': 1},
+        });
+        await supervisor.driverExec('vm.start');
+        final firstPid = supervisor.status()['driverPid'];
+        expect(supervisor.status()['actual'], 'running');
+
+        await supervisor.driverExec('test.crash');
+
+        final deadline = DateTime.now().add(const Duration(seconds: 8));
+        while (DateTime.now().isBefore(deadline)) {
+          final status = supervisor.status();
+          if (status['driverPid'] != firstPid &&
+              status['driverActual'] == 'running' &&
+              status['actual'] == 'running') {
+            break;
+          }
+          await Future<void>.delayed(const Duration(milliseconds: 100));
+        }
+
+        final recovered = supervisor.status();
+        expect(recovered['desired'], 'running');
+        expect(recovered['driverPid'], isNot(firstPid));
+        expect(recovered['driverActual'], 'running');
+        expect(recovered['actual'], 'running');
+      });
     });
 
     group('start() and stop()', () {
-      test('start sets desired=running and stop sets desired=stopped', () async {
+      test('requests vm.stop before closing the driver control channel',
+          () async {
+        final fixturePath =
+            '${Directory.current.path}/test/fixtures/fake_driver.dart';
+        final methodLog = File('${tempDir.path}/driver-methods.log');
+        final supervisor = DriverSupervisor(
+          driverBinary: Platform.resolvedExecutable,
+          driverArguments: [fixturePath, '--method-log', methodLog.path],
+          stateDir: tempDir.path,
+        );
+        addTearDown(supervisor.dispose);
+
+        await supervisor.start();
+        await supervisor.driverExec('vm.configure', params: {
+          'config': <String, Object?>{'version': 1},
+        });
+        await supervisor.driverExec('vm.start');
+        await supervisor.stop();
+
+        final methods = await methodLog.readAsLines();
+        expect(methods,
+            containsAllInOrder(['vm.configure', 'vm.start', 'vm.stop']));
+        expect(supervisor.status()['desired'], 'stopped');
+        expect(supervisor.status()['driverActual'], 'stopped');
+      });
+
+      test('start sets desired=running and stop sets desired=stopped',
+          () async {
         final events = <String>[];
         final supervisor = DriverSupervisor(
           driverBinary: '/usr/bin/false',
@@ -79,6 +192,108 @@ void main() {
     });
 
     group('restart backoff', () {
+      test('resets restart accounting only after a stable running window',
+          () async {
+        final events = <String>[];
+        final fixturePath =
+            '${Directory.current.path}/test/fixtures/fake_driver.dart';
+        final supervisor = DriverSupervisor(
+          driverBinary: Platform.resolvedExecutable,
+          driverArguments: [fixturePath],
+          stateDir: tempDir.path,
+          loadVmConfig: () async => <String, Object?>{'version': 1},
+          restartDelay: (_) => const Duration(milliseconds: 200),
+          restartStabilityDuration: const Duration(milliseconds: 500),
+          emitEvent: (type, payload) => events.add(type),
+        );
+        addTearDown(supervisor.dispose);
+
+        await supervisor.start();
+        await supervisor.driverExec('vm.configure', params: {
+          'config': <String, Object?>{'version': 1},
+        });
+        await supervisor.driverExec('vm.start');
+        final firstPid = supervisor.status()['driverPid'];
+        await supervisor.driverExec('test.crash');
+
+        final recoveryDeadline = DateTime.now().add(const Duration(seconds: 8));
+        while (DateTime.now().isBefore(recoveryDeadline)) {
+          final status = supervisor.status();
+          if (status['driverPid'] != firstPid &&
+              status['actual'] == 'running') {
+            break;
+          }
+          await Future<void>.delayed(const Duration(milliseconds: 25));
+        }
+
+        expect(supervisor.status()['restartAttempts'], 1);
+        expect(events, isNot(contains('driver.restart_accounting_reset')));
+
+        final resetDeadline = DateTime.now().add(const Duration(seconds: 2));
+        while (DateTime.now().isBefore(resetDeadline) &&
+            supervisor.status()['restartAttempts'] != 0) {
+          await Future<void>.delayed(const Duration(milliseconds: 25));
+        }
+
+        expect(supervisor.status()['restartAttempts'], 0);
+        expect(events, contains('driver.restart_accounting_reset'));
+      }, timeout: const Timeout(Duration(seconds: 12)));
+
+      test('counts post-handshake reconcile failures through attempt 5',
+          () async {
+        final events = <Map<String, Object?>>[];
+        final fixturePath =
+            '${Directory.current.path}/test/fixtures/fake_driver.dart';
+        final failStartFlag = File('${tempDir.path}/fail-vm-start');
+        final supervisor = DriverSupervisor(
+          driverBinary: Platform.resolvedExecutable,
+          driverArguments: [
+            fixturePath,
+            '--fail-vm-start-when',
+            failStartFlag.path,
+          ],
+          stateDir: tempDir.path,
+          loadVmConfig: () async => <String, Object?>{'version': 1},
+          restartDelay: (_) => const Duration(milliseconds: 200),
+          restartStabilityDuration: const Duration(seconds: 5),
+          emitEvent: (type, payload) => events.add({
+            'type': type,
+            ...payload,
+          }),
+        );
+        addTearDown(supervisor.dispose);
+
+        await supervisor.start();
+        await supervisor.driverExec('vm.configure', params: {
+          'config': <String, Object?>{'version': 1},
+        });
+        await supervisor.driverExec('vm.start');
+        await failStartFlag.create();
+        await supervisor.driverExec('test.crash');
+
+        final deadline = DateTime.now().add(const Duration(seconds: 20));
+        while (DateTime.now().isBefore(deadline) &&
+            events.every(
+                (event) => event['type'] != 'driver.permanent_failure')) {
+          await Future<void>.delayed(const Duration(milliseconds: 50));
+        }
+
+        final scheduled = events
+            .where((event) => event['type'] == 'driver.restart_scheduled')
+            .map((event) => event['attempt'])
+            .toList();
+        expect(
+          scheduled,
+          [1, 2, 3, 4, 5],
+          reason: 'events=$events status=${supervisor.status()}',
+        );
+        final permanentFailure = events.singleWhere(
+          (event) => event['type'] == 'driver.permanent_failure',
+        );
+        expect(permanentFailure['attempts'], 5);
+        expect(supervisor.status()['desired'], 'stopped');
+      }, timeout: const Timeout(Duration(seconds: 25)));
+
       test('schedules restart with exponential backoff on driver failure',
           () async {
         final events = <Map<String, Object?>>[];
@@ -108,8 +323,9 @@ void main() {
       test('enters permanent failure after 5 restart attempts', () async {
         final events = <Map<String, Object?>>[];
         final supervisor = DriverSupervisor(
-          driverBinary: '/usr/bin/false',
+          driverBinary: '${tempDir.path}/missing-driver',
           stateDir: tempDir.path,
+          restartDelay: (_) => const Duration(milliseconds: 200),
           emitEvent: (type, payload) => events.add({
             'type': type,
             ...payload,
@@ -119,15 +335,8 @@ void main() {
 
         await supervisor.start();
 
-        // Wait for enough time for 5 failures to cycle through.
-        // Backoff: 1, 2, 4, 8, 16 seconds — but driver fails fast.
-        // We need to wait for the restart timers to fire.
-        // With /usr/bin/false, each attempt fails almost immediately,
-        // but the backoff delays (1s, 2s, 4s, 8s) would take too long.
-        // Instead, we verify the mechanism by checking after sufficient time.
-        // Wait for first few failures + permanent_failure event.
-        for (var i = 0; i < 60; i++) {
-          await Future<void>.delayed(const Duration(milliseconds: 500));
+        for (var i = 0; i < 50; i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 100));
           final permanentFailures =
               events.where((e) => e['type'] == 'driver.permanent_failure');
           if (permanentFailures.isNotEmpty) {
@@ -142,7 +351,8 @@ void main() {
 
         final s = supervisor.status();
         expect(s['desired'], 'stopped');
-      }, timeout: Timeout(Duration(seconds: 60)));
+        expect(s['restartAttempts'], 5);
+      }, timeout: const Timeout(Duration(seconds: 10)));
     });
 
     group('desired state persistence', () {

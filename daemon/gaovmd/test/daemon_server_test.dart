@@ -403,6 +403,31 @@ void main() {
       expect(error['message'], contains('hello handshake required'));
     });
 
+    test('rejects method until daemon hello is acknowledged', () async {
+      final harness = await _TestHarness.start();
+      addTearDown(harness.close);
+
+      final socket = await Socket.connect(
+        InternetAddress(harness.socketPath, type: InternetAddressType.unix),
+        0,
+      );
+      final channel = RpcChannel(socket);
+      addTearDown(channel.close);
+
+      final helloFuture = channel.sendRequest('hello', params: {
+        'protocol': _ClientHello.protocol,
+        'capabilities': _ClientHello.capabilities,
+        'requiredCapabilities': _ClientHello.requiredCapabilities,
+      });
+      unawaited(helloFuture.catchError((_) => <String, Object?>{}));
+
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      final response = await channel.sendRequest('ping');
+      final error = Map<String, Object?>.from(response['error']! as Map);
+      expect(error['code'], JsonRpcErrorCode.handshakeFailed);
+      expect(error['message'], contains('bidirectional hello'));
+    });
+
     test('rejects protocol mismatch', () async {
       final harness = await _TestHarness.start();
       addTearDown(harness.close);
@@ -507,6 +532,20 @@ class _TestHarness {
       0,
     );
     final channel = RpcChannel(socket);
+    channel.onRequest = (request) async {
+      if (request['method'] != 'hello') {
+        return JsonRpcProtocol.error(
+          id: request['id'],
+          code: JsonRpcErrorCode.methodNotFound,
+          message: 'Method not found',
+        );
+      }
+      return JsonRpcProtocol.result(id: request['id'], result: {
+        'protocol': _ClientHello.protocol,
+        'capabilities': _ClientHello.capabilities,
+        'acceptedCapabilities': _ClientHello.capabilities,
+      });
+    };
     final hello = await channel.sendRequest('hello', params: {
       'protocol': _ClientHello.protocol,
       'capabilities': _ClientHello.capabilities,
