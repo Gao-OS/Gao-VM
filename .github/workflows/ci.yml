@@ -32,6 +32,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - package: gaovm_models
+            directory: libs/gaovm_models
+            paths: lib test
+            entrypoint: ''
           - package: gaovm_rpc
             directory: libs/gaovm_rpc
             paths: lib test
