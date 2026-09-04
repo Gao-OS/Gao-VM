@@ -445,4 +445,40 @@ void main() {
     expect(await repository.list(resourceType: ResourceType.image), [image]);
     database.close();
   });
+
+  test('createAndStart rolls back create when the start event fails', () async {
+    final database = await GaoVmDatabase.open(databasePath);
+    final operationId = OperationId('op_01J00000000000000000000020');
+    final duplicateEventId = EventId('evt_01J00000000000000000000020');
+    final repository = SqliteOperationRepository(
+      database,
+      newOperationId: () => operationId,
+      newEventId: () => duplicateEventId,
+      now: () => DateTime.utc(2026, 9, 4, 9),
+    );
+
+    await expectLater(
+      repository.createAndStart(
+        type: 'vm.delete.recovery',
+        resourceType: ResourceType.virtualMachine,
+        resourceId: VmId('vm_01J00000000000000000000000'),
+        requestId: RequestId('req_01J00000000000000000000020'),
+        cancellable: false,
+        request: JsonObjectValue.empty,
+      ),
+      throwsA(anything),
+    );
+
+    expect(await repository.get(operationId), isNull);
+    expect(
+      await database.read(
+        (connection) => connection.select(
+          'SELECT id FROM events WHERE id = ?',
+          [duplicateEventId.value],
+        ).length,
+      ),
+      0,
+    );
+    database.close();
+  });
 }

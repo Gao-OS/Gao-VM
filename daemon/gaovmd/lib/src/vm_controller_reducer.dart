@@ -218,6 +218,39 @@ final class ReconcileRequested extends VmCommand {
   const ReconcileRequested();
 }
 
+final class ControllerShutdownRequested extends VmCommand {
+  const ControllerShutdownRequested(this.teardownOperationId);
+
+  final OperationId teardownOperationId;
+}
+
+final class ControllerDriverShutdownSucceeded extends VmCommand {
+  const ControllerDriverShutdownSucceeded(
+    this.driverGeneration,
+    this.teardownOperationId,
+  );
+
+  final int driverGeneration;
+  final OperationId teardownOperationId;
+}
+
+final class ControllerDriverShutdownFailed extends VmCommand {
+  const ControllerDriverShutdownFailed(this.driverGeneration, this.error);
+
+  final int driverGeneration;
+  final OperationError error;
+}
+
+final class ControllerLeaseShutdownSucceeded extends VmCommand {
+  const ControllerLeaseShutdownSucceeded();
+}
+
+final class ControllerLeaseShutdownFailed extends VmCommand {
+  const ControllerLeaseShutdownFailed(this.error);
+
+  final OperationError error;
+}
+
 final class HostLeaseAcquired extends VmCommand {
   const HostLeaseAcquired(this.operationId);
 
@@ -227,13 +260,13 @@ final class HostLeaseAcquired extends VmCommand {
 final class HostLeaseReleased extends VmCommand {
   const HostLeaseReleased(this.operationId);
 
-  final OperationId operationId;
+  final OperationId? operationId;
 }
 
 final class HostLeaseReleaseFailed extends VmCommand {
   const HostLeaseReleaseFailed(this.operationId, this.error);
 
-  final OperationId operationId;
+  final OperationId? operationId;
   final OperationError error;
 }
 
@@ -300,6 +333,46 @@ final class RecoveryOperationCreated extends VmCommand {
 
   final OperationId operationId;
   final int failedDriverGeneration;
+}
+
+final class RecoveryOperationCreationFailed extends VmCommand {
+  const RecoveryOperationCreationFailed({
+    required this.failedDriverGeneration,
+    required this.error,
+  });
+
+  final int failedDriverGeneration;
+  final OperationError error;
+}
+
+final class EffectExecutionFailed extends VmCommand {
+  const EffectExecutionFailed({
+    required this.effectType,
+    required this.operationId,
+    required this.driverGeneration,
+    required this.error,
+    this.duringShutdown = false,
+    this.rolledBackCompletionOperationId,
+  });
+
+  final String effectType;
+  final OperationId? operationId;
+  final int? driverGeneration;
+  final OperationError error;
+  final bool duringShutdown;
+  final OperationId? rolledBackCompletionOperationId;
+}
+
+final class EffectExecutionSucceeded extends VmCommand {
+  const EffectExecutionSucceeded({
+    required this.effectType,
+    required this.operationId,
+    required this.driverGeneration,
+  });
+
+  final String effectType;
+  final OperationId? operationId;
+  final int? driverGeneration;
 }
 
 final class StableWindowElapsed extends VmCommand {
@@ -501,6 +574,18 @@ final class ReleaseHostLease extends VmEffect {
   const ReleaseHostLease({required super.vmId, required super.operationId});
 }
 
+final class ShutdownDriver extends VmEffect {
+  const ShutdownDriver({
+    required super.vmId,
+    required super.operationId,
+    required super.driverGeneration,
+  });
+}
+
+final class ShutdownLease extends VmEffect {
+  const ShutdownLease({required super.vmId, required super.operationId});
+}
+
 final class ScheduleRetry extends VmEffect {
   const ScheduleRetry({
     required super.vmId,
@@ -596,6 +681,27 @@ VmTransition reduce(VmControllerState state, VmCommand command) {
     ) =>
       _specUpdated(state, specGeneration, restartPolicy, restartRequired),
     ReconcileRequested() => _reconcile(state),
+    ControllerShutdownRequested(:final teardownOperationId) =>
+      _controllerShutdown(state, teardownOperationId),
+    ControllerDriverShutdownSucceeded(
+      :final driverGeneration,
+      :final teardownOperationId,
+    ) =>
+      _controllerDriverShutdownSucceeded(
+        state,
+        driverGeneration,
+        teardownOperationId,
+      ),
+    ControllerDriverShutdownFailed(:final driverGeneration, :final error) =>
+      _controllerShutdownFailed(state, error, driverGeneration),
+    ControllerLeaseShutdownSucceeded() => _controllerLeaseShutdownSucceeded(
+      state,
+    ),
+    ControllerLeaseShutdownFailed(:final error) => _controllerShutdownFailed(
+      state,
+      error,
+      null,
+    ),
     HostLeaseAcquired(:final operationId) => _leaseAcquired(state, operationId),
     HostLeaseReleased(:final operationId) => _leaseReleased(state, operationId),
     HostLeaseReleaseFailed(:final operationId, :final error) =>
@@ -640,6 +746,29 @@ VmTransition reduce(VmControllerState state, VmCommand command) {
       :final failedDriverGeneration,
     ) =>
       _recoveryOperationCreated(state, operationId, failedDriverGeneration),
+    RecoveryOperationCreationFailed(
+      :final failedDriverGeneration,
+      :final error,
+    ) =>
+      _recoveryOperationCreationFailed(state, failedDriverGeneration, error),
+    EffectExecutionFailed(
+      :final effectType,
+      :final operationId,
+      :final driverGeneration,
+      :final error,
+      :final duringShutdown,
+      :final rolledBackCompletionOperationId,
+    ) =>
+      _effectExecutionFailed(
+        state,
+        effectType,
+        operationId,
+        driverGeneration,
+        error,
+        duringShutdown,
+        rolledBackCompletionOperationId,
+      ),
+    EffectExecutionSucceeded() => VmTransition(state: state),
     StableWindowElapsed(:final operationId, :final driverGeneration) =>
       _stableWindowElapsed(state, operationId, driverGeneration),
     ManagedFilesRemoved(:final operationId) => _managedFilesRemoved(
@@ -1086,6 +1215,48 @@ VmTransition _reconcile(VmControllerState state) {
       ],
     );
   }
+  if (state.activeDriverGeneration == null &&
+      state.leaseState == VmLeaseState.none) {
+    final completesStop =
+        currentOperation != null &&
+        !currentOperation.isTerminal &&
+        currentOperation.kind == VmOperationKind.stop;
+    final transientPhase = const {
+      VmPhase.spawningDriver,
+      VmPhase.handshaking,
+      VmPhase.configuring,
+      VmPhase.starting,
+      VmPhase.running,
+      VmPhase.stopping,
+      VmPhase.crashed,
+    }.contains(state.phase);
+    if (completesStop || transientPhase) {
+      final completed = completesStop
+          ? currentOperation.copyWith(state: OperationState.succeeded)
+          : currentOperation;
+      return VmTransition(
+        state: state.copyWith(
+          phase: VmPhase.stopped,
+          currentOperation: completed,
+          clearDriverOperationId: true,
+        ),
+        effects: [
+          PersistRuntime(
+            vmId: state.vmId,
+            operationId: operationId,
+            driverGeneration: state.driverGeneration,
+          ),
+          if (completesStop)
+            CompleteOperation(vmId: state.vmId, operationId: operationId!),
+          EmitEvent(
+            vmId: state.vmId,
+            operationId: operationId,
+            type: 'vm.stopped',
+          ),
+        ],
+      );
+    }
+  }
   if (state.activeDriverGeneration case final generation?) {
     return VmTransition(
       state: state.copyWith(
@@ -1127,6 +1298,122 @@ VmTransition _reconcile(VmControllerState state) {
     );
   }
   return VmTransition(state: state);
+}
+
+VmTransition _controllerShutdown(
+  VmControllerState state,
+  OperationId teardownOperationId,
+) {
+  final operationId =
+      state.driverOperationId ??
+      state.currentOperation?.id ??
+      teardownOperationId;
+  final activeGeneration = state.activeDriverGeneration;
+  final hasLease = state.leaseState != VmLeaseState.none;
+  return VmTransition(
+    state: state.copyWith(
+      phase: activeGeneration != null || hasLease
+          ? VmPhase.stopping
+          : VmPhase.stopped,
+      retryState: VmRetryState(maxAttempts: state.retryState.maxAttempts),
+      clearPendingRecoveryGeneration: true,
+      clearPendingRecoveryError: true,
+      leaseState: activeGeneration == null && hasLease
+          ? VmLeaseState.releasing
+          : state.leaseState,
+    ),
+    effects: [
+      if (state.retryState.retryScheduled)
+        CancelRetry(vmId: state.vmId, operationId: operationId),
+      if (activeGeneration != null)
+        ShutdownDriver(
+          vmId: state.vmId,
+          operationId: operationId,
+          driverGeneration: activeGeneration,
+        ),
+      if (activeGeneration == null && hasLease)
+        ShutdownLease(vmId: state.vmId, operationId: operationId),
+    ],
+  );
+}
+
+VmTransition _controllerDriverShutdownSucceeded(
+  VmControllerState state,
+  int driverGeneration,
+  OperationId teardownOperationId,
+) {
+  if (state.activeDriverGeneration != driverGeneration) {
+    return VmTransition(state: state);
+  }
+  final hasLease = state.leaseState != VmLeaseState.none;
+  return VmTransition(
+    state: state.copyWith(
+      phase: hasLease ? VmPhase.stopping : VmPhase.stopped,
+      clearActiveDriverGeneration: true,
+      clearActiveSpecGeneration: true,
+      clearDriverOperationId: true,
+      leaseState: hasLease ? VmLeaseState.releasing : VmLeaseState.none,
+    ),
+    effects: [
+      if (hasLease)
+        ShutdownLease(vmId: state.vmId, operationId: teardownOperationId),
+    ],
+  );
+}
+
+VmTransition _controllerLeaseShutdownSucceeded(VmControllerState state) {
+  if (state.leaseState != VmLeaseState.releasing) {
+    return VmTransition(state: state);
+  }
+  return VmTransition(
+    state: state.copyWith(
+      phase: state.activeDriverGeneration == null
+          ? VmPhase.stopped
+          : state.phase,
+      leaseState: VmLeaseState.none,
+    ),
+  );
+}
+
+VmTransition _controllerShutdownFailed(
+  VmControllerState state,
+  OperationError error,
+  int? driverGeneration,
+) {
+  if (driverGeneration != null &&
+      state.activeDriverGeneration != driverGeneration) {
+    return VmTransition(state: state);
+  }
+  final operation = state.currentOperation;
+  return VmTransition(
+    state: state.copyWith(
+      phase: VmPhase.failed,
+      currentOperation: operation != null && !operation.isTerminal
+          ? operation.copyWith(state: OperationState.failed)
+          : operation,
+      lastError: error,
+    ),
+    effects: [
+      PersistVm(vmId: state.vmId, operationId: operation?.id),
+      PersistRuntime(
+        vmId: state.vmId,
+        operationId: operation?.id,
+        driverGeneration: driverGeneration ?? state.driverGeneration,
+      ),
+      if (operation != null && !operation.isTerminal)
+        FailOperation(
+          vmId: state.vmId,
+          operationId: operation.id,
+          error: error,
+        ),
+      EmitEvent(
+        vmId: state.vmId,
+        operationId: operation?.id,
+        driverGeneration: driverGeneration,
+        type: 'vm.controller_shutdown_failed',
+      ),
+    ],
+  );
 }
 
 VmTransition _stop(VmControllerState state, OperationId operationId) {
@@ -1410,8 +1697,27 @@ VmTransition _leaseFailed(
   );
 }
 
-VmTransition _leaseReleased(VmControllerState state, OperationId operationId) {
+VmTransition _leaseReleased(VmControllerState state, OperationId? operationId) {
   final operation = state.currentOperation;
+  if (state.leaseState == VmLeaseState.releasing &&
+      operation == null &&
+      state.pendingRecoveryGeneration == null) {
+    return VmTransition(
+      state: state.copyWith(
+        phase: state.desiredState == DesiredState.stopped
+            ? VmPhase.stopped
+            : state.phase,
+        leaseState: VmLeaseState.none,
+      ),
+      effects: [
+        PersistRuntime(
+          vmId: state.vmId,
+          operationId: null,
+          driverGeneration: state.driverGeneration,
+        ),
+      ],
+    );
+  }
   if (state.leaseState == VmLeaseState.releasing &&
       operation == null &&
       state.pendingRecoveryGeneration != null) {
@@ -2061,6 +2367,114 @@ VmTransition _recoveryOperationCreated(
   );
 }
 
+VmTransition _recoveryOperationCreationFailed(
+  VmControllerState state,
+  int failedDriverGeneration,
+  OperationError error,
+) {
+  if (state.pendingRecoveryGeneration != failedDriverGeneration ||
+      state.deletionState != VmDeletionState.active ||
+      state.desiredState != DesiredState.running) {
+    return VmTransition(state: state);
+  }
+  return VmTransition(
+    state: state.copyWith(
+      desiredState: DesiredState.stopped,
+      phase: VmPhase.failed,
+      retryState: VmRetryState(maxAttempts: state.retryState.maxAttempts),
+      clearPendingRecoveryGeneration: true,
+      clearPendingRecoveryError: true,
+      lastError: error,
+    ),
+    effects: [
+      PersistVm(vmId: state.vmId, operationId: null),
+      PersistRuntime(
+        vmId: state.vmId,
+        operationId: null,
+        driverGeneration: failedDriverGeneration,
+      ),
+      EmitEvent(
+        vmId: state.vmId,
+        operationId: null,
+        driverGeneration: failedDriverGeneration,
+        type: 'vm.recovery_operation_failed',
+      ),
+    ],
+  );
+}
+
+VmTransition _effectExecutionFailed(
+  VmControllerState state,
+  String effectType,
+  OperationId? operationId,
+  int? driverGeneration,
+  OperationError error,
+  bool duringShutdown,
+  OperationId? rolledBackCompletionOperationId,
+) {
+  if (duringShutdown) return VmTransition(state: state);
+  final operation = state.currentOperation;
+  final correlatedOperation =
+      operationId == null ||
+      operation?.id == operationId ||
+      state.driverOperationId == operationId;
+  final correlatedGeneration =
+      driverGeneration == null ||
+      state.driverGeneration == driverGeneration ||
+      state.activeDriverGeneration == driverGeneration;
+  if (!correlatedOperation || !correlatedGeneration) {
+    return VmTransition(state: state);
+  }
+  final rolledBackCompletion =
+      rolledBackCompletionOperationId != null &&
+      operation?.id == rolledBackCompletionOperationId;
+  final rolledBackDelete =
+      rolledBackCompletion &&
+      operation?.kind == VmOperationKind.delete &&
+      state.deletionState == VmDeletionState.deleted;
+  final shouldFailOperation =
+      operation != null && (!operation.isTerminal || rolledBackCompletion);
+  return VmTransition(
+    state: state.copyWith(
+      desiredState: DesiredState.stopped,
+      phase: VmPhase.failed,
+      deletionState: rolledBackDelete
+          ? VmDeletionState.deleting
+          : state.deletionState,
+      leaseState: state.leaseState,
+      currentOperation: shouldFailOperation
+          ? operation.copyWith(state: OperationState.failed)
+          : operation,
+      retryState: VmRetryState(maxAttempts: state.retryState.maxAttempts),
+      clearPendingRecoveryGeneration: true,
+      clearPendingRecoveryError: true,
+      lastError: error,
+    ),
+    effects: [
+      PersistVm(vmId: state.vmId, operationId: operationId),
+      PersistRuntime(
+        vmId: state.vmId,
+        operationId: operationId,
+        driverGeneration: driverGeneration ?? state.driverGeneration,
+      ),
+      if (shouldFailOperation)
+        FailOperation(
+          vmId: state.vmId,
+          operationId: operation.id,
+          error: error,
+        ),
+      EmitEvent(
+        vmId: state.vmId,
+        operationId: operationId,
+        driverGeneration: driverGeneration,
+        type: rolledBackDelete
+            ? 'vm.delete_failed'
+            : 'vm.effect_failed.$effectType',
+      ),
+    ],
+  );
+}
+
 VmTransition _stableWindowElapsed(
   VmControllerState state,
   OperationId operationId,
@@ -2114,9 +2528,28 @@ VmTransition _runtimeSetupFailed(
 
 VmTransition _leaseReleaseFailed(
   VmControllerState state,
-  OperationId operationId,
+  OperationId? operationId,
   OperationError error,
 ) {
+  if (state.leaseState == VmLeaseState.releasing &&
+      state.currentOperation == null &&
+      state.pendingRecoveryGeneration == null) {
+    return VmTransition(
+      state: state.copyWith(phase: VmPhase.failed, lastError: error),
+      effects: [
+        PersistRuntime(
+          vmId: state.vmId,
+          operationId: null,
+          driverGeneration: state.driverGeneration,
+        ),
+        EmitEvent(
+          vmId: state.vmId,
+          operationId: null,
+          type: 'vm.lease_release_failed',
+        ),
+      ],
+    );
+  }
   if (state.leaseState == VmLeaseState.releasing &&
       state.currentOperation == null &&
       state.pendingRecoveryGeneration != null) {

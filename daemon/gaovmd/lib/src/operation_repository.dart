@@ -19,6 +19,17 @@ abstract interface class OperationRepository {
     DateTime? deadlineAt,
   });
 
+  Future<Operation> createAndStart({
+    required String type,
+    required ResourceType resourceType,
+    required ResourceId resourceId,
+    required RequestId requestId,
+    String? idempotencyKey,
+    required bool cancellable,
+    required JsonObjectValue request,
+    DateTime? deadlineAt,
+  });
+
   Future<Operation?> get(OperationId id);
 
   Future<List<Operation>> list({
@@ -151,6 +162,30 @@ final class SqliteOperationRepository implements OperationRepository {
       return stored;
     });
   }
+
+  @override
+  Future<Operation> createAndStart({
+    required String type,
+    required ResourceType resourceType,
+    required ResourceId resourceId,
+    required RequestId requestId,
+    String? idempotencyKey,
+    required bool cancellable,
+    required JsonObjectValue request,
+    DateTime? deadlineAt,
+  }) => _database.transaction((_) async {
+    final created = await create(
+      type: type,
+      resourceType: resourceType,
+      resourceId: resourceId,
+      requestId: requestId,
+      idempotencyKey: idempotencyKey,
+      cancellable: cancellable,
+      request: request,
+      deadlineAt: deadlineAt,
+    );
+    return start(created.id);
+  });
 
   @override
   Future<Operation?> get(OperationId id) => _database.read((connection) {
