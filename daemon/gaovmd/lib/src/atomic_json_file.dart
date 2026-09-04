@@ -13,11 +13,13 @@ class AtomicJsonFile {
     final target = File(path);
     await target.parent.create(recursive: true);
     final tmp = File(
-        '${target.path}.tmp.${pid}.${DateTime.now().microsecondsSinceEpoch}');
+      '${target.path}.tmp.${pid}.${DateTime.now().microsecondsSinceEpoch}',
+    );
     final raf = await tmp.open(mode: FileMode.write);
     try {
-      final bytes =
-          utf8.encode(const JsonEncoder.withIndent('  ').convert(jsonMap));
+      final bytes = utf8.encode(
+        const JsonEncoder.withIndent('  ').convert(jsonMap),
+      );
       await raf.writeFrom(bytes);
       await raf.writeString('\n');
       await raf.flush();
@@ -34,15 +36,19 @@ final class _PosixDirectoryFsync {
   static final ffi.DynamicLibrary _libc = Platform.isMacOS
       ? ffi.DynamicLibrary.open('/usr/lib/libSystem.B.dylib')
       : ffi.DynamicLibrary.open('libc.so.6');
-  static final int Function(ffi.Pointer<Utf8>, int) _open =
-      _libc.lookupFunction<ffi.Int32 Function(ffi.Pointer<Utf8>, ffi.Int32),
-          int Function(ffi.Pointer<Utf8>, int)>('open');
-  static final int Function(int) _fsync =
-      _libc.lookupFunction<ffi.Int32 Function(ffi.Int32), int Function(int)>(
-          'fsync');
-  static final int Function(int) _close =
-      _libc.lookupFunction<ffi.Int32 Function(ffi.Int32), int Function(int)>(
-          'close');
+  static final int Function(ffi.Pointer<Utf8>, int) _open = _libc
+      .lookupFunction<
+        ffi.Int32 Function(ffi.Pointer<Utf8>, ffi.Int32),
+        int Function(ffi.Pointer<Utf8>, int)
+      >('open');
+  static final int Function(int) _fsync = _libc
+      .lookupFunction<ffi.Int32 Function(ffi.Int32), int Function(int)>(
+        'fsync',
+      );
+  static final int Function(int) _close = _libc
+      .lookupFunction<ffi.Int32 Function(ffi.Int32), int Function(int)>(
+        'close',
+      );
 
   static void bestEffort(String dirPath) {
     if (!_enabled) {

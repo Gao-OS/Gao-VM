@@ -14,9 +14,12 @@ void main() {
       final client = await harness.connectClient();
       addTearDown(client.close);
 
-      final response = await client.sendRequest('vm.config.patch', params: {
-        'patch': {'cpu': 0},
-      });
+      final response = await client.sendRequest(
+        'vm.config.patch',
+        params: {
+          'patch': {'cpu': 0},
+        },
+      );
       final error = Map<String, Object?>.from(response['error']! as Map);
 
       expect(error['code'], JsonRpcErrorCode.invalidParams);
@@ -54,9 +57,10 @@ void main() {
       final client = await harness.connectClient();
       addTearDown(client.close);
 
-      final response = await client.sendRequest('driver.exec', params: {
-        'method': 'vm.status',
-      });
+      final response = await client.sendRequest(
+        'driver.exec',
+        params: {'method': 'vm.status'},
+      );
       final error = Map<String, Object?>.from(response['error']! as Map);
 
       expect(error['code'], JsonRpcErrorCode.methodNotFound);
@@ -227,9 +231,10 @@ void main() {
         'network': {'mode': 'shared'},
         'graphics': {'enabled': true, 'width': 1280, 'height': 800},
       };
-      final response = await client.sendRequest('vm.config.set', params: {
-        'config': config,
-      });
+      final response = await client.sendRequest(
+        'vm.config.set',
+        params: {'config': config},
+      );
       expect(response['error'], isNull);
       final result = Map<String, Object?>.from(response['result']! as Map);
       expect(result['applied'], true);
@@ -242,9 +247,12 @@ void main() {
       final client = await harness.connectClient();
       addTearDown(client.close);
 
-      final response = await client.sendRequest('vm.config.patch', params: {
-        'patch': {'cpu': 8},
-      });
+      final response = await client.sendRequest(
+        'vm.config.patch',
+        params: {
+          'patch': {'cpu': 8},
+        },
+      );
       expect(response['error'], isNull);
       final result = Map<String, Object?>.from(response['result']! as Map);
       expect(result['applied'], true);
@@ -414,11 +422,14 @@ void main() {
       final channel = RpcChannel(socket);
       addTearDown(channel.close);
 
-      final helloFuture = channel.sendRequest('hello', params: {
-        'protocol': _ClientHello.protocol,
-        'capabilities': _ClientHello.capabilities,
-        'requiredCapabilities': _ClientHello.requiredCapabilities,
-      });
+      final helloFuture = channel.sendRequest(
+        'hello',
+        params: {
+          'protocol': _ClientHello.protocol,
+          'capabilities': _ClientHello.capabilities,
+          'requiredCapabilities': _ClientHello.requiredCapabilities,
+        },
+      );
       unawaited(helloFuture.catchError((_) => <String, Object?>{}));
 
       await Future<void>.delayed(const Duration(milliseconds: 50));
@@ -439,11 +450,14 @@ void main() {
       final channel = RpcChannel(socket);
       addTearDown(channel.close);
 
-      final response = await channel.sendRequest('hello', params: {
-        'protocol': 'gaovm.v999',
-        'capabilities': ['hello', 'ping'],
-        'requiredCapabilities': ['hello', 'ping'],
-      });
+      final response = await channel.sendRequest(
+        'hello',
+        params: {
+          'protocol': 'gaovm.v999',
+          'capabilities': ['hello', 'ping'],
+          'requiredCapabilities': ['hello', 'ping'],
+        },
+      );
       final error = Map<String, Object?>.from(response['error']! as Map);
       expect(error['code'], JsonRpcErrorCode.handshakeFailed);
       expect(error['message'], contains('Protocol mismatch'));
@@ -461,11 +475,14 @@ void main() {
       addTearDown(channel.close);
 
       // Offer no capabilities — required caps won't intersect.
-      final response = await channel.sendRequest('hello', params: {
-        'protocol': 'gaovm.v1.2',
-        'capabilities': [],
-        'requiredCapabilities': [],
-      });
+      final response = await channel.sendRequest(
+        'hello',
+        params: {
+          'protocol': 'gaovm.v1.2',
+          'capabilities': [],
+          'requiredCapabilities': [],
+        },
+      );
       final error = Map<String, Object?>.from(response['error']! as Map);
       expect(error['code'], JsonRpcErrorCode.capabilityMismatch);
     });
@@ -540,17 +557,23 @@ class _TestHarness {
           message: 'Method not found',
         );
       }
-      return JsonRpcProtocol.result(id: request['id'], result: {
+      return JsonRpcProtocol.result(
+        id: request['id'],
+        result: {
+          'protocol': _ClientHello.protocol,
+          'capabilities': _ClientHello.capabilities,
+          'acceptedCapabilities': _ClientHello.capabilities,
+        },
+      );
+    };
+    final hello = await channel.sendRequest(
+      'hello',
+      params: {
         'protocol': _ClientHello.protocol,
         'capabilities': _ClientHello.capabilities,
-        'acceptedCapabilities': _ClientHello.capabilities,
-      });
-    };
-    final hello = await channel.sendRequest('hello', params: {
-      'protocol': _ClientHello.protocol,
-      'capabilities': _ClientHello.capabilities,
-      'requiredCapabilities': _ClientHello.requiredCapabilities,
-    });
+        'requiredCapabilities': _ClientHello.requiredCapabilities,
+      },
+    );
     expect(hello['error'], isNull);
     return channel;
   }
@@ -571,7 +594,7 @@ class _ClientHello {
 
 class _FakeDriverSupervisor extends DriverSupervisor {
   _FakeDriverSupervisor({required super.stateDir})
-      : super(driverBinary: '/usr/bin/false');
+    : super(driverBinary: '/usr/bin/false');
 
   bool _desiredRunning = false;
   bool _actualRunning = false;
@@ -581,14 +604,14 @@ class _FakeDriverSupervisor extends DriverSupervisor {
 
   @override
   Map<String, Object?> status() => {
-        'desired': _desiredRunning ? 'running' : 'stopped',
-        'actual': _actualRunning ? 'running' : 'stopped',
-        'restartAttempts': 0,
-        'maxRestartAttempts': 5,
-        'driverPid': null,
-        'driverSocketPath': null,
-        'lastFailure': null,
-      };
+    'desired': _desiredRunning ? 'running' : 'stopped',
+    'actual': _actualRunning ? 'running' : 'stopped',
+    'restartAttempts': 0,
+    'maxRestartAttempts': 5,
+    'driverPid': null,
+    'driverSocketPath': null,
+    'lastFailure': null,
+  };
 
   @override
   Future<void> start() async {
@@ -611,8 +634,11 @@ class _FakeDriverSupervisor extends DriverSupervisor {
   }
 
   @override
-  Future<Map<String, Object?>> driverExec(String method,
-      {Object? params, Duration timeout = const Duration(seconds: 5)}) async {
+  Future<Map<String, Object?>> driverExec(
+    String method, {
+    Object? params,
+    Duration timeout = const Duration(seconds: 5),
+  }) async {
     return _trackLifecycle(() async {
       await Future<void>.delayed(const Duration(milliseconds: 40));
       if (method == 'vm.stop') {
@@ -630,10 +656,10 @@ class _FakeDriverSupervisor extends DriverSupervisor {
 
   @override
   Future<Map<String, Object?>> doctor() async => {
-        'ok': true,
-        'daemon': status(),
-        'checks': const <String, Object?>{},
-      };
+    'ok': true,
+    'daemon': status(),
+    'checks': const <String, Object?>{},
+  };
 
   EventEmitter? _emitter;
 

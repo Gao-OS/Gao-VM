@@ -18,7 +18,8 @@ void main() {
       }
       expect(
         limiter.recordAndIsLimited(
-            t0.add(const Duration(minutes: 4, seconds: 59))),
+          t0.add(const Duration(minutes: 4, seconds: 59)),
+        ),
         isTrue,
       );
     });

@@ -3,8 +3,8 @@ import 'dart:io';
 
 import 'atomic_json_file.dart';
 
-typedef ConfigEventEmitter = void Function(
-    String type, Map<String, Object?> payload);
+typedef ConfigEventEmitter =
+    void Function(String type, Map<String, Object?> payload);
 
 class ConfigValidationException implements Exception {
   ConfigValidationException(this.message);
@@ -73,8 +73,11 @@ class VmConfigStore {
     final base = isRunning && pending != null ? pending : current;
     final merged = _deepMergeMap(base, patch);
     _validateFullConfig(merged);
-    final result =
-        await _writeConfig(merged, isRunning: isRunning, emitEvent: emitEvent);
+    final result = await _writeConfig(
+      merged,
+      isRunning: isRunning,
+      emitEvent: emitEvent,
+    );
     return {
       ...result,
       'patchedFrom': isRunning && pending != null ? 'pending' : 'current',
@@ -96,10 +99,7 @@ class VmConfigStore {
         pendingBefore == null
             ? 'event.pending_config_written'
             : 'event.pending_config_replaced',
-        {
-          'restartRequired': true,
-          'currentConfigUnchanged': true,
-        },
+        {'restartRequired': true, 'currentConfigUnchanged': true},
       );
       return {
         'applied': false,
@@ -130,8 +130,9 @@ class VmConfigStore {
     };
   }
 
-  Future<bool> activatePendingIfPresent(
-      {required ConfigEventEmitter emitEvent}) async {
+  Future<bool> activatePendingIfPresent({
+    required ConfigEventEmitter emitEvent,
+  }) async {
     final pending = await getPendingConfig();
     if (pending == null) {
       return false;
@@ -141,9 +142,7 @@ class VmConfigStore {
     if (await pendingFile.exists()) {
       await pendingFile.delete();
     }
-    emitEvent('config.pending_applied', {
-      'applied': true,
-    });
+    emitEvent('config.pending_applied', {'applied': true});
     return true;
   }
 
@@ -152,7 +151,8 @@ class VmConfigStore {
     final decoded = jsonDecode(text);
     if (decoded is! Map) {
       throw ConfigValidationException(
-          'Config file must contain a JSON object: ${file.path}');
+        'Config file must contain a JSON object: ${file.path}',
+      );
     }
     return Map<String, Object?>.from(decoded);
   }
@@ -171,9 +171,12 @@ class VmConfigStore {
     _requireInt(config, 'memory', min: 134217728);
 
     final boot = _requireObject(config, 'boot');
-    _requireExactKeys(
-        boot, {'loader', 'kernelPath', 'initrdPath', 'commandLine'},
-        path: 'boot');
+    _requireExactKeys(boot, {
+      'loader',
+      'kernelPath',
+      'initrdPath',
+      'commandLine',
+    }, path: 'boot');
     _requireString(boot, 'loader', path: 'boot');
     _requireStringOrNull(boot, 'kernelPath', path: 'boot');
     _requireStringOrNull(boot, 'initrdPath', path: 'boot');
@@ -185,7 +188,8 @@ class VmConfigStore {
     final diskSize = disk['sizeMiB'];
     if (diskSize != null && (diskSize is! int || diskSize < 64)) {
       throw ConfigValidationException(
-          'disk.sizeMiB must be null or an integer >= 64');
+        'disk.sizeMiB must be null or an integer >= 64',
+      );
     }
 
     final network = _requireObject(config, 'network');
@@ -193,8 +197,11 @@ class VmConfigStore {
     _requireString(network, 'mode', path: 'network');
 
     final graphics = _requireObject(config, 'graphics');
-    _requireExactKeys(graphics, {'enabled', 'width', 'height'},
-        path: 'graphics');
+    _requireExactKeys(graphics, {
+      'enabled',
+      'width',
+      'height',
+    }, path: 'graphics');
     _requireBool(graphics, 'enabled', path: 'graphics');
     _requireInt(graphics, 'width', min: 64);
     _requireInt(graphics, 'height', min: 64);
@@ -208,7 +215,8 @@ class VmConfigStore {
     for (final entry in patch.entries) {
       if (!allowedTop.contains(entry.key)) {
         throw ConfigValidationException(
-            'Unsupported config patch key: ${entry.key}');
+          'Unsupported config patch key: ${entry.key}',
+        );
       }
       switch (entry.key) {
         case 'cpu':
@@ -218,7 +226,8 @@ class VmConfigStore {
         case 'memory':
           if (entry.value is! int || (entry.value as int) < 134217728) {
             throw ConfigValidationException(
-                'memory must be an integer >= 134217728');
+              'memory must be an integer >= 134217728',
+            );
           }
         case 'boot':
           _validatePatchObject(
@@ -234,46 +243,60 @@ class VmConfigStore {
               boot['kernelPath'] != null &&
               boot['kernelPath'] is! String) {
             throw ConfigValidationException(
-                'boot.kernelPath must be a string or null');
+              'boot.kernelPath must be a string or null',
+            );
           }
           if (boot.containsKey('initrdPath') &&
               boot['initrdPath'] != null &&
               boot['initrdPath'] is! String) {
             throw ConfigValidationException(
-                'boot.initrdPath must be a string or null');
+              'boot.initrdPath must be a string or null',
+            );
           }
           if (boot.containsKey('commandLine') &&
               boot['commandLine'] != null &&
               boot['commandLine'] is! String) {
             throw ConfigValidationException(
-                'boot.commandLine must be a string or null');
+              'boot.commandLine must be a string or null',
+            );
           }
         case 'disk':
-          _validatePatchObject(entry.value,
-              allowedKeys: {'path', 'sizeMiB'}, path: 'disk');
+          _validatePatchObject(
+            entry.value,
+            allowedKeys: {'path', 'sizeMiB'},
+            path: 'disk',
+          );
           final disk = Map<String, Object?>.from(entry.value as Map);
           if (disk.containsKey('path') &&
               disk['path'] != null &&
               disk['path'] is! String) {
             throw ConfigValidationException(
-                'disk.path must be a string or null');
+              'disk.path must be a string or null',
+            );
           }
           if (disk.containsKey('sizeMiB') &&
               disk['sizeMiB'] != null &&
               (disk['sizeMiB'] is! int || (disk['sizeMiB'] as int) < 64)) {
             throw ConfigValidationException(
-                'disk.sizeMiB must be null or an integer >= 64');
+              'disk.sizeMiB must be null or an integer >= 64',
+            );
           }
         case 'network':
-          _validatePatchObject(entry.value,
-              allowedKeys: {'mode'}, path: 'network');
+          _validatePatchObject(
+            entry.value,
+            allowedKeys: {'mode'},
+            path: 'network',
+          );
           final network = Map<String, Object?>.from(entry.value as Map);
           if (network.containsKey('mode') && network['mode'] is! String) {
             throw ConfigValidationException('network.mode must be a string');
           }
         case 'graphics':
-          _validatePatchObject(entry.value,
-              allowedKeys: {'enabled', 'width', 'height'}, path: 'graphics');
+          _validatePatchObject(
+            entry.value,
+            allowedKeys: {'enabled', 'width', 'height'},
+            path: 'graphics',
+          );
           final graphics = Map<String, Object?>.from(entry.value as Map);
           if (graphics.containsKey('enabled') && graphics['enabled'] is! bool) {
             throw ConfigValidationException('graphics.enabled must be a bool');
@@ -281,13 +304,15 @@ class VmConfigStore {
           if (graphics.containsKey('width') &&
               (graphics['width'] is! int || (graphics['width'] as int) < 64)) {
             throw ConfigValidationException(
-                'graphics.width must be an integer >= 64');
+              'graphics.width must be an integer >= 64',
+            );
           }
           if (graphics.containsKey('height') &&
               (graphics['height'] is! int ||
                   (graphics['height'] as int) < 64)) {
             throw ConfigValidationException(
-                'graphics.height must be an integer >= 64');
+              'graphics.height must be an integer >= 64',
+            );
           }
       }
     }
@@ -313,7 +338,9 @@ class VmConfigStore {
   }
 
   Map<String, Object?> _deepMergeMap(
-      Map<String, Object?> base, Map<String, Object?> patch) {
+    Map<String, Object?> base,
+    Map<String, Object?> patch,
+  ) {
     final out = <String, Object?>{};
     for (final entry in base.entries) {
       out[entry.key] = _cloneJsonValue(entry.value);
@@ -355,12 +382,16 @@ class VmConfigStore {
     return Map<String, Object?>.from(value);
   }
 
-  void _requireExactKeys(Map<String, Object?> obj, Set<String> keys,
-      {required String path}) {
+  void _requireExactKeys(
+    Map<String, Object?> obj,
+    Set<String> keys, {
+    required String path,
+  }) {
     final actual = obj.keys.toSet();
     if (!actual.containsAll(keys) || !keys.containsAll(actual)) {
       throw ConfigValidationException(
-          '$path must contain exactly keys: ${keys.toList()..sort()}');
+        '$path must contain exactly keys: ${keys.toList()..sort()}',
+      );
     }
   }
 
@@ -375,12 +406,16 @@ class VmConfigStore {
     final value = obj[key];
     if (value is! String) {
       throw ConfigValidationException(
-          '${path == null ? key : '$path.$key'} must be a string');
+        '${path == null ? key : '$path.$key'} must be a string',
+      );
     }
   }
 
-  void _requireStringOrNull(Map<String, Object?> obj, String key,
-      {String? path}) {
+  void _requireStringOrNull(
+    Map<String, Object?> obj,
+    String key, {
+    String? path,
+  }) {
     final value = obj[key];
     if (value != null && value is! String) {
       throw ConfigValidationException(
@@ -393,7 +428,8 @@ class VmConfigStore {
     final value = obj[key];
     if (value is! bool) {
       throw ConfigValidationException(
-          '${path == null ? key : '$path.$key'} must be a bool');
+        '${path == null ? key : '$path.$key'} must be a bool',
+      );
     }
   }
 
@@ -407,33 +443,30 @@ class VmConfigStore {
         'initrdPath': null,
         'commandLine': null,
       },
-      'disk': {
-        'path': null,
-        'sizeMiB': 8192,
-      },
-      'network': {
-        'mode': 'shared',
-      },
-      'graphics': {
-        'enabled': true,
-        'width': 1280,
-        'height': 800,
-      },
+      'disk': {'path': null, 'sizeMiB': 8192},
+      'network': {'mode': 'shared'},
+      'graphics': {'enabled': true, 'width': 1280, 'height': 800},
     };
   }
 }
 
 bool _hasRestartRequiredChange(
-    Map<String, Object?> current, Map<String, Object?> next) {
+  Map<String, Object?> current,
+  Map<String, Object?> next,
+) {
   if (!_jsonEquals(current['cpu'], next['cpu'])) return true;
   if (!_jsonEquals(current['memory'], next['memory'])) return true;
   if (!_jsonEquals(current['boot'], next['boot'])) return true;
   if (!_jsonEquals(
-      _getPath(current, ['disk', 'path']), _getPath(next, ['disk', 'path']))) {
+    _getPath(current, ['disk', 'path']),
+    _getPath(next, ['disk', 'path']),
+  )) {
     return true;
   }
-  if (!_jsonEquals(_getPath(current, ['network', 'mode']),
-      _getPath(next, ['network', 'mode']))) {
+  if (!_jsonEquals(
+    _getPath(current, ['network', 'mode']),
+    _getPath(next, ['network', 'mode']),
+  )) {
     return true;
   }
   if (!_jsonEquals(current['graphics'], next['graphics'])) return true;

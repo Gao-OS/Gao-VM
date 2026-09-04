@@ -33,11 +33,9 @@ Future<void> main(List<String> args) async {
     final method = request['method'];
     final id = request['id'];
     if (methodLogPath != null && method is String && method.startsWith('vm.')) {
-      await File(methodLogPath).writeAsString(
-        '$method\n',
-        mode: FileMode.append,
-        flush: true,
-      );
+      await File(
+        methodLogPath,
+      ).writeAsString('$method\n', mode: FileMode.append, flush: true);
     }
     if (method == 'hello') {
       final params = JsonValue.asMap(request['params']);
@@ -48,11 +46,14 @@ Future<void> main(List<String> args) async {
           message: 'Auth token mismatch',
         );
       }
-      return JsonRpcProtocol.result(id: id, result: {
-        'protocol': DriverSupervisor.protocolVersion,
-        'capabilities': DriverSupervisor.daemonCapabilities,
-        'acceptedCapabilities': DriverSupervisor.requiredCapabilities,
-      });
+      return JsonRpcProtocol.result(
+        id: id,
+        result: {
+          'protocol': DriverSupervisor.protocolVersion,
+          'capabilities': DriverSupervisor.daemonCapabilities,
+          'acceptedCapabilities': DriverSupervisor.requiredCapabilities,
+        },
+      );
     }
     if (method == 'ping') {
       return JsonRpcProtocol.result(id: id, result: {'ok': true});
@@ -90,12 +91,15 @@ Future<void> main(List<String> args) async {
     );
   };
 
-  final hello = await channel.sendRequest('hello', params: {
-    'protocol': DriverSupervisor.protocolVersion,
-    'authToken': authToken,
-    'capabilities': DriverSupervisor.daemonCapabilities,
-    'requiredCapabilities': DriverSupervisor.requiredCapabilities,
-  });
+  final hello = await channel.sendRequest(
+    'hello',
+    params: {
+      'protocol': DriverSupervisor.protocolVersion,
+      'authToken': authToken,
+      'capabilities': DriverSupervisor.daemonCapabilities,
+      'requiredCapabilities': DriverSupervisor.requiredCapabilities,
+    },
+  );
   if (hello['error'] != null) {
     stderr.writeln('daemon rejected fake driver hello: ${hello['error']}');
     exitCode = 1;

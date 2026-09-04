@@ -72,8 +72,9 @@ void main() {
 
       final files = await tempDir.list().toList();
       // Should only have the target file, no .tmp files.
-      final tmpFiles =
-          files.whereType<File>().where((f) => f.path.contains('.tmp.'));
+      final tmpFiles = files.whereType<File>().where(
+        (f) => f.path.contains('.tmp.'),
+      );
       expect(tmpFiles, isEmpty);
     });
 

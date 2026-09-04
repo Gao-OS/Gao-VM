@@ -1,11 +1,6 @@
 import 'dart:io';
 
-enum LogLevel {
-  error,
-  warn,
-  info,
-  debug,
-}
+enum LogLevel { error, warn, info, debug }
 
 class RotatingLogger {
   RotatingLogger({
@@ -35,7 +30,8 @@ class RotatingLogger {
       final file = File(path);
       await file.parent.create(recursive: true);
       await _rotateIfNeeded(file);
-      final line = '[${DateTime.now().toUtc().toIso8601String()}] '
+      final line =
+          '[${DateTime.now().toUtc().toIso8601String()}] '
           '[${level.name}] $message\n';
       await file.writeAsString(line, mode: FileMode.append, flush: true);
     });

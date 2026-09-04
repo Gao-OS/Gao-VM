@@ -67,8 +67,10 @@ void main() {
       final waiting = server.waitForRequest('special');
 
       // Client sends the request. Don't await — it would block waiting for response.
-      final clientFuture =
-          client.sendRequest('special', params: {'key': 'value'});
+      final clientFuture = client.sendRequest(
+        'special',
+        params: {'key': 'value'},
+      );
 
       final request = await waiting.timeout(const Duration(seconds: 2));
       expect(request['method'], 'special');
@@ -86,8 +88,10 @@ void main() {
       addTearDown(server.close);
 
       expect(
-        server.waitForRequest('never',
-            timeout: const Duration(milliseconds: 100)),
+        server.waitForRequest(
+          'never',
+          timeout: const Duration(milliseconds: 100),
+        ),
         throwsA(isA<TimeoutException>()),
       );
     });
@@ -188,12 +192,16 @@ void main() {
       // Client sends to server.
       final r1 = await client.sendRequest('ping');
       expect(
-          (Map<String, Object?>.from(r1['result']! as Map))['from'], 'server');
+        (Map<String, Object?>.from(r1['result']! as Map))['from'],
+        'server',
+      );
 
       // Server sends to client.
       final r2 = await server.sendRequest('ping');
       expect(
-          (Map<String, Object?>.from(r2['result']! as Map))['from'], 'client');
+        (Map<String, Object?>.from(r2['result']! as Map))['from'],
+        'client',
+      );
     });
   });
 }

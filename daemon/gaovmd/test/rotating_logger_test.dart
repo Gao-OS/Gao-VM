@@ -33,10 +33,7 @@ void main() {
 
     test('respects minimum log level', () async {
       final logPath = '${tempDir.path}/test.log';
-      final logger = RotatingLogger(
-        path: logPath,
-        minLevel: LogLevel.warn,
-      );
+      final logger = RotatingLogger(path: logPath, minLevel: LogLevel.warn);
 
       await logger.info('should be skipped');
       await logger.debug('also skipped');

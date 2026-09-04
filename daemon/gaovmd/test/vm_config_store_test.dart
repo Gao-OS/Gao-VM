@@ -27,13 +27,8 @@ Map<String, Object?> _validConfig({
       'initrdPath': initrdPath,
       'commandLine': commandLine,
     },
-    'disk': {
-      'path': diskPath,
-      'sizeMiB': diskSizeMiB,
-    },
-    'network': {
-      'mode': networkMode,
-    },
+    'disk': {'path': diskPath, 'sizeMiB': diskSizeMiB},
+    'network': {'mode': networkMode},
     'graphics': {
       'enabled': graphicsEnabled,
       'width': graphicsWidth,
@@ -131,14 +126,23 @@ void main() {
     });
 
     test('replaces existing pending config', () async {
-      await store.setConfig(_validConfig(cpu: 2),
-          isRunning: false, emitEvent: emitEvent);
-      await store.setConfig(_validConfig(cpu: 4),
-          isRunning: true, emitEvent: emitEvent);
+      await store.setConfig(
+        _validConfig(cpu: 2),
+        isRunning: false,
+        emitEvent: emitEvent,
+      );
+      await store.setConfig(
+        _validConfig(cpu: 4),
+        isRunning: true,
+        emitEvent: emitEvent,
+      );
       emittedEvents.clear();
 
-      await store.setConfig(_validConfig(cpu: 8),
-          isRunning: true, emitEvent: emitEvent);
+      await store.setConfig(
+        _validConfig(cpu: 8),
+        isRunning: true,
+        emitEvent: emitEvent,
+      );
 
       expect(
         emittedEvents.any((e) => e['type'] == 'event.pending_config_replaced'),
@@ -151,35 +155,44 @@ void main() {
 
     test('throws on invalid config', () {
       expect(
-        () => store.setConfig(
-          {'cpu': 0},
-          isRunning: false,
-          emitEvent: emitEvent,
-        ),
+        () =>
+            store.setConfig({'cpu': 0}, isRunning: false, emitEvent: emitEvent),
         throwsA(isA<ConfigValidationException>()),
       );
     });
 
     test('clears pending config when not running', () async {
-      await store.setConfig(_validConfig(cpu: 2),
-          isRunning: false, emitEvent: emitEvent);
-      await store.setConfig(_validConfig(cpu: 4),
-          isRunning: true, emitEvent: emitEvent);
+      await store.setConfig(
+        _validConfig(cpu: 2),
+        isRunning: false,
+        emitEvent: emitEvent,
+      );
+      await store.setConfig(
+        _validConfig(cpu: 4),
+        isRunning: true,
+        emitEvent: emitEvent,
+      );
 
       // Pending should exist now.
       expect(await store.getPendingConfig(), isNotNull);
 
       // Setting config while not running should clear pending.
-      await store.setConfig(_validConfig(cpu: 6),
-          isRunning: false, emitEvent: emitEvent);
+      await store.setConfig(
+        _validConfig(cpu: 6),
+        isRunning: false,
+        emitEvent: emitEvent,
+      );
       expect(await store.getPendingConfig(), isNull);
     });
   });
 
   group('patchConfig', () {
     test('merges patch into current config', () async {
-      await store.setConfig(_validConfig(cpu: 2),
-          isRunning: false, emitEvent: emitEvent);
+      await store.setConfig(
+        _validConfig(cpu: 2),
+        isRunning: false,
+        emitEvent: emitEvent,
+      );
       emittedEvents.clear();
 
       final result = await store.patchConfig(
@@ -196,8 +209,11 @@ void main() {
     });
 
     test('deep merges nested objects', () async {
-      await store.setConfig(_validConfig(),
-          isRunning: false, emitEvent: emitEvent);
+      await store.setConfig(
+        _validConfig(),
+        isRunning: false,
+        emitEvent: emitEvent,
+      );
       emittedEvents.clear();
 
       await store.patchConfig(
@@ -216,10 +232,16 @@ void main() {
     });
 
     test('patches pending config when running and pending exists', () async {
-      await store.setConfig(_validConfig(cpu: 2),
-          isRunning: false, emitEvent: emitEvent);
-      await store.setConfig(_validConfig(cpu: 4),
-          isRunning: true, emitEvent: emitEvent);
+      await store.setConfig(
+        _validConfig(cpu: 2),
+        isRunning: false,
+        emitEvent: emitEvent,
+      );
+      await store.setConfig(
+        _validConfig(cpu: 4),
+        isRunning: true,
+        emitEvent: emitEvent,
+      );
       emittedEvents.clear();
 
       final result = await store.patchConfig(
@@ -235,11 +257,7 @@ void main() {
 
     test('rejects empty patch', () {
       expect(
-        () => store.patchConfig(
-          {},
-          isRunning: false,
-          emitEvent: emitEvent,
-        ),
+        () => store.patchConfig({}, isRunning: false, emitEvent: emitEvent),
         throwsA(isA<ConfigValidationException>()),
       );
     });
@@ -274,14 +292,21 @@ void main() {
     });
 
     test('activates pending config and removes pending file', () async {
-      await store.setConfig(_validConfig(cpu: 2),
-          isRunning: false, emitEvent: emitEvent);
-      await store.setConfig(_validConfig(cpu: 4),
-          isRunning: true, emitEvent: emitEvent);
+      await store.setConfig(
+        _validConfig(cpu: 2),
+        isRunning: false,
+        emitEvent: emitEvent,
+      );
+      await store.setConfig(
+        _validConfig(cpu: 4),
+        isRunning: true,
+        emitEvent: emitEvent,
+      );
       emittedEvents.clear();
 
-      final activated =
-          await store.activatePendingIfPresent(emitEvent: emitEvent);
+      final activated = await store.activatePendingIfPresent(
+        emitEvent: emitEvent,
+      );
       expect(activated, true);
 
       final current = await store.getCurrentConfig();
@@ -299,10 +324,16 @@ void main() {
 
   group('getConfigSnapshot', () {
     test('includes current and pending', () async {
-      await store.setConfig(_validConfig(cpu: 2),
-          isRunning: false, emitEvent: emitEvent);
-      await store.setConfig(_validConfig(cpu: 4),
-          isRunning: true, emitEvent: emitEvent);
+      await store.setConfig(
+        _validConfig(cpu: 2),
+        isRunning: false,
+        emitEvent: emitEvent,
+      );
+      await store.setConfig(
+        _validConfig(cpu: 4),
+        isRunning: true,
+        emitEvent: emitEvent,
+      );
 
       final snapshot = await store.getConfigSnapshot();
       expect(snapshot['hasPending'], true);
@@ -384,11 +415,8 @@ void main() {
 
     test('rejects missing top-level keys', () {
       expect(
-        () => store.setConfig(
-          {'cpu': 2},
-          isRunning: false,
-          emitEvent: emitEvent,
-        ),
+        () =>
+            store.setConfig({'cpu': 2}, isRunning: false, emitEvent: emitEvent),
         throwsA(isA<ConfigValidationException>()),
       );
     });
