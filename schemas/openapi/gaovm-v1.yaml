@@ -858,31 +858,31 @@ components:
   schemas:
     VmId:
       type: string
-      pattern: '^vm_[0-9A-HJKMNP-TV-Z]{26}$'
+      pattern: '^vm_[0-7][0-9A-HJKMNP-TV-Z]{25}$'
       examples: [vm_01J00000000000000000000000]
     ImageId:
       type: string
-      pattern: '^img_[0-9A-HJKMNP-TV-Z]{26}$'
+      pattern: '^img_[0-7][0-9A-HJKMNP-TV-Z]{25}$'
       examples: [img_01J00000000000000000000000]
     OperationId:
       type: string
-      pattern: '^op_[0-9A-HJKMNP-TV-Z]{26}$'
+      pattern: '^op_[0-7][0-9A-HJKMNP-TV-Z]{25}$'
       examples: [op_01J00000000000000000000000]
     EventId:
       type: string
-      pattern: '^evt_[0-9A-HJKMNP-TV-Z]{26}$'
+      pattern: '^evt_[0-7][0-9A-HJKMNP-TV-Z]{25}$'
       examples: [evt_01J00000000000000000000000]
     TestRunId:
       type: string
-      pattern: '^tr_[0-9A-HJKMNP-TV-Z]{26}$'
+      pattern: '^tr_[0-7][0-9A-HJKMNP-TV-Z]{25}$'
       examples: [tr_01J00000000000000000000000]
     ArtifactId:
       type: string
-      pattern: '^art_[0-9A-HJKMNP-TV-Z]{26}$'
+      pattern: '^art_[0-7][0-9A-HJKMNP-TV-Z]{25}$'
       examples: [art_01J00000000000000000000000]
     RequestId:
       type: string
-      pattern: '^req_[0-9A-HJKMNP-TV-Z]{26}$'
+      pattern: '^req_[0-7][0-9A-HJKMNP-TV-Z]{25}$'
       examples: [req_01J00000000000000000000000]
     Labels:
       type: object
@@ -1227,7 +1227,7 @@ components:
           enum: [virtual_machine, image, operation, test_run, artifact]
         resource_id:
           type: string
-          pattern: '^(?:vm|img|op|tr|art)_[0-9A-HJKMNP-TV-Z]{26}$'
+          pattern: '^(?:vm|img|op|tr|art)_[0-7][0-9A-HJKMNP-TV-Z]{25}$'
       additionalProperties: false
     Operation:
       type: object
@@ -1242,7 +1242,7 @@ components:
           enum: [virtual_machine, image, operation, test_run, artifact]
         resource_id:
           type: string
-          pattern: '^(?:vm|img|op|tr|art)_[0-9A-HJKMNP-TV-Z]{26}$'
+          pattern: '^(?:vm|img|op|tr|art)_[0-7][0-9A-HJKMNP-TV-Z]{25}$'
         state:
           $ref: '#/components/schemas/OperationState'
         request_id:
@@ -1478,7 +1478,7 @@ components:
           pattern: '^sha256:[0-9a-f]{64}$'
         download_url:
           type: string
-          pattern: '^/v1/artifacts/art_[0-9A-HJKMNP-TV-Z]{26}$'
+          pattern: '^/v1/artifacts/art_[0-7][0-9A-HJKMNP-TV-Z]{25}$'
         retention_until:
           type: [string, 'null']
           format: date-time

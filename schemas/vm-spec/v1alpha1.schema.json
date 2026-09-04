@@ -23,16 +23,16 @@
   "$defs": {
     "ulid": {
       "type": "string",
-      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+      "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
       "description": "Canonical uppercase Crockford Base32 ULID."
     },
     "vmId": {
       "type": "string",
-      "pattern": "^vm_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^vm_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "imageId": {
       "type": "string",
-      "pattern": "^img_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^img_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "labelName": {
       "type": "string",

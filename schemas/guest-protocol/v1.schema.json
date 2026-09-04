@@ -17,11 +17,11 @@
     },
     "vmId": {
       "type": "string",
-      "pattern": "^vm_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^vm_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "operationId": {
       "type": "string",
-      "pattern": "^op_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^op_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "operationIdOrNull": {
       "oneOf": [
@@ -31,7 +31,7 @@
     },
     "artifactId": {
       "type": "string",
-      "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^art_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "correlationProperties": {
       "type": "object",
