@@ -29,15 +29,15 @@ void main() {
       final secondFrame = codec.encodeObject(second);
 
       final controller = StreamController<List<int>>();
-      final decodedFuture =
-          codec.decodeObjectStream(controller.stream).toList();
+      final decodedFuture = codec
+          .decodeObjectStream(controller.stream)
+          .toList();
 
       controller.add(firstFrame.sublist(0, 2));
       controller.add(firstFrame.sublist(2, 7));
-      controller.add(Uint8List.fromList([
-        ...firstFrame.sublist(7),
-        ...secondFrame,
-      ]));
+      controller.add(
+        Uint8List.fromList([...firstFrame.sublist(7), ...secondFrame]),
+      );
       await controller.close();
 
       final decoded = await decodedFuture;

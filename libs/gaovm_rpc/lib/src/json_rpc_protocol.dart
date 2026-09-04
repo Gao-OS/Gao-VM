@@ -43,23 +43,17 @@ class JsonRpcProtocol {
     required String method,
     Object? params,
   }) {
-    final out = <String, Object?>{
-      'jsonrpc': version,
-      'method': method,
-    };
+    final out = <String, Object?>{'jsonrpc': version, 'method': method};
     if (params != null) {
       out['params'] = params;
     }
     return out;
   }
 
-  static Map<String, Object?> result(
-          {required Object? id, required Object? result}) =>
-      <String, Object?>{
-        'jsonrpc': version,
-        'id': id,
-        'result': result,
-      };
+  static Map<String, Object?> result({
+    required Object? id,
+    required Object? result,
+  }) => <String, Object?>{'jsonrpc': version, 'id': id, 'result': result};
 
   static Map<String, Object?> error({
     required Object? id,
@@ -67,18 +61,11 @@ class JsonRpcProtocol {
     required String message,
     Object? data,
   }) {
-    final err = <String, Object?>{
-      'code': code,
-      'message': message,
-    };
+    final err = <String, Object?>{'code': code, 'message': message};
     if (data != null) {
       err['data'] = data;
     }
-    return <String, Object?>{
-      'jsonrpc': version,
-      'id': id,
-      'error': err,
-    };
+    return <String, Object?>{'jsonrpc': version, 'id': id, 'error': err};
   }
 }
 

@@ -33,7 +33,8 @@ class LengthPrefixedJsonRpcCodec {
   }
 
   Stream<Map<String, Object?>> decodeObjectStream(
-      Stream<List<int>> byteStream) async* {
+    Stream<List<int>> byteStream,
+  ) async* {
     final buffer = BytesBuilder(copy: false);
     await for (final chunk in byteStream) {
       if (chunk.isEmpty) {
@@ -67,11 +68,13 @@ class LengthPrefixedJsonRpcCodec {
         final decoded = jsonDecode(utf8.decode(payload));
         if (decoded is List) {
           throw JsonRpcFrameException(
-              'JSON-RPC batch requests are not supported.');
+            'JSON-RPC batch requests are not supported.',
+          );
         }
         if (decoded is! Map) {
           throw JsonRpcFrameException(
-              'Top-level JSON value must be an object.');
+            'Top-level JSON value must be an object.',
+          );
         }
         yield Map<String, Object?>.from(decoded);
       }
@@ -79,7 +82,8 @@ class LengthPrefixedJsonRpcCodec {
     final remaining = buffer.length;
     if (remaining != 0) {
       throw JsonRpcFrameException(
-          'Incomplete frame: $remaining bytes remaining.');
+        'Incomplete frame: $remaining bytes remaining.',
+      );
     }
   }
 }

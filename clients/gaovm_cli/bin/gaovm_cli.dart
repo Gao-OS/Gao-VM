@@ -65,9 +65,10 @@ Future<void> main(List<String> args) async {
         if (decoded is! Map) {
           throw StateError('--json must be a JSON object');
         }
-        final result = await client.request('vm.config.set', params: {
-          'config': Map<String, Object?>.from(decoded),
-        });
+        final result = await client.request(
+          'vm.config.set',
+          params: {'config': Map<String, Object?>.from(decoded)},
+        );
         _printJson(result['result']);
         break;
       case 'config-patch':
@@ -78,9 +79,10 @@ Future<void> main(List<String> args) async {
         if (decoded is! Map) {
           throw StateError('--json must be a JSON object');
         }
-        final result = await client.request('vm.config.patch', params: {
-          'patch': Map<String, Object?>.from(decoded),
-        });
+        final result = await client.request(
+          'vm.config.patch',
+          params: {'patch': Map<String, Object?>.from(decoded)},
+        );
         _printJson(result['result']);
         break;
       case 'doctor':
@@ -95,10 +97,13 @@ Future<void> main(List<String> args) async {
         if (config.paramsJson != null) {
           params = jsonDecode(config.paramsJson!);
         }
-        final result = await client.request('driver.exec', params: {
-          'method': config.method,
-          if (params != null) 'params': params,
-        });
+        final result = await client.request(
+          'driver.exec',
+          params: {
+            'method': config.method,
+            if (params != null) 'params': params,
+          },
+        );
         _printJson(result['result']);
         break;
       default:
@@ -144,8 +149,9 @@ class _CliConfig {
 }
 
 _CliConfig _parseArgs(List<String> args) {
-  var socketPath =
-      Directory.current.uri.resolve('state/run/daemon.sock').toFilePath();
+  var socketPath = Directory.current.uri
+      .resolve('state/run/daemon.sock')
+      .toFilePath();
   var verbose = false;
   var command = 'status';
   String? configJson;
@@ -198,12 +204,15 @@ _CliConfig _parseArgs(List<String> args) {
 void _printUsage() {
   stdout.writeln('Usage: gaovm_cli [--socket-path PATH] [--verbose] <command>');
   stdout.writeln(
-      'Commands: ping, list, status, start, stop, open-display, close-display, events, doctor, driver-exec, config-get, config-set, config-patch');
+    'Commands: ping, list, status, start, stop, open-display, close-display, events, doctor, driver-exec, config-get, config-set, config-patch',
+  );
   stdout.writeln('config-set: gaovm_cli config-set --json \'{\"cpu\":2,...}\'');
   stdout.writeln(
-      'config-patch: gaovm_cli config-patch --json \'{\"graphics\":{\"enabled\":false}}\'');
+    'config-patch: gaovm_cli config-patch --json \'{\"graphics\":{\"enabled\":false}}\'',
+  );
   stdout.writeln(
-      'driver-exec: gaovm_cli driver-exec --method ping [--params-json \'{...}\']');
+    'driver-exec: gaovm_cli driver-exec --method ping [--params-json \'{...}\']',
+  );
 }
 
 void _printJson(Object? value) {
@@ -220,10 +229,7 @@ class _RpcException implements Exception {
 }
 
 class _GaovmCliClient {
-  _GaovmCliClient({
-    required this.socketPath,
-    required this.verbose,
-  });
+  _GaovmCliClient({required this.socketPath, required this.verbose});
 
   static const String _protocol = 'gaovm.v1.2';
   static const List<String> _capabilities = [
@@ -263,28 +269,34 @@ class _GaovmCliClient {
       InternetAddress(socketPath, type: InternetAddressType.unix),
       0,
     );
-    _subscription = _codec.decodeObjectStream(_socket!).listen(
-      _onMessage,
-      onError: (Object error, StackTrace stackTrace) {
-        _closeWithError(error);
-      },
-      onDone: () {
-        _closeWithError(StateError('daemon socket closed'));
-      },
-      cancelOnError: true,
-    );
+    _subscription = _codec
+        .decodeObjectStream(_socket!)
+        .listen(
+          _onMessage,
+          onError: (Object error, StackTrace stackTrace) {
+            _closeWithError(error);
+          },
+          onDone: () {
+            _closeWithError(StateError('daemon socket closed'));
+          },
+          cancelOnError: true,
+        );
 
-    final response = await request('hello', params: {
-      'protocol': _protocol,
-      'capabilities': _capabilities,
-      'requiredCapabilities': _requiredCapabilities,
-    }).timeout(const Duration(seconds: 5));
+    final response = await request(
+      'hello',
+      params: {
+        'protocol': _protocol,
+        'capabilities': _capabilities,
+        'requiredCapabilities': _requiredCapabilities,
+      },
+    ).timeout(const Duration(seconds: 5));
     final result = JsonValue.asMap(response['result']);
     _validateHelloResult(result);
     _helloDone = true;
     if (!_daemonHelloSeen) {
       throw StateError(
-          'Bidirectional hello failed: daemon did not send hello request');
+        'Bidirectional hello failed: daemon did not send hello request',
+      );
     }
   }
 
@@ -293,14 +305,16 @@ class _GaovmCliClient {
     final completer = Completer<Map<String, Object?>>();
     _pending[id] = completer;
     unawaited(
-        _send(JsonRpcProtocol.request(id: id, method: method, params: params))
-            .catchError((Object error, StackTrace stackTrace) {
-      final pending = _pending.remove(id);
-      if (pending != null && !pending.isCompleted) {
-        pending.completeError(error, stackTrace);
-      }
-      _closeWithError(error);
-    }));
+      _send(
+        JsonRpcProtocol.request(id: id, method: method, params: params),
+      ).catchError((Object error, StackTrace stackTrace) {
+        final pending = _pending.remove(id);
+        if (pending != null && !pending.isCompleted) {
+          pending.completeError(error, stackTrace);
+        }
+        _closeWithError(error);
+      }),
+    );
     return completer.future.then((message) {
       final err = message['error'];
       if (err != null) {
@@ -354,11 +368,15 @@ class _GaovmCliClient {
       unawaited(_handleServerRequest(message));
       return;
     }
-    unawaited(_send(JsonRpcProtocol.error(
-      id: message['id'],
-      code: JsonRpcErrorCode.invalidRequest,
-      message: 'Invalid JSON-RPC object',
-    )));
+    unawaited(
+      _send(
+        JsonRpcProtocol.error(
+          id: message['id'],
+          code: JsonRpcErrorCode.invalidRequest,
+          message: 'Invalid JSON-RPC object',
+        ),
+      ),
+    );
   }
 
   Future<void> _handleServerRequest(Map<String, Object?> request) async {
@@ -368,57 +386,73 @@ class _GaovmCliClient {
       final params = JsonValue.asMap(request['params']);
       final protocol = params['protocol'];
       if (protocol != _protocol) {
-        await _send(JsonRpcProtocol.error(
-          id: id,
-          code: JsonRpcErrorCode.handshakeFailed,
-          message: 'Protocol mismatch',
-          data: {'expected': _protocol, 'actual': protocol},
-        ));
+        await _send(
+          JsonRpcProtocol.error(
+            id: id,
+            code: JsonRpcErrorCode.handshakeFailed,
+            message: 'Protocol mismatch',
+            data: {'expected': _protocol, 'actual': protocol},
+          ),
+        );
         return;
       }
       final offered = JsonValue.asStringList(params['capabilities']);
-      final accepted =
-          offered.where(_capabilities.contains).toList(growable: false);
+      final accepted = offered
+          .where(_capabilities.contains)
+          .toList(growable: false);
       if (!JsonValue.containsAllStrings(accepted, _requiredCapabilities)) {
-        await _send(JsonRpcProtocol.error(
-          id: id,
-          code: JsonRpcErrorCode.capabilityMismatch,
-          message: 'Capability mismatch',
-          data: {'required': _requiredCapabilities},
-        ));
+        await _send(
+          JsonRpcProtocol.error(
+            id: id,
+            code: JsonRpcErrorCode.capabilityMismatch,
+            message: 'Capability mismatch',
+            data: {'required': _requiredCapabilities},
+          ),
+        );
         return;
       }
       _daemonHelloSeen = true;
-      await _send(JsonRpcProtocol.result(id: id, result: {
-        'protocol': _protocol,
-        'capabilities': _capabilities,
-        'acceptedCapabilities': accepted,
-      }));
+      await _send(
+        JsonRpcProtocol.result(
+          id: id,
+          result: {
+            'protocol': _protocol,
+            'capabilities': _capabilities,
+            'acceptedCapabilities': accepted,
+          },
+        ),
+      );
       return;
     }
 
     if (!_helloDone) {
-      await _send(JsonRpcProtocol.error(
-        id: id,
-        code: JsonRpcErrorCode.handshakeFailed,
-        message: 'hello handshake required',
-      ));
+      await _send(
+        JsonRpcProtocol.error(
+          id: id,
+          code: JsonRpcErrorCode.handshakeFailed,
+          message: 'hello handshake required',
+        ),
+      );
       return;
     }
 
     if (method == 'ping') {
-      await _send(JsonRpcProtocol.result(id: id, result: {
-        'ok': true,
-        'ts': DateTime.now().toUtc().toIso8601String(),
-      }));
+      await _send(
+        JsonRpcProtocol.result(
+          id: id,
+          result: {'ok': true, 'ts': DateTime.now().toUtc().toIso8601String()},
+        ),
+      );
       return;
     }
 
-    await _send(JsonRpcProtocol.error(
-      id: id,
-      code: JsonRpcErrorCode.methodNotFound,
-      message: 'Unsupported daemon->client method: $method',
-    ));
+    await _send(
+      JsonRpcProtocol.error(
+        id: id,
+        code: JsonRpcErrorCode.methodNotFound,
+        message: 'Unsupported daemon->client method: $method',
+      ),
+    );
   }
 
   Future<void> _send(Map<String, Object?> object) async {
@@ -448,7 +482,8 @@ class _GaovmCliClient {
     final accepted = JsonValue.asStringList(result['acceptedCapabilities']);
     if (!JsonValue.containsAllStrings(accepted, _requiredCapabilities)) {
       throw StateError(
-          'Capability mismatch: accepted=$accepted required=$_requiredCapabilities');
+        'Capability mismatch: accepted=$accepted required=$_requiredCapabilities',
+      );
     }
   }
 
