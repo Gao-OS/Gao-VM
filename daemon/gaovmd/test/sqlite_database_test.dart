@@ -26,8 +26,8 @@ void main() {
   test('bootstrap configures SQLite and applies the schema once', () async {
     var database = await GaoVmDatabase.open(databasePath);
 
-    expect(database.schemaVersion, 1);
-    expect(database.appliedMigrationVersions, [1]);
+    expect(database.schemaVersion, 2);
+    expect(database.appliedMigrationVersions, [1, 2]);
     expect(database.journalMode, 'wal');
     expect(database.foreignKeysEnabled, isTrue);
     expect(database.busyTimeout, const Duration(seconds: 5));
@@ -54,10 +54,61 @@ void main() {
     database.close();
 
     database = await GaoVmDatabase.open(databasePath);
-    expect(database.schemaVersion, 1);
-    expect(database.appliedMigrationVersions, [1]);
+    expect(database.schemaVersion, 2);
+    expect(database.appliedMigrationVersions, [1, 2]);
     database.close();
   });
+
+  test(
+    'migration preserves duplicate v1 outbox keys and adds claim fields',
+    () async {
+      final legacy = sqlite3.open(databasePath);
+      legacy.execute('''
+      CREATE TABLE schema_migrations (
+        version INTEGER PRIMARY KEY,
+        applied_at TEXT NOT NULL
+      );
+      INSERT INTO schema_migrations(version, applied_at)
+      VALUES (1, '2026-09-04T09:00:00.000000Z');
+      CREATE TABLE outbox (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        topic TEXT NOT NULL,
+        key TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        published_at TEXT,
+        attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0)
+      );
+      INSERT INTO outbox(topic, key, payload_json, created_at)
+      VALUES
+        ('events', 'duplicate', '{}', '2026-09-04T09:00:00.000000Z'),
+        ('events', 'duplicate', '{}', '2026-09-04T09:00:00.000000Z');
+    ''');
+      legacy.userVersion = 1;
+      legacy.dispose();
+
+      final database = await GaoVmDatabase.open(databasePath);
+
+      expect(database.schemaVersion, 2);
+      expect(database.appliedMigrationVersions, [1, 2]);
+      await database.read((connection) {
+        expect(
+          connection
+              .select(
+                "SELECT COUNT(*) AS count FROM outbox WHERE key = 'duplicate'",
+              )
+              .single['count'],
+          2,
+        );
+        final columns = {
+          for (final row in connection.select('PRAGMA table_info(outbox)'))
+            row['name'],
+        };
+        expect(columns, containsAll(['claimed_by', 'claim_expires_at']));
+      });
+      database.close();
+    },
+  );
 
   test('transaction rolls back every write when its action fails', () async {
     final database = await GaoVmDatabase.open(databasePath);
@@ -78,6 +129,133 @@ void main() {
     expect(database.tableNames, isNot(contains('transaction_probe')));
     database.close();
   });
+
+  test(
+    'a caught nested transaction failure rolls back only its savepoint',
+    () async {
+      final database = await GaoVmDatabase.open(databasePath);
+      final originalError = StateError('original nested failure');
+
+      await database.transaction((connection) async {
+        connection.execute(
+          'CREATE TABLE savepoint_probe (value TEXT NOT NULL)',
+        );
+        connection.execute('INSERT INTO savepoint_probe(value) VALUES (?)', [
+          'outer-before',
+        ]);
+        try {
+          await database.transaction((nested) {
+            nested.execute('INSERT INTO savepoint_probe(value) VALUES (?)', [
+              'inner-rolled-back',
+            ]);
+            throw originalError;
+          });
+        } on StateError catch (error) {
+          expect(identical(error, originalError), isTrue);
+          // The outer transaction deliberately continues.
+        }
+        await database.transaction(
+          (nested) => nested.execute(
+            'INSERT INTO savepoint_probe(value) VALUES (?)',
+            ['outer-after'],
+          ),
+        );
+      });
+
+      expect(
+        await database.read(
+          (connection) => connection
+              .select('SELECT value FROM savepoint_probe ORDER BY rowid')
+              .map((row) => row['value'])
+              .toList(),
+        ),
+        ['outer-before', 'outer-after'],
+      );
+      database.close();
+    },
+  );
+
+  test('nested savepoints remain independent at multiple depths', () async {
+    final database = await GaoVmDatabase.open(databasePath);
+
+    await database.transaction((connection) async {
+      connection.execute('CREATE TABLE nested_probe (value TEXT NOT NULL)');
+      await database.transaction((nested) async {
+        nested.execute('INSERT INTO nested_probe(value) VALUES (?)', [
+          'middle-before',
+        ]);
+        try {
+          await database.transaction((deepest) {
+            deepest.execute('INSERT INTO nested_probe(value) VALUES (?)', [
+              'deepest-rolled-back',
+            ]);
+            throw StateError('roll back the deepest savepoint');
+          });
+        } on StateError {
+          // The middle savepoint deliberately continues.
+        }
+        nested.execute('INSERT INTO nested_probe(value) VALUES (?)', [
+          'middle-after',
+        ]);
+      });
+    });
+
+    expect(
+      await database.read(
+        (connection) => connection
+            .select('SELECT value FROM nested_probe ORDER BY rowid')
+            .map((row) => row['value'])
+            .toList(),
+      ),
+      ['middle-before', 'middle-after'],
+    );
+    database.close();
+  });
+
+  test(
+    'overlapping sibling savepoints reject and roll back the outer transaction',
+    () async {
+      final database = await GaoVmDatabase.open(databasePath);
+      final firstEntered = Completer<void>();
+      final releaseFirst = Completer<void>();
+      var secondActionRan = false;
+
+      await expectLater(
+        () => database.transaction((connection) async {
+          connection.execute(
+            'CREATE TABLE sibling_probe (value TEXT NOT NULL)',
+          );
+          final first = database.transaction((nested) async {
+            nested.execute('INSERT INTO sibling_probe(value) VALUES (?)', [
+              'first',
+            ]);
+            firstEntered.complete();
+            await releaseFirst.future;
+          });
+          await firstEntered.future;
+          final second = database.transaction((nested) {
+            secondActionRan = true;
+            nested.execute('INSERT INTO sibling_probe(value) VALUES (?)', [
+              'second',
+            ]);
+          });
+          releaseFirst.complete();
+          await Future.wait([first, second]);
+        }),
+        throwsA(
+          isA<StateError>().having(
+            (error) => error.message,
+            'message',
+            contains('overlapping nested transaction'),
+          ),
+        ),
+      );
+
+      expect(database.tableNames, isNot(contains('sibling_probe')));
+      expect(secondActionRan, isFalse);
+      database.close();
+    },
+  );
 
   test('foreign key enforcement rejects orphaned repository rows', () async {
     final database = await GaoVmDatabase.open(databasePath);
@@ -146,8 +324,8 @@ void main() {
     ]);
 
     for (final database in databases) {
-      expect(database.schemaVersion, 1);
-      expect(database.appliedMigrationVersions, [1]);
+      expect(database.schemaVersion, 2);
+      expect(database.appliedMigrationVersions, [1, 2]);
       database.close();
     }
   });
@@ -167,8 +345,8 @@ void main() {
     ]);
 
     for (final result in results) {
-      expect(result.schemaVersion, 1);
-      expect(result.migrations, [1]);
+      expect(result.schemaVersion, 2);
+      expect(result.migrations, [1, 2]);
     }
   });
 }

@@ -21,8 +21,9 @@ const coreTableNames = <String>{
   'outbox',
 };
 
-const _latestSchemaVersion = 1;
+const _latestSchemaVersion = 2;
 final _transactionContextKey = Object();
+final _savepointScopeKey = Object();
 final _transactionGates = <String, _AsyncGate>{};
 var _memoryDatabaseSequence = 0;
 
@@ -117,7 +118,7 @@ final class GaoVmDatabase {
     final context = Zone.current[_transactionContextKey];
     if (context is _TransactionContext && context.active) {
       if (identical(context.database, this)) {
-        return Future<T>.sync(() => action(_database));
+        return context.runSavepoint(action, _database);
       }
       if (identical(context.gate, _transactionGate)) {
         throw StateError(
@@ -390,6 +391,13 @@ const _migrations = <_Migration>[
     CREATE INDEX IF NOT EXISTS outbox_unpublished_idx
       ON outbox(published_at, id);
   '''),
+  _Migration(2, '''
+    ALTER TABLE outbox ADD COLUMN claimed_by TEXT;
+    ALTER TABLE outbox ADD COLUMN claim_expires_at TEXT;
+
+    CREATE INDEX IF NOT EXISTS outbox_claimable_idx
+      ON outbox(published_at, claim_expires_at, id);
+  '''),
 ];
 
 final class _TransactionContext {
@@ -398,6 +406,49 @@ final class _TransactionContext {
   final GaoVmDatabase database;
   final _AsyncGate gate;
   bool active = true;
+  var _savepointSequence = 0;
+  final _activeSavepointParents = <Object?>{};
+
+  Future<T> runSavepoint<T>(
+    FutureOr<T> Function(Database database) action,
+    Database connection,
+  ) async {
+    final parentScope = Zone.current[_savepointScopeKey];
+    if (!_activeSavepointParents.add(parentScope)) {
+      throw StateError(
+        'overlapping nested transaction in the same savepoint scope',
+      );
+    }
+    final scope = _savepointSequence++;
+    final name = 'gaovm_savepoint_$scope';
+    var savepointCreated = false;
+    try {
+      connection.execute('SAVEPOINT $name');
+      savepointCreated = true;
+      final result = await runZoned(
+        () => Future<T>.sync(() => action(connection)),
+        zoneValues: {_savepointScopeKey: scope},
+      );
+      connection.execute('RELEASE SAVEPOINT $name');
+      return result;
+    } catch (error, stackTrace) {
+      if (savepointCreated) {
+        try {
+          connection.execute('ROLLBACK TO SAVEPOINT $name');
+        } catch (_) {
+          // Preserve the original transaction error.
+        }
+        try {
+          connection.execute('RELEASE SAVEPOINT $name');
+        } catch (_) {
+          // Preserve the original transaction error.
+        }
+      }
+      Error.throwWithStackTrace(error, stackTrace);
+    } finally {
+      _activeSavepointParents.remove(parentScope);
+    }
+  }
 }
 
 final class _AsyncGate {
