@@ -60,7 +60,8 @@ class _Config {
 
 _Config _parseArgs(List<String> args) {
   var stateDir = Directory.current.uri.resolve('state').toFilePath();
-  var socketPath = Directory.current.uri.resolve('state/run/daemon.sock').toFilePath();
+  var socketPath =
+      Directory.current.uri.resolve('state/run/daemon.sock').toFilePath();
   var driverBinary = Platform.environment['GAOVM_DRIVER_BIN'] ??
       Directory.current.uri
           .resolve('../../drivers/vz_macos/.build/debug/gaovm-driver-vz')
@@ -70,10 +71,12 @@ _Config _parseArgs(List<String> args) {
     switch (args[i]) {
       case '--host':
         final host = args[++i];
-        stderr.writeln('--host is no longer supported (use --socket-path). Ignoring: $host');
+        stderr.writeln(
+            '--host is no longer supported (use --socket-path). Ignoring: $host');
       case '--port':
         final port = args[++i];
-        stderr.writeln('--port is no longer supported (use --socket-path). Ignoring: $port');
+        stderr.writeln(
+            '--port is no longer supported (use --socket-path). Ignoring: $port');
       case '--socket-path':
         socketPath = args[++i];
       case '--state-dir':
@@ -82,7 +85,8 @@ _Config _parseArgs(List<String> args) {
       case '--driver-bin':
         driverBinary = args[++i];
       case '--help':
-        stdout.writeln('Usage: gaovmd [--socket-path PATH] [--state-dir PATH] [--driver-bin PATH]');
+        stdout.writeln(
+            'Usage: gaovmd [--socket-path PATH] [--state-dir PATH] [--driver-bin PATH]');
         exit(0);
     }
   }

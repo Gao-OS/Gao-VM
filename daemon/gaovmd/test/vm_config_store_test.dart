@@ -125,8 +125,7 @@ void main() {
       expect(pending!['cpu'], 8);
 
       expect(
-        emittedEvents
-            .any((e) => e['type'] == 'event.pending_config_written'),
+        emittedEvents.any((e) => e['type'] == 'event.pending_config_written'),
         isTrue,
       );
     });
@@ -142,8 +141,7 @@ void main() {
           isRunning: true, emitEvent: emitEvent);
 
       expect(
-        emittedEvents
-            .any((e) => e['type'] == 'event.pending_config_replaced'),
+        emittedEvents.any((e) => e['type'] == 'event.pending_config_replaced'),
         isTrue,
       );
 
@@ -271,8 +269,7 @@ void main() {
 
   group('activatePendingIfPresent', () {
     test('returns false when no pending config', () async {
-      final result =
-          await store.activatePendingIfPresent(emitEvent: emitEvent);
+      final result = await store.activatePendingIfPresent(emitEvent: emitEvent);
       expect(result, false);
     });
 
