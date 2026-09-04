@@ -11,6 +11,10 @@ final class VzRuntime: RuntimeServicing {
   let logger: RotatingLogger
   let vzRuntimeQueue: VzRuntimeQueue
   private let stopCoordinator: RuntimeStopCoordinator
+  private let delegateLifetime: VzDelegateLifetime
+  private let eventNow: () -> Date
+  private let eventDelivery: RuntimeEventDelivery
+  private var eventGeneration: RuntimeEventGeneration
   var config: [String: Any]?
   private var isTearingDown = false
   #if canImport(Virtualization)
@@ -22,11 +26,20 @@ final class VzRuntime: RuntimeServicing {
     var windowCloseObserver: NSObjectProtocol?
   #endif
 
-  init(logger: RotatingLogger) {
+  init(
+    logger: RotatingLogger,
+    now: @escaping () -> Date = Date.init,
+    eventSink: @escaping RuntimeEventSink = { _ in }
+  ) {
     let queue = VzRuntimeQueue()
     self.logger = logger
     vzRuntimeQueue = queue
     stopCoordinator = RuntimeStopCoordinator(queue: queue)
+    delegateLifetime = VzDelegateLifetime(queue: queue)
+    eventNow = now
+    let delivery = RuntimeEventDelivery(sink: eventSink)
+    eventDelivery = delivery
+    eventGeneration = RuntimeEventGeneration(queue: queue, now: now, delivery: delivery)
   }
 
   func configure(with config: [String: Any], completion: @escaping RuntimeCompletion) {
@@ -34,6 +47,14 @@ final class VzRuntime: RuntimeServicing {
       do {
         _ = try self.normalizedConfig(config)
         self.config = config
+        #if canImport(Virtualization)
+          let currentRuntimeState = self.virtualMachine.map {
+            runtimeObservedState(from: $0.state)
+          }
+        #else
+          let currentRuntimeState: RuntimeObservedState? = nil
+        #endif
+        self.eventGeneration.observeConfiguration(currentRuntimeState: currentRuntimeState)
         self.logger.log(.info, "vm configured")
         completion(.success(self.statusLocked()))
       } catch {
@@ -60,6 +81,7 @@ final class VzRuntime: RuntimeServicing {
             switch vm.state {
             case .running, .starting, .pausing, .paused, .resuming, .stopping, .saving,
               .restoring:
+              self.eventGeneration.observeState(runtimeObservedState(from: vm.state))
               completion(.success(self.statusLocked()))
               return
             case .stopped, .error:
@@ -69,12 +91,21 @@ final class VzRuntime: RuntimeServicing {
             }
           }
 
+          self.beginRuntimeGenerationLocked()
+          let eventGeneration = self.eventGeneration
           try self.ensureSparseDisk(spec.diskPath, sizeMiB: spec.diskSizeMiB)
           let vmConfig = try self.buildConfiguration(spec)
           let vm = VZVirtualMachine(
             configuration: vmConfig, queue: self.vzRuntimeQueue.dispatchQueue)
+          let delegate = VzVirtualMachineDelegateAdapter(
+            queue: self.vzRuntimeQueue,
+            generation: eventGeneration,
+            now: self.eventNow)
+          self.delegateLifetime.retain(delegate)
+          vm.delegate = delegate
           self.virtualMachine = vm
           let gate = RuntimeResultGate(completion: completion)
+          eventGeneration.observeState(.starting)
 
           vm.start { result in
             self.vzRuntimeQueue.async {
@@ -82,16 +113,45 @@ final class VzRuntime: RuntimeServicing {
               switch result {
               case .success:
                 self.logger.log(.info, "vm started")
-                gate.finish(.success(self.statusLocked()))
+                guard gate.finish(.success(self.statusLocked())) else { return }
+                eventGeneration.observeState(runtimeObservedState(from: vm.state))
               case .failure(let error):
-                gate.finish(.failure(error))
+                guard gate.finish(.failure(error)) else { return }
+                eventGeneration.observeCommandError(
+                  error,
+                  classification: .startFailed,
+                  kind: runtimeErrorKind(
+                    for: error,
+                    invalidArgumentKind: .invalidConfiguration,
+                    defaultKind: .virtualization),
+                  state: runtimeObservedState(from: vm.state),
+                  occurredAt: self.eventNow())
               }
             }
           }
           self.vzRuntimeQueue.asyncAfter(deadline: .now() + 30) {
-            gate.finish(.failure(RuntimeLifecycleTimeoutError("vm start timed out after 30s")))
+            let error = RuntimeLifecycleTimeoutError("vm start timed out after 30s")
+            guard gate.finish(.failure(error)) else { return }
+            eventGeneration.observeCommandError(
+              error,
+              classification: .startFailed,
+              kind: .timeout,
+              state: runtimeObservedState(from: vm.state),
+              occurredAt: self.eventNow())
+            eventGeneration.poison()
           }
         } catch {
+          let state =
+            self.virtualMachine.map { runtimeObservedState(from: $0.state) } ?? .configured
+          self.eventGeneration.observeCommandError(
+            error,
+            classification: .startFailed,
+            kind: runtimeErrorKind(
+              for: error,
+              invalidArgumentKind: .invalidConfiguration,
+              defaultKind: .virtualization),
+            state: state,
+            occurredAt: self.eventNow())
           completion(.failure(error))
         }
       #else
@@ -101,11 +161,20 @@ final class VzRuntime: RuntimeServicing {
   }
 
   func stop(completion: @escaping RuntimeCompletion) {
-    stop(gracePeriod: 30, forceTimeout: 5, completion: completion)
+    stop(
+      gracePeriod: 30,
+      forceTimeout: 5,
+      errorClassification: .stopFailed,
+      completion: completion)
   }
 
   func kill(completion: @escaping RuntimeCompletion) {
-    stop(gracePeriod: 0, forceTimeout: 5, allowGracefulStop: false, completion: completion)
+    stop(
+      gracePeriod: 0,
+      forceTimeout: 5,
+      allowGracefulStop: false,
+      errorClassification: .killFailed,
+      completion: completion)
   }
 
   func status(completion: @escaping RuntimeCompletion) {
@@ -118,7 +187,16 @@ final class VzRuntime: RuntimeServicing {
     vzRuntimeQueue.async {
       self.isTearingDown = true
       self.stop(
-        gracePeriod: 30, forceTimeout: 5, allowGracefulStop: true, completion: completion)
+        gracePeriod: 30,
+        forceTimeout: 5,
+        allowGracefulStop: true,
+        errorClassification: .stopFailed
+      ) { result in
+        self.vzRuntimeQueue.async {
+          self.releaseRuntimeGenerationLocked()
+          completion(result)
+        }
+      }
     }
   }
 
@@ -126,6 +204,7 @@ final class VzRuntime: RuntimeServicing {
     gracePeriod: TimeInterval,
     forceTimeout: TimeInterval,
     allowGracefulStop: Bool = true,
+    errorClassification: RuntimeErrorClassification,
     completion: @escaping RuntimeCompletion
   ) {
     vzRuntimeQueue.async {
@@ -140,11 +219,16 @@ final class VzRuntime: RuntimeServicing {
           return
         }
         if vm.state == .error {
+          self.eventGeneration.observeState(.error)
           self.logger.log(.warn, "vm stop requested while VM is in error state")
           completion(.success(self.statusLocked()))
           return
         }
 
+        let eventGeneration = self.eventGeneration
+        if self.runtimeMachineState(vm.state) == .running {
+          eventGeneration.observeState(.stopping)
+        }
         self.stopCoordinator.stop(
           gracePeriod: gracePeriod,
           forceTimeout: forceTimeout,
@@ -162,8 +246,21 @@ final class VzRuntime: RuntimeServicing {
           switch result {
           case .success:
             self.logger.log(.info, "vm stopped")
+            eventGeneration.observeState(runtimeObservedState(from: vm.state))
             completion(.success(self.statusLocked()))
           case .failure(let error):
+            eventGeneration.observeCommandError(
+              error,
+              classification: errorClassification,
+              kind: runtimeErrorKind(
+                for: error,
+                invalidArgumentKind: .invalidState,
+                defaultKind: .virtualization),
+              state: runtimeObservedState(from: vm.state),
+              occurredAt: self.eventNow())
+            if error is RuntimeLifecycleTimeoutError || error is RuntimeShutdownDeadlineError {
+              eventGeneration.poison()
+            }
             completion(.failure(error))
           }
         }
@@ -185,6 +282,25 @@ final class VzRuntime: RuntimeServicing {
       }
     }
   #endif
+
+  private func beginRuntimeGenerationLocked() {
+    vzRuntimeQueue.preconditionIsCurrent()
+    releaseRuntimeGenerationLocked()
+    eventGeneration = RuntimeEventGeneration(
+      queue: vzRuntimeQueue, now: eventNow, delivery: eventDelivery)
+  }
+
+  private func releaseRuntimeGenerationLocked() {
+    vzRuntimeQueue.preconditionIsCurrent()
+    #if canImport(Virtualization)
+      virtualMachine?.delegate = nil
+    #endif
+    delegateLifetime.release()
+    eventGeneration.close()
+    #if canImport(Virtualization)
+      virtualMachine = nil
+    #endif
+  }
 }
 
 private final class RuntimeResultGate {
@@ -195,11 +311,13 @@ private final class RuntimeResultGate {
     self.completion = completion
   }
 
-  func finish(_ result: RuntimeResult) {
-    guard !isFinished else { return }
+  @discardableResult
+  func finish(_ result: RuntimeResult) -> Bool {
+    guard !isFinished else { return false }
     isFinished = true
     let completion = completion
     self.completion = nil
     completion?(result)
+    return true
   }
 }
