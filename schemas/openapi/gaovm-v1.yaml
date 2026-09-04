@@ -36,6 +36,86 @@ paths:
             application/json:
               schema:
                 type: object
+  /v1/system/live:
+    get:
+      tags: [System]
+      operationId: getSystemLiveness
+      summary: Check whether the daemon HTTP service is live
+      responses:
+        '200':
+          description: Daemon is live
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [live]
+                properties:
+                  live:
+                    type: boolean
+                  checks:
+                    type: object
+                    additionalProperties: true
+                additionalProperties: false
+        '503':
+          description: Daemon HTTP service is not live
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [live]
+                properties:
+                  live:
+                    const: false
+                  checks:
+                    type: object
+                    additionalProperties: true
+                additionalProperties: false
+  /v1/system/ready:
+    get:
+      tags: [System]
+      operationId: getSystemReadiness
+      summary: Check whether daemon dependencies are ready
+      responses:
+        '200':
+          description: Daemon dependencies are ready
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ready, checks]
+                properties:
+                  ready:
+                    type: boolean
+                  checks:
+                    type: object
+                    additionalProperties: true
+                additionalProperties: false
+        '503':
+          description: One or more daemon dependencies are not ready
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ready, checks]
+                properties:
+                  ready:
+                    const: false
+                  checks:
+                    type: object
+                    additionalProperties: true
+                additionalProperties: false
   /v1/vms:
     get:
       tags: [VirtualMachines]
