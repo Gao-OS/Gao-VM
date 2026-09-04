@@ -19,6 +19,8 @@ abstract interface class VmEffectCancellationAdapter {
 abstract interface class VmLeaseEffectAdapter {
   Future<void> acquire(VmControllerState state, OperationId operationId);
 
+  Future<void> markRunning(VmControllerState state, OperationId operationId);
+
   Future<void> release(VmControllerState state, OperationId? operationId);
 }
 
@@ -143,6 +145,8 @@ final class RepositoryVmEffectRunner
       case ReleaseHostLease():
         await _leases.release(state, operationId);
         return HostLeaseReleased(operationId);
+      case MarkHostLeaseRunning():
+        await _leases.markRunning(state, operationId!);
       case SpawnDriver():
         await _drivers.spawn(state, operationId!, driverGeneration!);
         return DriverSpawned(
@@ -232,7 +236,10 @@ final class RepositoryVmEffectRunner
   Future<void> cancel(VmEffect effect, VmControllerState state) async {
     final adapter = switch (effect) {
       PersistVm() || PersistRuntime() => _persistence,
-      AcquireHostLease() || ReleaseHostLease() || ShutdownLease() => _leases,
+      AcquireHostLease() ||
+      MarkHostLeaseRunning() ||
+      ReleaseHostLease() ||
+      ShutdownLease() => _leases,
       SpawnDriver() ||
       ConnectDriver() ||
       ConfigureRuntime() ||

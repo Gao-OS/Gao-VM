@@ -137,6 +137,11 @@ void main() {
     final effects = <VmEffect>[
       AcquireHostLease(vmId: _vmId, operationId: _recoveryOperationId),
       ReleaseHostLease(vmId: _vmId, operationId: null),
+      MarkHostLeaseRunning(
+        vmId: _vmId,
+        operationId: _recoveryOperationId,
+        driverGeneration: 3,
+      ),
       SpawnDriver(
         vmId: _vmId,
         operationId: _recoveryOperationId,
@@ -177,10 +182,11 @@ void main() {
 
     expect(commands[0], isA<HostLeaseAcquired>());
     expect(commands[1], isA<HostLeaseReleased>());
-    expect(commands[2], isA<DriverSpawned>());
-    expect(commands[3], isA<DriverHandshakeCompleted>());
-    expect(commands.sublist(4, 8), everyElement(isA<DriverCommandSucceeded>()));
-    expect(commands[8], isA<ManagedFilesRemoved>());
+    expect(commands[2], isNull);
+    expect(commands[3], isA<DriverSpawned>());
+    expect(commands[4], isA<DriverHandshakeCompleted>());
+    expect(commands.sublist(5, 9), everyElement(isA<DriverCommandSucceeded>()));
+    expect(commands[9], isA<ManagedFilesRemoved>());
   });
 
   test(
@@ -306,6 +312,12 @@ final class _NoopPersistence implements VmStateEffectAdapter {
 final class _NoopLeases implements VmLeaseEffectAdapter {
   @override
   Future<void> acquire(
+    VmControllerState state,
+    OperationId operationId,
+  ) async {}
+
+  @override
+  Future<void> markRunning(
     VmControllerState state,
     OperationId operationId,
   ) async {}

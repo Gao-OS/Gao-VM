@@ -116,6 +116,7 @@ void main() {
           OperationState.succeeded,
         );
         expect(transition.effects, [
+          isA<MarkHostLeaseRunning>(),
           isA<PersistRuntime>(),
           isA<CompleteOperation>(),
           isA<EmitEvent>().having(

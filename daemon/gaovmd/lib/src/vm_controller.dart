@@ -299,7 +299,8 @@ final class VmController {
           if (sourceCommand is! EffectExecutionFailed &&
               sourceCommand is! ControllerShutdownRequested &&
               sourceCommand is! ControllerDriverShutdownFailed &&
-              sourceCommand is! ControllerLeaseShutdownFailed) {
+              sourceCommand is! ControllerLeaseShutdownFailed &&
+              sourceCommand is! HostLeaseRunningMarkFailed) {
             break;
           }
         }
@@ -326,7 +327,8 @@ final class VmController {
         if (sourceCommand is! EffectExecutionFailed &&
             sourceCommand is! ControllerShutdownRequested &&
             sourceCommand is! ControllerDriverShutdownFailed &&
-            sourceCommand is! ControllerLeaseShutdownFailed) {
+            sourceCommand is! ControllerLeaseShutdownFailed &&
+            sourceCommand is! HostLeaseRunningMarkFailed) {
           break;
         }
       }
@@ -431,6 +433,16 @@ final class VmController {
     final operationError = _operationError(effect, error);
     final operationId = effect.operationId;
     final driverGeneration = effect.driverGeneration;
+    final effectiveRollbackOperationId = rolledBackCompletionOperationId;
+    if (effect is MarkHostLeaseRunning &&
+        operationId != null &&
+        driverGeneration != null) {
+      return HostLeaseRunningMarkFailed(
+        operationId: operationId,
+        driverGeneration: driverGeneration,
+        error: operationError,
+      );
+    }
     final underlying = error is VmEffectBatchException ? error.error : error;
     if (underlying is VmEffectTimeoutException) {
       return EffectExecutionFailed(
@@ -439,7 +451,7 @@ final class VmController {
         driverGeneration: driverGeneration,
         error: operationError,
         duringShutdown: !_acceptingExternal,
-        rolledBackCompletionOperationId: rolledBackCompletionOperationId,
+        rolledBackCompletionOperationId: effectiveRollbackOperationId,
       );
     }
     return switch (effect) {
@@ -504,7 +516,7 @@ final class VmController {
         driverGeneration: driverGeneration,
         error: operationError,
         duringShutdown: !_acceptingExternal,
-        rolledBackCompletionOperationId: rolledBackCompletionOperationId,
+        rolledBackCompletionOperationId: effectiveRollbackOperationId,
       ),
     };
   }

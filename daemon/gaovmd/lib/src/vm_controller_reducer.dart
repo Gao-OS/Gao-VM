@@ -277,6 +277,18 @@ final class HostLeaseFailed extends VmCommand {
   final OperationError error;
 }
 
+final class HostLeaseRunningMarkFailed extends VmCommand {
+  const HostLeaseRunningMarkFailed({
+    required this.operationId,
+    required this.driverGeneration,
+    required this.error,
+  });
+
+  final OperationId operationId;
+  final int driverGeneration;
+  final OperationError error;
+}
+
 final class DriverSpawned extends VmCommand {
   const DriverSpawned({
     required this.operationId,
@@ -574,6 +586,14 @@ final class ReleaseHostLease extends VmEffect {
   const ReleaseHostLease({required super.vmId, required super.operationId});
 }
 
+final class MarkHostLeaseRunning extends VmEffect {
+  const MarkHostLeaseRunning({
+    required super.vmId,
+    required super.operationId,
+    required super.driverGeneration,
+  });
+}
+
 final class ShutdownDriver extends VmEffect {
   const ShutdownDriver({
     required super.vmId,
@@ -711,6 +731,12 @@ VmTransition reduce(VmControllerState state, VmCommand command) {
       operationId,
       error,
     ),
+    HostLeaseRunningMarkFailed(
+      :final operationId,
+      :final driverGeneration,
+      :final error,
+    ) =>
+      _leaseRunningMarkFailed(state, operationId, driverGeneration, error),
     DriverSpawned(:final operationId, :final driverGeneration) =>
       _driverSpawned(state, operationId, driverGeneration),
     DriverSpawnFailed(
@@ -1697,6 +1723,51 @@ VmTransition _leaseFailed(
   );
 }
 
+VmTransition _leaseRunningMarkFailed(
+  VmControllerState state,
+  OperationId operationId,
+  int driverGeneration,
+  OperationError error,
+) {
+  if (!_matchesRuntimeCallback(state, operationId, driverGeneration) ||
+      state.phase != VmPhase.running) {
+    return VmTransition(state: state);
+  }
+  final operation = state.currentOperation;
+  final shouldFailOperation = operation?.id == operationId;
+  return VmTransition(
+    state: state.copyWith(
+      desiredState: DesiredState.stopped,
+      phase: VmPhase.failed,
+      currentOperation: shouldFailOperation
+          ? operation!.copyWith(state: OperationState.failed)
+          : operation,
+      lastError: error,
+    ),
+    effects: [
+      PersistVm(vmId: state.vmId, operationId: operationId),
+      PersistRuntime(
+        vmId: state.vmId,
+        operationId: operationId,
+        driverGeneration: driverGeneration,
+      ),
+      if (shouldFailOperation)
+        FailOperation(vmId: state.vmId, operationId: operationId, error: error),
+      EmitEvent(
+        vmId: state.vmId,
+        operationId: operationId,
+        driverGeneration: driverGeneration,
+        type: 'vm.host_lease_lost',
+      ),
+      KillDriver(
+        vmId: state.vmId,
+        operationId: operationId,
+        driverGeneration: driverGeneration,
+      ),
+    ],
+  );
+}
+
 VmTransition _leaseReleased(VmControllerState state, OperationId? operationId) {
   final operation = state.currentOperation;
   if (state.leaseState == VmLeaseState.releasing &&
@@ -1963,6 +2034,24 @@ VmTransition _driverCommandFailed(
   if (!_matchesRuntimeCallback(state, operationId, driverGeneration)) {
     return VmTransition(state: state);
   }
+  if (command == RuntimeCommandKind.kill && state.phase == VmPhase.failed) {
+    return VmTransition(
+      state: state.copyWith(lastError: error),
+      effects: [
+        PersistRuntime(
+          vmId: state.vmId,
+          operationId: operationId,
+          driverGeneration: driverGeneration,
+        ),
+        EmitEvent(
+          vmId: state.vmId,
+          operationId: operationId,
+          driverGeneration: driverGeneration,
+          type: 'vm.driver_cleanup_failed',
+        ),
+      ],
+    );
+  }
   return _markDriverUnhealthy(
     state,
     operationId,
@@ -2094,6 +2183,11 @@ VmTransition _vmStateChanged(
   return VmTransition(
     state: next,
     effects: [
+      MarkHostLeaseRunning(
+        vmId: state.vmId,
+        operationId: operationId,
+        driverGeneration: driverGeneration,
+      ),
       PersistRuntime(
         vmId: state.vmId,
         operationId: operationId,
