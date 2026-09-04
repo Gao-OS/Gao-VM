@@ -231,7 +231,12 @@
       "properties": {
         "architecture": { "const": "arm64" },
         "cpu": { "type": "integer", "minimum": 1, "maximum": 64 },
-        "memory_bytes": { "type": "integer", "minimum": 268435456, "multipleOf": 1048576 },
+        "memory_bytes": {
+          "type": "integer",
+          "minimum": 268435456,
+          "maximum": 9007199254740992,
+          "multipleOf": 1048576
+        },
         "boot": {
           "oneOf": [
             { "$ref": "#/$defs/linuxKernelBoot" },
