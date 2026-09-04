@@ -37,6 +37,28 @@
       "minimum": 1,
       "maximum": 9007199254740991
     },
+    "jsonValue": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "string" },
+        {
+          "type": "number",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991,
+          "multipleOf": 0.000000001
+        },
+        {
+          "type": "array",
+          "items": { "$ref": "#/$defs/jsonValue" }
+        },
+        { "$ref": "#/$defs/jsonObject" }
+      ]
+    },
+    "jsonObject": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+    },
     "capability": {
       "enum": [
         "runtime.configure",
@@ -438,7 +460,7 @@
           "properties": {
             "code": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" },
             "message": { "type": "string", "minLength": 1 },
-            "details": { "type": "object" }
+            "details": { "$ref": "#/$defs/jsonObject" }
           },
           "additionalProperties": false
         }
@@ -480,7 +502,12 @@
             "driver_generation": { "$ref": "#/$defs/driverGeneration" },
             "operation_id": { "$ref": "#/$defs/operationIdOrNull" },
             "status": { "enum": ["accepted", "succeeded", "noop"] },
-            "data": { "type": ["object", "null"] }
+            "data": {
+              "oneOf": [
+                { "$ref": "#/$defs/jsonObject" },
+                { "type": "null" }
+              ]
+            }
           },
           "additionalProperties": false
         }
@@ -533,7 +560,7 @@
                 "driver_generation": { "$ref": "#/$defs/driverGeneration" },
                 "operation_id": { "$ref": "#/$defs/operationIdOrNull" },
                 "retryable": { "type": "boolean" },
-                "details": { "type": "object" }
+                "details": { "$ref": "#/$defs/jsonObject" }
               },
               "additionalProperties": false
             }
@@ -560,7 +587,7 @@
         },
         "message": { "type": "string", "minLength": 1 },
         "retryable": { "type": "boolean" },
-        "details": { "type": "object" }
+        "details": { "$ref": "#/$defs/jsonObject" }
       },
       "additionalProperties": false
     }
