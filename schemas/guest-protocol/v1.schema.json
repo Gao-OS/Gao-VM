@@ -1,0 +1,600 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gaovm.dev/schemas/guest-protocol/v1.schema.json",
+  "title": "GaoVM guest agent protocol v1",
+  "description": "Language-neutral framed JSON control protocol over virtio-vsock. One frame is one object. Artifacts and large output use separate binary streams rather than base64 in control messages.",
+  "oneOf": [
+    { "$ref": "#/$defs/request" },
+    { "$ref": "#/$defs/successResponse" },
+    { "$ref": "#/$defs/errorResponse" },
+    { "$ref": "#/$defs/event" }
+  ],
+  "$defs": {
+    "messageId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "vmId": {
+      "type": "string",
+      "pattern": "^vm_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "operationId": {
+      "type": "string",
+      "pattern": "^op_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "operationIdOrNull": {
+      "oneOf": [
+        { "$ref": "#/$defs/operationId" },
+        { "type": "null" }
+      ]
+    },
+    "artifactId": {
+      "type": "string",
+      "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "correlationProperties": {
+      "type": "object",
+      "required": ["vm_id", "driver_generation", "operation_id"],
+      "properties": {
+        "vm_id": { "$ref": "#/$defs/vmId" },
+        "driver_generation": { "type": "integer", "minimum": 1 },
+        "operation_id": { "$ref": "#/$defs/operationIdOrNull" }
+      }
+    },
+    "capability": {
+      "oneOf": [
+        { "const": "health", "x-gaovm-priority": "P0" },
+        { "const": "system.info", "x-gaovm-priority": "P0" },
+        { "const": "exec.start", "x-gaovm-priority": "P0" },
+        { "const": "exec.status", "x-gaovm-priority": "P0" },
+        { "const": "exec.cancel", "x-gaovm-priority": "P0" },
+        { "const": "artifact.collect", "x-gaovm-priority": "P0" },
+        { "const": "service.status", "x-gaovm-priority": "P1" },
+        { "const": "shutdown", "x-gaovm-priority": "P1" },
+        { "const": "reboot", "x-gaovm-priority": "P1" }
+      ]
+    },
+    "capabilitySet": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/capability" },
+      "uniqueItems": true
+    },
+    "request": {
+      "type": "object",
+      "required": ["protocol_version", "kind", "id", "method", "vm_id", "driver_generation", "operation_id", "params"],
+      "properties": {
+        "protocol_version": { "const": "gaovm.guest.v1" },
+        "kind": { "const": "request" },
+        "id": { "$ref": "#/$defs/messageId" },
+        "method": {
+          "enum": [
+            "session.hello",
+            "capabilities.get",
+            "health",
+            "system.info",
+            "exec.start",
+            "exec.status",
+            "exec.cancel",
+            "artifact.collect",
+            "service.status",
+            "shutdown",
+            "reboot"
+          ]
+        },
+        "vm_id": { "$ref": "#/$defs/vmId" },
+        "driver_generation": { "type": "integer", "minimum": 1 },
+        "operation_id": { "$ref": "#/$defs/operationIdOrNull" },
+        "params": { "type": "object" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "method": { "const": "session.hello" } } },
+          "then": {
+            "properties": {
+              "operation_id": { "type": "null" },
+              "params": { "$ref": "#/$defs/helloParams" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "method": { "enum": ["capabilities.get", "health", "system.info", "exec.status", "exec.cancel"] } } },
+          "then": { "properties": { "params": { "$ref": "#/$defs/emptyParams" } } }
+        },
+        {
+          "if": { "properties": { "method": { "enum": ["exec.status", "exec.cancel"] } } },
+          "then": { "properties": { "operation_id": { "$ref": "#/$defs/operationId" } } }
+        },
+        {
+          "if": { "properties": { "method": { "const": "exec.start" } } },
+          "then": { "properties": { "operation_id": { "$ref": "#/$defs/operationId" }, "params": { "$ref": "#/$defs/execStartParams" } } }
+        },
+        {
+          "if": { "properties": { "method": { "const": "artifact.collect" } } },
+          "then": { "properties": { "operation_id": { "$ref": "#/$defs/operationId" }, "params": { "$ref": "#/$defs/artifactCollectParams" } } }
+        },
+        {
+          "if": { "properties": { "method": { "const": "service.status" } } },
+          "then": { "properties": { "params": { "$ref": "#/$defs/serviceStatusParams" } } }
+        },
+        {
+          "if": { "properties": { "method": { "enum": ["shutdown", "reboot"] } } },
+          "then": { "properties": { "operation_id": { "$ref": "#/$defs/operationId" }, "params": { "$ref": "#/$defs/powerParams" } } }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "emptyParams": {
+      "type": "object",
+      "maxProperties": 0
+    },
+    "helloParams": {
+      "type": "object",
+      "required": ["peer_role", "offered_capabilities", "required_capabilities"],
+      "properties": {
+        "peer_role": { "enum": ["host", "guest"] },
+        "offered_capabilities": { "$ref": "#/$defs/capabilitySet" },
+        "required_capabilities": { "$ref": "#/$defs/capabilitySet" },
+        "agent": {
+          "type": "object",
+          "required": ["name", "version"],
+          "properties": {
+            "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "version": { "type": "string", "minLength": 1, "maxLength": 128 }
+          },
+          "additionalProperties": false
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "peer_role": { "const": "guest" } },
+            "required": ["peer_role"]
+          },
+          "then": {
+            "properties": {
+              "offered_capabilities": {
+                "allOf": [
+                  { "$ref": "#/$defs/capabilitySet" },
+                  { "contains": { "const": "health" } },
+                  { "contains": { "const": "system.info" } },
+                  { "contains": { "const": "exec.start" } },
+                  { "contains": { "const": "exec.status" } },
+                  { "contains": { "const": "exec.cancel" } },
+                  { "contains": { "const": "artifact.collect" } }
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "captureOptions": {
+      "type": "object",
+      "required": ["stdout", "stderr", "max_inline_bytes"],
+      "properties": {
+        "stdout": { "type": "boolean" },
+        "stderr": { "type": "boolean" },
+        "max_inline_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1048576,
+          "description": "Output above this threshold is transferred as an artifact."
+        }
+      },
+      "additionalProperties": false
+    },
+    "execStartParams": {
+      "type": "object",
+      "required": ["argv", "cwd", "env", "timeout_seconds", "capture"],
+      "properties": {
+        "argv": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1024,
+          "items": { "type": "string", "maxLength": 131072 },
+          "description": "An argv vector. Callers that need a shell must explicitly invoke it."
+        },
+        "cwd": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "env": {
+          "type": "object",
+          "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
+          "additionalProperties": { "type": "string", "maxLength": 131072 },
+          "maxProperties": 1024
+        },
+        "timeout_seconds": { "type": "number", "exclusiveMinimum": 0, "maximum": 86400 },
+        "capture": { "$ref": "#/$defs/captureOptions" }
+      },
+      "additionalProperties": false
+    },
+    "artifactCollectParams": {
+      "type": "object",
+      "required": ["paths", "max_total_bytes"],
+      "properties": {
+        "paths": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "items": {
+            "type": "object",
+            "required": ["path", "kind"],
+            "properties": {
+              "path": { "type": "string", "minLength": 1, "maxLength": 4096 },
+              "kind": { "type": "string", "minLength": 1, "maxLength": 64 },
+              "content_type": { "type": "string", "minLength": 1, "maxLength": 255 }
+            },
+            "additionalProperties": false
+          }
+        },
+        "max_total_bytes": { "type": "integer", "minimum": 0 },
+        "follow_symlinks": { "const": false, "default": false }
+      },
+      "additionalProperties": false
+    },
+    "serviceStatusParams": {
+      "type": "object",
+      "required": ["names"],
+      "properties": {
+        "names": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "items": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "uniqueItems": true
+        },
+        "include_recent_logs": { "type": "boolean", "default": false },
+        "max_log_bytes": { "type": "integer", "minimum": 0, "maximum": 1048576, "default": 65536 }
+      },
+      "additionalProperties": false,
+      "x-gaovm-priority": "P1"
+    },
+    "powerParams": {
+      "type": "object",
+      "properties": {
+        "delay_seconds": { "type": "number", "minimum": 0, "maximum": 300, "default": 0 },
+        "message": { "type": "string", "maxLength": 1024 }
+      },
+      "additionalProperties": false,
+      "x-gaovm-priority": "P1"
+    },
+    "successResponse": {
+      "type": "object",
+      "required": ["protocol_version", "kind", "id", "method", "vm_id", "driver_generation", "operation_id", "result"],
+      "properties": {
+        "protocol_version": { "const": "gaovm.guest.v1" },
+        "kind": { "const": "response" },
+        "id": { "$ref": "#/$defs/messageId" },
+        "method": {
+          "enum": [
+            "session.hello",
+            "capabilities.get",
+            "health",
+            "system.info",
+            "exec.start",
+            "exec.status",
+            "exec.cancel",
+            "artifact.collect",
+            "service.status",
+            "shutdown",
+            "reboot"
+          ]
+        },
+        "vm_id": { "$ref": "#/$defs/vmId" },
+        "driver_generation": { "type": "integer", "minimum": 1 },
+        "operation_id": { "$ref": "#/$defs/operationIdOrNull" },
+        "result": { "type": "object" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "method": { "const": "session.hello" } } },
+          "then": { "properties": { "operation_id": { "type": "null" }, "result": { "$ref": "#/$defs/helloResult" } } }
+        },
+        {
+          "if": { "properties": { "method": { "const": "capabilities.get" } } },
+          "then": { "properties": { "result": { "$ref": "#/$defs/capabilitiesResult" } } }
+        },
+        {
+          "if": { "properties": { "method": { "const": "health" } } },
+          "then": { "properties": { "result": { "$ref": "#/$defs/healthResult" } } }
+        },
+        {
+          "if": { "properties": { "method": { "const": "system.info" } } },
+          "then": { "properties": { "result": { "$ref": "#/$defs/systemInfoResult" } } }
+        },
+        {
+          "if": { "properties": { "method": { "enum": ["exec.start", "exec.status", "exec.cancel"] } } },
+          "then": { "properties": { "operation_id": { "$ref": "#/$defs/operationId" }, "result": { "$ref": "#/$defs/execResult" } } }
+        },
+        {
+          "if": { "properties": { "method": { "const": "artifact.collect" } } },
+          "then": { "properties": { "operation_id": { "$ref": "#/$defs/operationId" }, "result": { "$ref": "#/$defs/artifactCollectResult" } } }
+        },
+        {
+          "if": { "properties": { "method": { "const": "service.status" } } },
+          "then": { "properties": { "result": { "$ref": "#/$defs/serviceStatusResult" } } }
+        },
+        {
+          "if": { "properties": { "method": { "enum": ["shutdown", "reboot"] } } },
+          "then": { "properties": { "operation_id": { "$ref": "#/$defs/operationId" }, "result": { "$ref": "#/$defs/powerResult" } } }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "helloResult": {
+      "type": "object",
+      "required": ["accepted_capabilities"],
+      "properties": {
+        "accepted_capabilities": { "$ref": "#/$defs/capabilitySet" }
+      },
+      "additionalProperties": false
+    },
+    "capabilitiesResult": {
+      "type": "object",
+      "required": ["capabilities"],
+      "properties": {
+        "capabilities": { "$ref": "#/$defs/capabilitySet" }
+      },
+      "additionalProperties": false
+    },
+    "healthResult": {
+      "type": "object",
+      "required": ["status", "uptime_seconds"],
+      "properties": {
+        "status": { "enum": ["ok", "degraded"] },
+        "uptime_seconds": { "type": "number", "minimum": 0 },
+        "checks": {
+          "type": "object",
+          "additionalProperties": { "enum": ["ok", "degraded", "failed"] }
+        }
+      },
+      "additionalProperties": false
+    },
+    "systemInfoResult": {
+      "type": "object",
+      "required": ["os", "kernel", "architecture", "hostname"],
+      "properties": {
+        "os": {
+          "type": "object",
+          "required": ["name", "version"],
+          "properties": {
+            "name": { "type": "string", "minLength": 1 },
+            "version": { "type": "string", "minLength": 1 },
+            "build_id": { "type": ["string", "null"] },
+            "channel": { "type": ["string", "null"] }
+          },
+          "additionalProperties": false
+        },
+        "kernel": { "type": "string", "minLength": 1 },
+        "architecture": { "type": "string", "minLength": 1 },
+        "hostname": { "type": "string", "minLength": 1 },
+        "boot_id": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "outputReference": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["mode", "text", "truncated", "size_bytes"],
+          "properties": {
+            "mode": { "const": "inline" },
+            "text": { "type": "string" },
+            "truncated": { "type": "boolean" },
+            "size_bytes": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["mode", "artifact_id", "size_bytes"],
+          "properties": {
+            "mode": { "const": "artifact" },
+            "artifact_id": { "$ref": "#/$defs/artifactId" },
+            "size_bytes": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "execResult": {
+      "type": "object",
+      "required": ["state", "exit_code", "stdout", "stderr", "duration_ms", "timed_out"],
+      "properties": {
+        "state": { "enum": ["pending", "running", "succeeded", "failed", "cancelled"] },
+        "exit_code": { "type": ["integer", "null"] },
+        "stdout": { "$ref": "#/$defs/outputReference" },
+        "stderr": { "$ref": "#/$defs/outputReference" },
+        "duration_ms": { "type": "integer", "minimum": 0 },
+        "timed_out": { "type": "boolean" },
+        "signal": { "type": ["integer", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "artifactCollectResult": {
+      "type": "object",
+      "required": ["artifacts"],
+      "properties": {
+        "artifacts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/artifactDescriptor" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "artifactDescriptor": {
+      "type": "object",
+      "required": ["artifact_id", "kind", "content_type", "size_bytes", "digest", "stream_id"],
+      "properties": {
+        "artifact_id": { "$ref": "#/$defs/artifactId" },
+        "kind": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "content_type": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "size_bytes": { "type": "integer", "minimum": 0 },
+        "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "stream_id": { "type": "string", "minLength": 1, "maxLength": 128, "description": "Identifier for a separate bounded binary transfer stream." }
+      },
+      "additionalProperties": false
+    },
+    "serviceStatusResult": {
+      "type": "object",
+      "required": ["services"],
+      "properties": {
+        "services": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "state"],
+            "properties": {
+              "name": { "type": "string", "minLength": 1 },
+              "state": { "enum": ["active", "inactive", "failed", "unknown"] },
+              "detail": { "type": ["string", "null"] },
+              "logs": { "$ref": "#/$defs/outputReference" }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false,
+      "x-gaovm-priority": "P1"
+    },
+    "powerResult": {
+      "type": "object",
+      "required": ["accepted"],
+      "properties": {
+        "accepted": { "const": true }
+      },
+      "additionalProperties": false,
+      "x-gaovm-priority": "P1"
+    },
+    "errorResponse": {
+      "type": "object",
+      "required": ["protocol_version", "kind", "id", "method", "vm_id", "driver_generation", "operation_id", "error"],
+      "properties": {
+        "protocol_version": { "const": "gaovm.guest.v1" },
+        "kind": { "const": "error" },
+        "id": { "$ref": "#/$defs/messageId" },
+        "method": { "type": "string", "minLength": 1 },
+        "vm_id": { "$ref": "#/$defs/vmId" },
+        "driver_generation": { "type": "integer", "minimum": 1 },
+        "operation_id": { "$ref": "#/$defs/operationIdOrNull" },
+        "error": {
+          "type": "object",
+          "required": ["code", "message", "retryable"],
+          "properties": {
+            "code": {
+              "enum": [
+                "PROTOCOL_VERSION_MISMATCH",
+                "CAPABILITY_MISMATCH",
+                "CAPABILITY_NOT_SUPPORTED",
+                "INVALID_REQUEST",
+                "EXEC_NOT_FOUND",
+                "EXEC_START_FAILED",
+                "EXEC_CANCEL_FAILED",
+                "EXEC_TIMEOUT",
+                "OUTPUT_LIMIT_EXCEEDED",
+                "ARTIFACT_NOT_FOUND",
+                "ARTIFACT_LIMIT_EXCEEDED",
+                "SERVICE_NOT_FOUND",
+                "POWER_ACTION_FAILED",
+                "GUEST_INTERNAL_ERROR"
+              ]
+            },
+            "message": { "type": "string", "minLength": 1 },
+            "retryable": { "type": "boolean" },
+            "details": { "type": "object" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "event": {
+      "type": "object",
+      "required": ["protocol_version", "kind", "method", "vm_id", "driver_generation", "operation_id", "occurred_at", "payload"],
+      "properties": {
+        "protocol_version": { "const": "gaovm.guest.v1" },
+        "kind": { "const": "event" },
+        "method": { "enum": ["exec.state_changed", "guest.warning"] },
+        "vm_id": { "$ref": "#/$defs/vmId" },
+        "driver_generation": { "type": "integer", "minimum": 1 },
+        "operation_id": { "$ref": "#/$defs/operationIdOrNull" },
+        "occurred_at": { "type": "string", "format": "date-time" },
+        "payload": {
+          "type": "object",
+          "properties": {
+            "exec_state": { "enum": ["pending", "running", "succeeded", "failed", "cancelled"] },
+            "warning_code": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" },
+            "message": { "type": "string" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "method": { "const": "exec.state_changed" } } },
+          "then": {
+            "properties": {
+              "operation_id": { "$ref": "#/$defs/operationId" },
+              "payload": { "required": ["exec_state"] }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "method": { "const": "guest.warning" } } },
+          "then": { "properties": { "payload": { "required": ["warning_code", "message"] } } }
+        }
+      ],
+      "additionalProperties": false
+    }
+  },
+  "examples": [
+    {
+      "protocol_version": "gaovm.guest.v1",
+      "kind": "request",
+      "id": "guest-exec-1",
+      "method": "exec.start",
+      "vm_id": "vm_01J00000000000000000000000",
+      "driver_generation": 8,
+      "operation_id": "op_01J00000000000000000000001",
+      "params": {
+        "argv": ["gaoos-test", "network"],
+        "cwd": "/",
+        "env": {},
+        "timeout_seconds": 600,
+        "capture": {
+          "stdout": true,
+          "stderr": true,
+          "max_inline_bytes": 65536
+        }
+      }
+    },
+    {
+      "protocol_version": "gaovm.guest.v1",
+      "kind": "response",
+      "id": "guest-exec-1",
+      "method": "exec.start",
+      "vm_id": "vm_01J00000000000000000000000",
+      "driver_generation": 8,
+      "operation_id": "op_01J00000000000000000000001",
+      "result": {
+        "state": "succeeded",
+        "exit_code": 0,
+        "stdout": {
+          "mode": "inline",
+          "text": "ok\n",
+          "truncated": false,
+          "size_bytes": 3
+        },
+        "stderr": {
+          "mode": "inline",
+          "text": "",
+          "truncated": false,
+          "size_bytes": 0
+        },
+        "duration_ms": 1324,
+        "timed_out": false,
+        "signal": null
+      }
+    }
+  ]
+}

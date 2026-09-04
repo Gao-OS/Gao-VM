@@ -1,0 +1,1611 @@
+openapi: 3.1.0
+info:
+  title: GaoVM Public API
+  version: 1.0.0
+  description: |
+    Stable multi-VM HTTP/JSON API. Long-running commands return durable
+    operations. This public contract intentionally exposes no raw driver RPC,
+    driver method passthrough, socket path, authentication token, or backend
+    implementation command.
+servers:
+  - url: http://localhost
+    description: HTTP semantics over the default GaoVM Unix domain socket
+    x-gaovm-unix-socket: run/api.sock
+tags:
+  - name: Schema
+  - name: VirtualMachines
+  - name: Images
+  - name: Operations
+  - name: Events
+  - name: TestRuns
+  - name: Artifacts
+  - name: System
+paths:
+  /v1/openapi.json:
+    get:
+      tags: [Schema]
+      operationId: getOpenApi
+      summary: Get this OpenAPI document as JSON
+      responses:
+        '200':
+          description: OpenAPI document
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                type: object
+  /v1/vms:
+    get:
+      tags: [VirtualMachines]
+      operationId: listVms
+      summary: List virtual machines
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/LabelSelector'
+        - $ref: '#/components/parameters/VmSort'
+      responses:
+        '200':
+          $ref: '#/components/responses/VmList'
+        default:
+          $ref: '#/components/responses/Problem'
+    post:
+      tags: [VirtualMachines]
+      operationId: createVm
+      summary: Create a virtual machine
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VmCreateRequest'
+            examples:
+              gaoosNightly:
+                value:
+                  api_version: gaovm.io/v1alpha1
+                  kind: VirtualMachine
+                  metadata:
+                    name: gaoos-nightly-network
+                    labels:
+                      gaoos.channel: nightly
+                  spec:
+                    backend: vz
+                    architecture: arm64
+                    guest_profile: gaoos
+                    cpu: 4
+                    memory_bytes: 4294967296
+                    boot:
+                      type: linux_kernel
+                      kernel_image_id: img_01J00000000000000000000000
+                      initrd_image_id: img_01J00000000000000000000001
+                    disks:
+                      - id: root
+                        source:
+                          type: managed_image
+                          image_id: img_01J00000000000000000000002
+                        writable: true
+                    networks:
+                      - id: net0
+                        mode: shared
+                    graphics:
+                      enabled: false
+                    serial:
+                      enabled: true
+                      capture: true
+                    guest_agent:
+                      enabled: true
+                      required_for_ready: true
+                    restart_policy: on_failure
+      responses:
+        '202':
+          $ref: '#/components/responses/OperationAccepted'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /v1/vms/{vm_id}:
+    parameters:
+      - $ref: '#/components/parameters/VmId'
+    get:
+      tags: [VirtualMachines]
+      operationId: getVm
+      summary: Get a virtual machine by immutable ID
+      responses:
+        '200':
+          $ref: '#/components/responses/Vm'
+        '404':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+    patch:
+      tags: [VirtualMachines]
+      operationId: patchVm
+      summary: Patch VM metadata or desired specification
+      description: Restart-required changes are staged until the VM is restarted.
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema:
+              $ref: '#/components/schemas/VmPatchRequest'
+      responses:
+        '202':
+          $ref: '#/components/responses/OperationAccepted'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '412':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+    delete:
+      tags: [VirtualMachines]
+      operationId: deleteVm
+      summary: Stop if needed, then asynchronously delete a VM
+      description: External disks are never deleted by this operation.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          $ref: '#/components/responses/OperationAccepted'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /v1/vms/{vm_id}/actions/start:
+    post:
+      tags: [VirtualMachines]
+      operationId: startVm
+      summary: Start one VM
+      parameters:
+        - $ref: '#/components/parameters/VmId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        $ref: '#/components/requestBodies/Action'
+      responses:
+        '202':
+          $ref: '#/components/responses/OperationAccepted'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /v1/vms/{vm_id}/actions/stop:
+    post:
+      tags: [VirtualMachines]
+      operationId: stopVm
+      summary: Gracefully stop one VM
+      parameters:
+        - $ref: '#/components/parameters/VmId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        $ref: '#/components/requestBodies/Action'
+      responses:
+        '202':
+          $ref: '#/components/responses/OperationAccepted'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /v1/vms/{vm_id}/actions/restart:
+    post:
+      tags: [VirtualMachines]
+      operationId: restartVm
+      summary: Restart one VM
+      parameters:
+        - $ref: '#/components/parameters/VmId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        $ref: '#/components/requestBodies/Action'
+      responses:
+        '202':
+          $ref: '#/components/responses/OperationAccepted'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /v1/vms/{vm_id}/actions/kill:
+    post:
+      tags: [VirtualMachines]
+      operationId: killVm
+      summary: Force-stop one VM
+      parameters:
+        - $ref: '#/components/parameters/VmId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        $ref: '#/components/requestBodies/Action'
+      responses:
+        '202':
+          $ref: '#/components/responses/OperationAccepted'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /v1/vms/{vm_id}/actions/clone:
+    post:
+      tags: [VirtualMachines]
+      operationId: cloneVm
+      summary: Clone one VM into a new VM
+      x-gaovm-priority: P1
+      parameters:
+        - $ref: '#/components/parameters/VmId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VmCloneRequest'
+      responses:
+        '202':
+          $ref: '#/components/responses/OperationAccepted'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /v1/vms/{vm_id}/wait:
+    post:
+      tags: [VirtualMachines]
+      operationId: waitForVm
+      summary: Wait for an explicit VM condition
+      parameters:
+        - $ref: '#/components/parameters/VmId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VmWaitRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/VmWaitResult'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '408':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /v1/vms/{vm_id}/guest/exec:
+    post:
+      tags: [VirtualMachines]
+      operationId: execInGuest
+      summary: Execute an argv vector through the optional guest agent
+      parameters:
+        - $ref: '#/components/parameters/VmId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GuestExecRequest'
+            example:
+              argv: [gaoos-test, network]
+              cwd: /
+              env: {}
+              timeout_seconds: 600
+              capture:
+                stdout: true
+                stderr: true
+                max_inline_bytes: 65536
+      responses:
+        '202':
+          $ref: '#/components/responses/OperationAccepted'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /v1/vms/{vm_id}/logs:
+    get:
+      tags: [VirtualMachines]
+      operationId: listVmLogs
+      summary: List stable references to bounded VM log files
+      parameters:
+        - $ref: '#/components/parameters/VmId'
+        - name: kind
+          in: query
+          schema:
+            type: string
+            enum: [driver, serial, guest]
+      responses:
+        '200':
+          $ref: '#/components/responses/LogList'
+        '404':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /v1/vms/{vm_id}/artifacts:
+    get:
+      tags: [VirtualMachines, Artifacts]
+      operationId: listVmArtifacts
+      summary: List artifacts associated with one VM
+      parameters:
+        - $ref: '#/components/parameters/VmId'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          $ref: '#/components/responses/ArtifactList'
+        '404':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /v1/images:
+    get:
+      tags: [Images]
+      operationId: listImages
+      summary: List immutable images
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/LabelSelector'
+      responses:
+        '200':
+          $ref: '#/components/responses/ImageList'
+        default:
+          $ref: '#/components/responses/Problem'
+  /v1/images/import:
+    post:
+      tags: [Images]
+      operationId: importImage
+      summary: Atomically import an immutable image
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ImageImportRequest'
+      responses:
+        '202':
+          $ref: '#/components/responses/OperationAccepted'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /v1/images/{image_id}:
+    delete:
+      tags: [Images]
+      operationId: deleteImage
+      summary: Delete an unreferenced image
+      parameters:
+        - $ref: '#/components/parameters/ImageId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          $ref: '#/components/responses/OperationAccepted'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /v1/operations/{operation_id}:
+    get:
+      tags: [Operations]
+      operationId: getOperation
+      summary: Get a durable operation
+      parameters:
+        - $ref: '#/components/parameters/OperationId'
+      responses:
+        '200':
+          $ref: '#/components/responses/Operation'
+        '404':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /v1/operations/{operation_id}/cancel:
+    post:
+      tags: [Operations]
+      operationId: cancelOperation
+      summary: Request cancellation of a cancellable operation
+      parameters:
+        - $ref: '#/components/parameters/OperationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          $ref: '#/components/responses/OperationAccepted'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /v1/events:
+    get:
+      tags: [Events]
+      operationId: streamEvents
+      summary: Resume a durable event stream from a sequence cursor
+      parameters:
+        - name: after_sequence
+          in: query
+          description: Emit only events whose sequence is greater than this cursor.
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: vm_id
+          in: query
+          schema:
+            $ref: '#/components/schemas/VmId'
+        - name: operation_id
+          in: query
+          schema:
+            $ref: '#/components/schemas/OperationId'
+        - name: test_run_id
+          in: query
+          schema:
+            $ref: '#/components/schemas/TestRunId'
+      responses:
+        '200':
+          description: Server-sent events. Each data field is one Event JSON object.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestId'
+          content:
+            text/event-stream:
+              schema:
+                $ref: '#/components/schemas/Event'
+                description: Schema of each JSON object carried by an SSE data field.
+              example:
+                sequence: 42
+                event_id: evt_01J00000000000000000000000
+                type: vm.phase_changed
+                resource_type: virtual_machine
+                resource_id: vm_01J00000000000000000000001
+                vm_id: vm_01J00000000000000000000001
+                operation_id: op_01J00000000000000000000002
+                test_run_id: null
+                payload:
+                  phase: running
+                occurred_at: '2026-09-04T08:10:00Z'
+        default:
+          $ref: '#/components/responses/Problem'
+  /v1/test-runs:
+    post:
+      tags: [TestRuns]
+      operationId: createTestRun
+      summary: Create a persistent TestRun orchestration resource
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TestRunCreateRequest'
+      responses:
+        '202':
+          $ref: '#/components/responses/OperationAccepted'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /v1/test-runs/{test_run_id}:
+    get:
+      tags: [TestRuns]
+      operationId: getTestRun
+      summary: Get a persistent TestRun
+      parameters:
+        - $ref: '#/components/parameters/TestRunId'
+      responses:
+        '200':
+          $ref: '#/components/responses/TestRun'
+        '404':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /v1/test-runs/{test_run_id}/cancel:
+    post:
+      tags: [TestRuns]
+      operationId: cancelTestRun
+      summary: Cancel remaining steps and apply the configured cleanup policy
+      parameters:
+        - $ref: '#/components/parameters/TestRunId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          $ref: '#/components/responses/OperationAccepted'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /v1/test-runs/{test_run_id}/artifacts:
+    get:
+      tags: [TestRuns, Artifacts]
+      operationId: listTestRunArtifacts
+      summary: List artifacts collected for one TestRun
+      parameters:
+        - $ref: '#/components/parameters/TestRunId'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          $ref: '#/components/responses/ArtifactList'
+        '404':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /v1/artifacts/{artifact_id}:
+    get:
+      tags: [Artifacts]
+      operationId: getArtifact
+      summary: Stream one bounded artifact
+      parameters:
+        - $ref: '#/components/parameters/ArtifactId'
+      responses:
+        '200':
+          description: Artifact bytes
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestId'
+            Digest:
+              description: SHA-256 digest of the returned bytes
+              schema:
+                type: string
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '404':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /v1/system/capabilities:
+    get:
+      tags: [System]
+      operationId: getCapabilities
+      summary: Get public backend and guest capabilities
+      description: These public capabilities are independent from negotiated driver capabilities.
+      responses:
+        '200':
+          $ref: '#/components/responses/Capabilities'
+        default:
+          $ref: '#/components/responses/Problem'
+  /v1/system/doctor:
+    get:
+      tags: [System]
+      operationId: doctor
+      summary: Run non-mutating host readiness checks
+      responses:
+        '200':
+          $ref: '#/components/responses/Doctor'
+        default:
+          $ref: '#/components/responses/Problem'
+components:
+  headers:
+    RequestId:
+      description: Stable request correlation ID
+      required: true
+      schema:
+        $ref: '#/components/schemas/RequestId'
+  parameters:
+    VmId:
+      name: vm_id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/VmId'
+    ImageId:
+      name: image_id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/ImageId'
+    OperationId:
+      name: operation_id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/OperationId'
+    TestRunId:
+      name: test_run_id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/TestRunId'
+    ArtifactId:
+      name: artifact_id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/ArtifactId'
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: Same key and body reuses the resource and operation; a different body returns IDEMPOTENCY_CONFLICT.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 255
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      description: Quoted current metadata revision.
+      schema:
+        type: string
+        pattern: '^"[1-9][0-9]*"$'
+    Cursor:
+      name: cursor
+      in: query
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 512
+    Limit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+    LabelSelector:
+      name: label_selector
+      in: query
+      description: Comma-separated equality/inequality label requirements.
+      schema:
+        type: string
+        maxLength: 4096
+    VmSort:
+      name: sort
+      in: query
+      schema:
+        type: string
+        enum: [created_at, -created_at, name, -name, id, -id]
+        default: created_at
+  requestBodies:
+    Action:
+      required: false
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ActionRequest'
+  responses:
+    Problem:
+      description: Structured stable error
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: https://gaovm.dev/problems/vm-not-found
+            title: VM not found
+            status: 404
+            code: VM_NOT_FOUND
+            detail: No VM exists with the requested ID.
+            request_id: req_01J00000000000000000000000
+            retryable: false
+            operation_id: null
+            details: {}
+    OperationAccepted:
+      description: Durable asynchronous operation accepted or idempotently reused
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestId'
+        Location:
+          description: Operation resource URL
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/OperationAccepted'
+          example:
+            operation_id: op_01J00000000000000000000000
+            state: pending
+            resource_type: virtual_machine
+            resource_id: vm_01J00000000000000000000001
+    Vm:
+      description: Virtual machine
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestId'
+        ETag:
+          description: Quoted metadata revision
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/VirtualMachine'
+    VmList:
+      description: Page of virtual machines in stable order
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/VmList'
+    VmWaitResult:
+      description: Requested condition was reached
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/VmWaitResult'
+    LogList:
+      description: Stable VM log references
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestId'
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [items]
+            properties:
+              items:
+                type: array
+                items:
+                  $ref: '#/components/schemas/LogReference'
+            additionalProperties: false
+    ImageList:
+      description: Page of images
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestId'
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [items, next_cursor]
+            properties:
+              items:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Image'
+              next_cursor:
+                type: [string, 'null']
+            additionalProperties: false
+    Operation:
+      description: Durable operation
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Operation'
+    TestRun:
+      description: Persistent TestRun
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/TestRun'
+    ArtifactList:
+      description: Page of artifacts
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestId'
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [items, next_cursor]
+            properties:
+              items:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Artifact'
+              next_cursor:
+                type: [string, 'null']
+            additionalProperties: false
+    Capabilities:
+      description: Public API capabilities
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Capabilities'
+    Doctor:
+      description: Host readiness checks
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/DoctorResult'
+  schemas:
+    VmId:
+      type: string
+      pattern: '^vm_[0-9A-HJKMNP-TV-Z]{26}$'
+      examples: [vm_01J00000000000000000000000]
+    ImageId:
+      type: string
+      pattern: '^img_[0-9A-HJKMNP-TV-Z]{26}$'
+      examples: [img_01J00000000000000000000000]
+    OperationId:
+      type: string
+      pattern: '^op_[0-9A-HJKMNP-TV-Z]{26}$'
+      examples: [op_01J00000000000000000000000]
+    EventId:
+      type: string
+      pattern: '^evt_[0-9A-HJKMNP-TV-Z]{26}$'
+      examples: [evt_01J00000000000000000000000]
+    TestRunId:
+      type: string
+      pattern: '^tr_[0-9A-HJKMNP-TV-Z]{26}$'
+      examples: [tr_01J00000000000000000000000]
+    ArtifactId:
+      type: string
+      pattern: '^art_[0-9A-HJKMNP-TV-Z]{26}$'
+      examples: [art_01J00000000000000000000000]
+    RequestId:
+      type: string
+      pattern: '^req_[0-9A-HJKMNP-TV-Z]{26}$'
+      examples: [req_01J00000000000000000000000]
+    Labels:
+      type: object
+      propertyNames:
+        pattern: '^[A-Za-z0-9](?:[A-Za-z0-9._/-]*[A-Za-z0-9])?$'
+      additionalProperties:
+        type: string
+        maxLength: 253
+      maxProperties: 64
+    VmSpec:
+      $ref: '../vm-spec/v1alpha1.schema.json#/$defs/vmSpec'
+    VmCreateRequest:
+      type: object
+      required: [api_version, kind, metadata, spec]
+      properties:
+        api_version:
+          const: gaovm.io/v1alpha1
+        kind:
+          const: VirtualMachine
+        metadata:
+          type: object
+          required: [name]
+          properties:
+            name:
+              type: string
+              minLength: 1
+              maxLength: 128
+            labels:
+              $ref: '#/components/schemas/Labels'
+          additionalProperties: false
+        spec:
+          $ref: '#/components/schemas/VmSpec'
+      additionalProperties: false
+    VmSpecPatch:
+      type: object
+      minProperties: 1
+      properties:
+        backend:
+          const: vz
+        architecture:
+          enum: [arm64]
+        guest_profile:
+          type: [string, 'null']
+        cpu:
+          type: integer
+          minimum: 1
+        memory_bytes:
+          type: integer
+          minimum: 268435456
+          multipleOf: 1048576
+        boot:
+          $ref: '../vm-spec/v1alpha1.schema.json#/$defs/boot'
+        disks:
+          type: array
+          minItems: 1
+          items:
+            $ref: '../vm-spec/v1alpha1.schema.json#/$defs/disk'
+        networks:
+          type: array
+          minItems: 1
+          items:
+            $ref: '../vm-spec/v1alpha1.schema.json#/$defs/network'
+        graphics:
+          $ref: '../vm-spec/v1alpha1.schema.json#/$defs/graphics'
+        serial:
+          $ref: '../vm-spec/v1alpha1.schema.json#/$defs/serial'
+        guest_agent:
+          $ref: '../vm-spec/v1alpha1.schema.json#/$defs/guestAgent'
+        restart_policy:
+          enum: [never, on_failure, always]
+        autostart:
+          type: boolean
+      additionalProperties: false
+    VmPatchRequest:
+      type: object
+      minProperties: 1
+      properties:
+        metadata:
+          type: object
+          minProperties: 1
+          properties:
+            name:
+              type: string
+              minLength: 1
+              maxLength: 128
+            labels:
+              $ref: '#/components/schemas/Labels'
+          additionalProperties: false
+        spec:
+          $ref: '#/components/schemas/VmSpecPatch'
+      additionalProperties: false
+    ResourceMetadata:
+      type: object
+      required: [id, name, labels, revision, created_at, updated_at]
+      properties:
+        id:
+          $ref: '#/components/schemas/VmId'
+        name:
+          type: string
+          minLength: 1
+        labels:
+          $ref: '#/components/schemas/Labels'
+        revision:
+          type: integer
+          minimum: 1
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      additionalProperties: false
+    VmStatus:
+      type: object
+      required: [desired_state, phase, spec_generation, observed_generation, driver_generation, guest_agent, last_transition_at, last_error]
+      properties:
+        desired_state:
+          enum: [stopped, running]
+        phase:
+          enum: [defined, provisioning, stopped, spawning_driver, handshaking, configuring, starting, running, stopping, crashed, failed, deleting, deleted]
+        spec_generation:
+          type: integer
+          minimum: 1
+        observed_generation:
+          type: integer
+          minimum: 0
+        driver_generation:
+          type: integer
+          minimum: 0
+        guest_agent:
+          enum: [disabled, unavailable, connecting, ready, unhealthy]
+        restart_required:
+          type: boolean
+          default: false
+        last_transition_at:
+          type: string
+          format: date-time
+        last_error:
+          oneOf:
+            - $ref: '#/components/schemas/OperationError'
+            - type: 'null'
+      additionalProperties: false
+    VirtualMachine:
+      type: object
+      required: [api_version, kind, metadata, spec, status]
+      properties:
+        api_version:
+          const: gaovm.io/v1alpha1
+        kind:
+          const: VirtualMachine
+        metadata:
+          $ref: '#/components/schemas/ResourceMetadata'
+        spec:
+          $ref: '#/components/schemas/VmSpec'
+        status:
+          $ref: '#/components/schemas/VmStatus'
+      additionalProperties: false
+    VmList:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/VirtualMachine'
+        next_cursor:
+          type: [string, 'null']
+      additionalProperties: false
+    ActionRequest:
+      type: object
+      properties:
+        reason:
+          type: string
+          maxLength: 1024
+        deadline_at:
+          type: string
+          format: date-time
+      additionalProperties: false
+    VmCloneRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+        labels:
+          $ref: '#/components/schemas/Labels'
+      additionalProperties: false
+    VmWaitRequest:
+      type: object
+      required: [condition, timeout_seconds]
+      properties:
+        condition:
+          enum: [runtime_running, guest_agent_ready, guest_service_ready]
+        service_name:
+          type: string
+          minLength: 1
+        timeout_seconds:
+          type: number
+          exclusiveMinimum: 0
+          maximum: 86400
+      allOf:
+        - if:
+            properties:
+              condition:
+                const: guest_service_ready
+          then:
+            required: [service_name]
+      additionalProperties: false
+    VmWaitResult:
+      type: object
+      required: [vm_id, condition, reached, observed_at]
+      properties:
+        vm_id:
+          $ref: '#/components/schemas/VmId'
+        condition:
+          type: string
+        reached:
+          const: true
+        observed_at:
+          type: string
+          format: date-time
+      additionalProperties: false
+    GuestExecRequest:
+      type: object
+      required: [argv, cwd, env, timeout_seconds, capture]
+      properties:
+        argv:
+          type: array
+          minItems: 1
+          maxItems: 1024
+          items:
+            type: string
+            maxLength: 131072
+        cwd:
+          type: string
+          minLength: 1
+          maxLength: 4096
+        env:
+          type: object
+          propertyNames:
+            pattern: '^[A-Za-z_][A-Za-z0-9_]*$'
+          additionalProperties:
+            type: string
+            maxLength: 131072
+        timeout_seconds:
+          type: number
+          exclusiveMinimum: 0
+          maximum: 86400
+        capture:
+          type: object
+          required: [stdout, stderr, max_inline_bytes]
+          properties:
+            stdout:
+              type: boolean
+            stderr:
+              type: boolean
+            max_inline_bytes:
+              type: integer
+              minimum: 0
+              maximum: 1048576
+          additionalProperties: false
+      additionalProperties: false
+    ImageImportRequest:
+      type: object
+      required: [source_path, type, architecture]
+      properties:
+        source_path:
+          type: string
+          minLength: 1
+          description: Host path validated using realpath and ownership checks.
+        type:
+          enum: [linux-kernel, initrd, raw-disk, gaoos-bundle]
+        architecture:
+          enum: [arm64]
+        guest_profile:
+          type: [string, 'null']
+        version:
+          type: [string, 'null']
+        build_id:
+          type: [string, 'null']
+        channel:
+          type: [string, 'null']
+        labels:
+          $ref: '#/components/schemas/Labels'
+      additionalProperties: false
+    Image:
+      type: object
+      required: [id, digest, type, architecture, manifest, created_at]
+      properties:
+        id:
+          $ref: '#/components/schemas/ImageId'
+        digest:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+        type:
+          enum: [linux-kernel, initrd, raw-disk, gaoos-bundle]
+        architecture:
+          enum: [arm64]
+        guest_profile:
+          type: [string, 'null']
+        version:
+          type: [string, 'null']
+        build_id:
+          type: [string, 'null']
+        channel:
+          type: [string, 'null']
+        labels:
+          $ref: '#/components/schemas/Labels'
+        manifest:
+          type: object
+        created_at:
+          type: string
+          format: date-time
+      additionalProperties: false
+    OperationState:
+      enum: [pending, running, succeeded, failed, cancelled]
+    OperationError:
+      type: object
+      required: [code, message, retryable, details]
+      properties:
+        code:
+          $ref: '#/components/schemas/ErrorCode'
+        message:
+          type: string
+          minLength: 1
+        retryable:
+          type: boolean
+        details:
+          type: object
+      additionalProperties: false
+    OperationAccepted:
+      type: object
+      required: [operation_id, state, resource_type, resource_id]
+      properties:
+        operation_id:
+          $ref: '#/components/schemas/OperationId'
+        state:
+          enum: [pending, running, succeeded]
+        resource_type:
+          enum: [virtual_machine, image, operation, test_run, artifact]
+        resource_id:
+          type: string
+          pattern: '^(?:vm|img|op|tr|art)_[0-9A-HJKMNP-TV-Z]{26}$'
+      additionalProperties: false
+    Operation:
+      type: object
+      required: [id, type, resource_type, resource_id, state, request_id, idempotency_key, cancellable, progress, request, result, error, created_at, started_at, completed_at, deadline_at]
+      properties:
+        id:
+          $ref: '#/components/schemas/OperationId'
+        type:
+          type: string
+          pattern: '^[a-z][a-z0-9_.-]*$'
+        resource_type:
+          enum: [virtual_machine, image, operation, test_run, artifact]
+        resource_id:
+          type: string
+          pattern: '^(?:vm|img|op|tr|art)_[0-9A-HJKMNP-TV-Z]{26}$'
+        state:
+          $ref: '#/components/schemas/OperationState'
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        idempotency_key:
+          type: [string, 'null']
+        cancellable:
+          type: boolean
+        progress:
+          type: object
+          properties:
+            percent:
+              type: number
+              minimum: 0
+              maximum: 100
+            step:
+              type: [string, 'null']
+          additionalProperties: false
+        request:
+          type: object
+        result:
+          type: [object, 'null']
+        error:
+          oneOf:
+            - $ref: '#/components/schemas/OperationError'
+            - type: 'null'
+        created_at:
+          type: string
+          format: date-time
+        started_at:
+          type: [string, 'null']
+          format: date-time
+        completed_at:
+          type: [string, 'null']
+          format: date-time
+        deadline_at:
+          type: [string, 'null']
+          format: date-time
+      additionalProperties: false
+    Event:
+      type: object
+      required: [sequence, event_id, type, resource_type, resource_id, vm_id, operation_id, test_run_id, payload, occurred_at]
+      properties:
+        sequence:
+          type: integer
+          minimum: 1
+        event_id:
+          $ref: '#/components/schemas/EventId'
+        type:
+          type: string
+          pattern: '^[a-z][a-z0-9_.-]*$'
+        resource_type:
+          enum: [virtual_machine, image, operation, test_run, artifact, system]
+        resource_id:
+          type: [string, 'null']
+        vm_id:
+          oneOf:
+            - $ref: '#/components/schemas/VmId'
+            - type: 'null'
+        operation_id:
+          oneOf:
+            - $ref: '#/components/schemas/OperationId'
+            - type: 'null'
+        test_run_id:
+          oneOf:
+            - $ref: '#/components/schemas/TestRunId'
+            - type: 'null'
+        payload:
+          type: object
+        occurred_at:
+          type: string
+          format: date-time
+      additionalProperties: false
+    TestRunCreateRequest:
+      type: object
+      required: [source, wait, steps, cleanup, retain_on_failure]
+      properties:
+        source:
+          oneOf:
+            - type: object
+              required: [image_id]
+              properties:
+                image_id:
+                  $ref: '#/components/schemas/ImageId'
+              additionalProperties: false
+            - type: object
+              required: [template_vm_id]
+              properties:
+                template_vm_id:
+                  $ref: '#/components/schemas/VmId'
+              additionalProperties: false
+        vm_overrides:
+          $ref: '#/components/schemas/VmSpecPatch'
+        wait:
+          $ref: '#/components/schemas/VmWaitRequest'
+        steps:
+          type: array
+          minItems: 1
+          maxItems: 256
+          items:
+            $ref: '#/components/schemas/TestStepRequest'
+        timeout_seconds:
+          type: number
+          exclusiveMinimum: 0
+          maximum: 172800
+        cleanup:
+          enum: [delete_on_success, always_delete, retain]
+        retain_on_failure:
+          type: boolean
+      additionalProperties: false
+    TestStepRequest:
+      type: object
+      required: [type, argv, timeout_seconds]
+      properties:
+        type:
+          const: guest.exec
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+        argv:
+          type: array
+          minItems: 1
+          items:
+            type: string
+        cwd:
+          type: string
+          default: /
+        env:
+          type: object
+          additionalProperties:
+            type: string
+        timeout_seconds:
+          type: number
+          exclusiveMinimum: 0
+          maximum: 86400
+      additionalProperties: false
+    TestStep:
+      type: object
+      required: [index, state, request, result, error, started_at, completed_at]
+      properties:
+        index:
+          type: integer
+          minimum: 0
+        state:
+          enum: [pending, running, succeeded, failed, cancelled, skipped]
+        request:
+          $ref: '#/components/schemas/TestStepRequest'
+        result:
+          type: [object, 'null']
+        error:
+          oneOf:
+            - $ref: '#/components/schemas/OperationError'
+            - type: 'null'
+        started_at:
+          type: [string, 'null']
+          format: date-time
+        completed_at:
+          type: [string, 'null']
+          format: date-time
+      additionalProperties: false
+    TestRun:
+      type: object
+      required: [id, state, source, vm_id, operation_id, steps, cleanup, retain_on_failure, result, error, artifact_ids, created_at, completed_at]
+      properties:
+        id:
+          $ref: '#/components/schemas/TestRunId'
+        state:
+          enum: [pending, provisioning, starting_vm, waiting_ready, running_steps, collecting, cleaning_up, succeeded, failed, cancelled]
+        source:
+          type: object
+        vm_id:
+          oneOf:
+            - $ref: '#/components/schemas/VmId'
+            - type: 'null'
+        operation_id:
+          $ref: '#/components/schemas/OperationId'
+        steps:
+          type: array
+          items:
+            $ref: '#/components/schemas/TestStep'
+        cleanup:
+          enum: [delete_on_success, always_delete, retain]
+        retain_on_failure:
+          type: boolean
+        cleanup_decision:
+          type: [string, 'null']
+        result:
+          type: [object, 'null']
+        error:
+          oneOf:
+            - $ref: '#/components/schemas/OperationError'
+            - type: 'null'
+        artifact_ids:
+          type: array
+          items:
+            $ref: '#/components/schemas/ArtifactId'
+        created_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: [string, 'null']
+          format: date-time
+      additionalProperties: false
+    Artifact:
+      type: object
+      required: [id, vm_id, operation_id, test_run_id, kind, content_type, size_bytes, digest, download_url, retention_until, created_at]
+      properties:
+        id:
+          $ref: '#/components/schemas/ArtifactId'
+        vm_id:
+          oneOf:
+            - $ref: '#/components/schemas/VmId'
+            - type: 'null'
+        operation_id:
+          oneOf:
+            - $ref: '#/components/schemas/OperationId'
+            - type: 'null'
+        test_run_id:
+          oneOf:
+            - $ref: '#/components/schemas/TestRunId'
+            - type: 'null'
+        kind:
+          enum: [stdout, stderr, serial, driver, guest-log, result, file]
+        content_type:
+          type: string
+          minLength: 1
+        size_bytes:
+          type: integer
+          minimum: 0
+        digest:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+        download_url:
+          type: string
+          pattern: '^/v1/artifacts/art_[0-9A-HJKMNP-TV-Z]{26}$'
+        retention_until:
+          type: [string, 'null']
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+      additionalProperties: false
+    LogReference:
+      type: object
+      required: [kind, vm_id, size_bytes, updated_at, artifact_id]
+      properties:
+        kind:
+          enum: [driver, serial, guest]
+        vm_id:
+          $ref: '#/components/schemas/VmId'
+        size_bytes:
+          type: integer
+          minimum: 0
+        updated_at:
+          type: string
+          format: date-time
+        artifact_id:
+          oneOf:
+            - $ref: '#/components/schemas/ArtifactId'
+            - type: 'null'
+      additionalProperties: false
+    Capabilities:
+      type: object
+      required: [api_version, backends, guest, limits]
+      properties:
+        api_version:
+          const: v1
+        backends:
+          type: array
+          items:
+            enum: [vz]
+        guest:
+          type: array
+          items:
+            enum: [health, system.info, exec, artifact.collect, service.status, shutdown, reboot]
+          uniqueItems: true
+        limits:
+          type: object
+          required: [max_defined_vms, max_running_vms, max_concurrent_boots]
+          properties:
+            max_defined_vms:
+              type: integer
+              minimum: 1
+            max_running_vms:
+              type: integer
+              minimum: 1
+            max_concurrent_boots:
+              type: integer
+              minimum: 1
+          additionalProperties: false
+      additionalProperties: false
+    DoctorResult:
+      type: object
+      required: [healthy, checks]
+      properties:
+        healthy:
+          type: boolean
+        checks:
+          type: array
+          items:
+            type: object
+            required: [name, status, message]
+            properties:
+              name:
+                type: string
+              status:
+                enum: [ok, warning, error]
+              message:
+                type: string
+            additionalProperties: false
+      additionalProperties: false
+    ErrorCode:
+      type: string
+      enum:
+        - VM_NOT_FOUND
+        - VM_ALREADY_RUNNING
+        - VM_NOT_RUNNING
+        - VM_OPERATION_CONFLICT
+        - VM_SPEC_INVALID
+        - REVISION_CONFLICT
+        - HOST_RESOURCE_EXHAUSTED
+        - DRIVER_START_FAILED
+        - DRIVER_UNHEALTHY
+        - GUEST_AGENT_UNAVAILABLE
+        - GUEST_EXEC_FAILED
+        - WAIT_TIMEOUT
+        - OPERATION_NOT_FOUND
+        - OPERATION_NOT_CANCELLABLE
+        - IDEMPOTENCY_CONFLICT
+        - IMAGE_NOT_FOUND
+        - IMAGE_IN_USE
+        - TEST_RUN_NOT_FOUND
+        - ARTIFACT_NOT_FOUND
+        - INVALID_REQUEST
+        - INTERNAL_ERROR
+    Problem:
+      type: object
+      required: [type, title, status, code, detail, request_id, retryable, operation_id, details]
+      properties:
+        type:
+          type: string
+          format: uri
+          pattern: '^https://gaovm\.dev/problems/[a-z0-9-]+$'
+        title:
+          type: string
+          minLength: 1
+        status:
+          type: integer
+          minimum: 400
+          maximum: 599
+        code:
+          $ref: '#/components/schemas/ErrorCode'
+        detail:
+          type: string
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        retryable:
+          type: boolean
+        operation_id:
+          oneOf:
+            - $ref: '#/components/schemas/OperationId'
+            - type: 'null'
+        details:
+          type: object
+      additionalProperties: false

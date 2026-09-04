@@ -1,0 +1,464 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gaovm.dev/schemas/vm-spec/v1alpha1.schema.json",
+  "title": "GaoVM VirtualMachine specification v1alpha1",
+  "description": "Declarative, backend-independent desired configuration for one GaoVM virtual machine.",
+  "type": "object",
+  "required": ["api_version", "kind", "metadata", "spec"],
+  "properties": {
+    "api_version": {
+      "const": "gaovm.io/v1alpha1"
+    },
+    "kind": {
+      "const": "VirtualMachine"
+    },
+    "metadata": {
+      "$ref": "#/$defs/metadata"
+    },
+    "spec": {
+      "$ref": "#/$defs/vmSpec"
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "ulid": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "Canonical uppercase Crockford Base32 ULID."
+    },
+    "vmId": {
+      "type": "string",
+      "pattern": "^vm_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "imageId": {
+      "type": "string",
+      "pattern": "^img_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "labelName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 253,
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._/-]*[A-Za-z0-9])?$"
+    },
+    "labelValue": {
+      "type": "string",
+      "maxLength": 253
+    },
+    "labels": {
+      "type": "object",
+      "propertyNames": {
+        "$ref": "#/$defs/labelName"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/labelValue"
+      },
+      "maxProperties": 64
+    },
+    "metadata": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/vmId",
+          "description": "Immutable server-assigned identity. Omit when creating a VM."
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "labels": {
+          "$ref": "#/$defs/labels",
+          "default": {}
+        }
+      },
+      "additionalProperties": false
+    },
+    "vmSpec": {
+      "type": "object",
+      "required": [
+        "backend",
+        "architecture",
+        "cpu",
+        "memory_bytes",
+        "boot",
+        "disks",
+        "networks",
+        "graphics",
+        "serial",
+        "guest_agent",
+        "restart_policy"
+      ],
+      "properties": {
+        "backend": {
+          "const": "vz",
+          "description": "Runtime backend. v1alpha1 supports Virtualization.framework only."
+        },
+        "architecture": {
+          "enum": ["arm64"]
+        },
+        "guest_profile": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 64,
+          "default": null
+        },
+        "cpu": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64,
+          "x-gaovm-restart-required": true,
+          "description": "Validated again against the current host's VZ limits."
+        },
+        "memory_bytes": {
+          "type": "integer",
+          "minimum": 268435456,
+          "multipleOf": 1048576,
+          "x-gaovm-restart-required": true,
+          "description": "Memory in bytes, MiB aligned and validated against host VZ limits."
+        },
+        "boot": {
+          "$ref": "#/$defs/boot",
+          "x-gaovm-restart-required": true
+        },
+        "disks": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/disk"
+          },
+          "x-gaovm-restart-required": true
+        },
+        "networks": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/network"
+          },
+          "x-gaovm-restart-required": true
+        },
+        "graphics": {
+          "$ref": "#/$defs/graphics",
+          "x-gaovm-restart-required": true
+        },
+        "serial": {
+          "$ref": "#/$defs/serial",
+          "x-gaovm-restart-required": true
+        },
+        "guest_agent": {
+          "$ref": "#/$defs/guestAgent"
+        },
+        "restart_policy": {
+          "enum": ["never", "on_failure", "always"]
+        },
+        "autostart": {
+          "type": "boolean",
+          "default": false,
+          "x-gaovm-priority": "P1"
+        }
+      },
+      "additionalProperties": false
+    },
+    "boot": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/linuxKernelBoot"
+        },
+        {
+          "$ref": "#/$defs/efiBoot"
+        }
+      ]
+    },
+    "linuxKernelBoot": {
+      "type": "object",
+      "required": ["type", "kernel_image_id"],
+      "properties": {
+        "type": {
+          "const": "linux_kernel"
+        },
+        "kernel_image_id": {
+          "$ref": "#/$defs/imageId"
+        },
+        "initrd_image_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/imageId" },
+            { "type": "null" }
+          ],
+          "default": null
+        },
+        "command_line": {
+          "type": "string",
+          "maxLength": 8192,
+          "default": ""
+        }
+      },
+      "additionalProperties": false
+    },
+    "efiBoot": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "const": "efi"
+        },
+        "variable_store": {
+          "enum": ["managed", "external"],
+          "default": "managed"
+        },
+        "variable_store_path": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "variable_store": { "const": "external" }
+            },
+            "required": ["variable_store"]
+          },
+          "then": {
+            "required": ["variable_store_path"]
+          }
+        }
+      ],
+      "additionalProperties": false,
+      "x-gaovm-priority": "P1"
+    },
+    "disk": {
+      "type": "object",
+      "required": ["id", "source", "writable"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{0,31}$"
+        },
+        "source": {
+          "oneOf": [
+            { "$ref": "#/$defs/managedImageDiskSource" },
+            { "$ref": "#/$defs/externalDiskSource" }
+          ]
+        },
+        "writable": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "managedImageDiskSource": {
+      "type": "object",
+      "required": ["type", "image_id"],
+      "properties": {
+        "type": {
+          "const": "managed_image"
+        },
+        "image_id": {
+          "$ref": "#/$defs/imageId"
+        }
+      },
+      "additionalProperties": false
+    },
+    "externalDiskSource": {
+      "type": "object",
+      "required": ["type", "path"],
+      "properties": {
+        "type": {
+          "const": "external"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Absolute host path, subject to server-side realpath and ownership checks."
+        }
+      },
+      "additionalProperties": false
+    },
+    "network": {
+      "oneOf": [
+        { "$ref": "#/$defs/sharedNetwork" },
+        { "$ref": "#/$defs/disconnectedNetwork" }
+      ]
+    },
+    "sharedNetwork": {
+      "type": "object",
+      "required": ["id", "mode"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{0,31}$"
+        },
+        "mode": {
+          "const": "shared"
+        },
+        "mac_address": {
+          "type": "string",
+          "pattern": "^(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$",
+          "description": "Stable locally administered MAC. The server assigns one when omitted."
+        }
+      },
+      "additionalProperties": false
+    },
+    "disconnectedNetwork": {
+      "type": "object",
+      "required": ["id", "mode"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{0,31}$"
+        },
+        "mode": {
+          "const": "none"
+        }
+      },
+      "additionalProperties": false
+    },
+    "graphics": {
+      "type": "object",
+      "required": ["enabled"],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 320,
+          "maximum": 8192
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 200,
+          "maximum": 8192
+        },
+        "pixels_per_inch": {
+          "type": "integer",
+          "minimum": 72,
+          "maximum": 600,
+          "default": 144
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "enabled": { "const": true }
+            },
+            "required": ["enabled"]
+          },
+          "then": {
+            "required": ["width", "height"]
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "serial": {
+      "type": "object",
+      "required": ["enabled", "capture"],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "capture": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "guestAgent": {
+      "type": "object",
+      "required": ["enabled", "required_for_ready"],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "required_for_ready": {
+          "type": "boolean"
+        },
+        "vsock_port": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 4294967295,
+          "default": 10777
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "enabled": { "const": false }
+            },
+            "required": ["enabled"]
+          },
+          "then": {
+            "properties": {
+              "required_for_ready": { "const": false }
+            }
+          }
+        }
+      ],
+      "additionalProperties": false
+    }
+  },
+  "examples": [
+    {
+      "api_version": "gaovm.io/v1alpha1",
+      "kind": "VirtualMachine",
+      "metadata": {
+        "name": "gaoos-nightly-network",
+        "labels": {
+          "gaoos.channel": "nightly",
+          "test.suite": "network"
+        }
+      },
+      "spec": {
+        "backend": "vz",
+        "architecture": "arm64",
+        "guest_profile": "gaoos",
+        "cpu": 4,
+        "memory_bytes": 4294967296,
+        "boot": {
+          "type": "linux_kernel",
+          "kernel_image_id": "img_01J00000000000000000000000",
+          "initrd_image_id": "img_01J00000000000000000000001",
+          "command_line": "console=hvc0"
+        },
+        "disks": [
+          {
+            "id": "root",
+            "source": {
+              "type": "managed_image",
+              "image_id": "img_01J00000000000000000000002"
+            },
+            "writable": true
+          }
+        ],
+        "networks": [
+          {
+            "id": "net0",
+            "mode": "shared",
+            "mac_address": "02:00:00:00:00:01"
+          }
+        ],
+        "graphics": {
+          "enabled": true,
+          "width": 1280,
+          "height": 800,
+          "pixels_per_inch": 144
+        },
+        "serial": {
+          "enabled": true,
+          "capture": true
+        },
+        "guest_agent": {
+          "enabled": true,
+          "required_for_ready": true,
+          "vsock_port": 10777
+        },
+        "restart_policy": "on_failure"
+      }
+    }
+  ]
+}

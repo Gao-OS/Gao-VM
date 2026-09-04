@@ -1,0 +1,606 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gaovm.dev/schemas/driver-protocol/v2.schema.json",
+  "title": "GaoVM internal driver protocol v2",
+  "description": "One length-prefixed frame contains exactly one UTF-8 JSON-RPC 2.0 object. Arrays and JSON-RPC batch requests are deliberately invalid. This internal contract is not a public API.",
+  "oneOf": [
+    { "$ref": "#/$defs/helloRequest" },
+    { "$ref": "#/$defs/commandRequest" },
+    { "$ref": "#/$defs/eventNotification" },
+    { "$ref": "#/$defs/helloSuccessResponse" },
+    { "$ref": "#/$defs/commandSuccessResponse" },
+    { "$ref": "#/$defs/errorResponse" }
+  ],
+  "$defs": {
+    "rpcId": {
+      "oneOf": [
+        { "type": "integer" },
+        { "type": "string", "minLength": 1, "maxLength": 128 }
+      ]
+    },
+    "vmId": {
+      "type": "string",
+      "pattern": "^vm_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "operationId": {
+      "type": "string",
+      "pattern": "^op_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "operationIdOrNull": {
+      "oneOf": [
+        { "$ref": "#/$defs/operationId" },
+        { "type": "null" }
+      ]
+    },
+    "driverGeneration": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "capability": {
+      "enum": [
+        "runtime.configure",
+        "runtime.start",
+        "runtime.stop",
+        "runtime.kill",
+        "runtime.status",
+        "display.open",
+        "display.close",
+        "display.status",
+        "console.status",
+        "guest.status"
+      ]
+    },
+    "capabilitySet": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/capability" },
+      "uniqueItems": true
+    },
+    "correlation": {
+      "type": "object",
+      "required": ["vm_id", "driver_generation", "operation_id"],
+      "properties": {
+        "vm_id": { "$ref": "#/$defs/vmId" },
+        "driver_generation": { "$ref": "#/$defs/driverGeneration" },
+        "operation_id": { "$ref": "#/$defs/operationIdOrNull" }
+      }
+    },
+    "helloRequest": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/rpcId" },
+        "method": { "const": "session.hello" },
+        "params": {
+          "type": "object",
+          "required": [
+            "protocol_version",
+            "peer_role",
+            "vm_id",
+            "driver_generation",
+            "operation_id",
+            "auth_token",
+            "offered_capabilities",
+            "required_capabilities"
+          ],
+          "properties": {
+            "protocol_version": { "const": "gaovm.driver.v2" },
+            "peer_role": { "enum": ["daemon", "driver"] },
+            "vm_id": { "$ref": "#/$defs/vmId" },
+            "driver_generation": { "$ref": "#/$defs/driverGeneration" },
+            "operation_id": { "type": "null" },
+            "auth_token": {
+              "type": "string",
+              "minLength": 32,
+              "maxLength": 1024,
+              "writeOnly": true,
+              "description": "Generation-specific secret supplied to the driver through its environment, never process arguments or logs."
+            },
+            "offered_capabilities": { "$ref": "#/$defs/capabilitySet" },
+            "required_capabilities": { "$ref": "#/$defs/capabilitySet" },
+            "implementation": {
+              "type": "object",
+              "required": ["name", "version"],
+              "properties": {
+                "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+                "version": { "type": "string", "minLength": 1, "maxLength": 128 }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "commandRequest": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/rpcId" },
+        "method": {
+          "enum": [
+            "session.ping",
+            "runtime.configure",
+            "runtime.start",
+            "runtime.stop",
+            "runtime.kill",
+            "runtime.status",
+            "display.open",
+            "display.close",
+            "display.status",
+            "console.status",
+            "guest.status"
+          ]
+        },
+        "params": { "type": "object" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "method": { "const": "runtime.configure" } } },
+          "then": { "properties": { "params": { "$ref": "#/$defs/configureParams" } } }
+        },
+        {
+          "if": { "properties": { "method": { "enum": ["runtime.start", "runtime.kill", "display.close"] } } },
+          "then": { "properties": { "params": { "$ref": "#/$defs/operationParams" } } }
+        },
+        {
+          "if": { "properties": { "method": { "const": "runtime.stop" } } },
+          "then": { "properties": { "params": { "$ref": "#/$defs/stopParams" } } }
+        },
+        {
+          "if": { "properties": { "method": { "const": "display.open" } } },
+          "then": { "properties": { "params": { "$ref": "#/$defs/displayOpenParams" } } }
+        },
+        {
+          "if": { "properties": { "method": { "enum": ["session.ping", "runtime.status", "display.status", "console.status", "guest.status"] } } },
+          "then": { "properties": { "params": { "$ref": "#/$defs/queryParams" } } }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "queryParams": {
+      "allOf": [
+        { "$ref": "#/$defs/correlation" }
+      ],
+      "unevaluatedProperties": false
+    },
+    "operationParams": {
+      "type": "object",
+      "required": ["vm_id", "driver_generation", "operation_id"],
+      "properties": {
+        "vm_id": { "$ref": "#/$defs/vmId" },
+        "driver_generation": { "$ref": "#/$defs/driverGeneration" },
+        "operation_id": { "$ref": "#/$defs/operationId" }
+      },
+      "additionalProperties": false
+    },
+    "configureParams": {
+      "type": "object",
+      "required": ["vm_id", "driver_generation", "operation_id", "configuration"],
+      "properties": {
+        "vm_id": { "$ref": "#/$defs/vmId" },
+        "driver_generation": { "$ref": "#/$defs/driverGeneration" },
+        "operation_id": { "$ref": "#/$defs/operationId" },
+        "configuration": { "$ref": "#/$defs/runtimeConfiguration" }
+      },
+      "additionalProperties": false
+    },
+    "stopParams": {
+      "type": "object",
+      "required": ["vm_id", "driver_generation", "operation_id"],
+      "properties": {
+        "vm_id": { "$ref": "#/$defs/vmId" },
+        "driver_generation": { "$ref": "#/$defs/driverGeneration" },
+        "operation_id": { "$ref": "#/$defs/operationId" },
+        "grace_period_seconds": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 300
+        },
+        "force_after_timeout": {
+          "type": "boolean",
+          "default": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "displayOpenParams": {
+      "type": "object",
+      "required": ["vm_id", "driver_generation", "operation_id"],
+      "properties": {
+        "vm_id": { "$ref": "#/$defs/vmId" },
+        "driver_generation": { "$ref": "#/$defs/driverGeneration" },
+        "operation_id": { "$ref": "#/$defs/operationId" },
+        "display": {
+          "type": "object",
+          "properties": {
+            "activate": { "type": "boolean", "default": true }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "runtimeConfiguration": {
+      "type": "object",
+      "description": "Resolved runtime paths and devices derived from a validated public VmSpec.",
+      "required": ["architecture", "cpu", "memory_bytes", "boot", "disks", "networks", "graphics", "serial", "guest_agent", "bundle_path", "log_paths"],
+      "properties": {
+        "architecture": { "const": "arm64" },
+        "cpu": { "type": "integer", "minimum": 1, "maximum": 64 },
+        "memory_bytes": { "type": "integer", "minimum": 268435456, "multipleOf": 1048576 },
+        "boot": {
+          "oneOf": [
+            { "$ref": "#/$defs/linuxKernelBoot" },
+            { "$ref": "#/$defs/efiBoot" }
+          ]
+        },
+        "disks": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/runtimeDisk" }
+        },
+        "networks": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": { "$ref": "#/$defs/runtimeNetwork" }
+        },
+        "graphics": { "$ref": "#/$defs/runtimeGraphics" },
+        "serial": { "$ref": "#/$defs/runtimeSerial" },
+        "guest_agent": { "$ref": "#/$defs/runtimeGuestAgent" },
+        "bundle_path": { "type": "string", "minLength": 1 },
+        "log_paths": {
+          "type": "object",
+          "required": ["driver", "serial"],
+          "properties": {
+            "driver": { "type": "string", "minLength": 1 },
+            "serial": { "type": "string", "minLength": 1 }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "linuxKernelBoot": {
+      "type": "object",
+      "required": ["type", "kernel_path", "command_line"],
+      "properties": {
+        "type": { "const": "linux_kernel" },
+        "kernel_path": { "type": "string", "minLength": 1 },
+        "initrd_path": { "type": ["string", "null"] },
+        "command_line": { "type": "string", "maxLength": 8192 }
+      },
+      "additionalProperties": false
+    },
+    "efiBoot": {
+      "type": "object",
+      "required": ["type", "variable_store_path"],
+      "properties": {
+        "type": { "const": "efi" },
+        "variable_store_path": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false,
+      "x-gaovm-priority": "P1"
+    },
+    "runtimeDisk": {
+      "type": "object",
+      "required": ["id", "path", "writable"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}$" },
+        "path": { "type": "string", "minLength": 1 },
+        "writable": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "runtimeNetwork": {
+      "type": "object",
+      "required": ["id", "mode"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}$" },
+        "mode": { "enum": ["shared", "none"] },
+        "mac_address": { "type": "string", "pattern": "^(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "mode": { "const": "shared" } }, "required": ["mode"] },
+          "then": { "required": ["mac_address"] }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "runtimeGraphics": {
+      "type": "object",
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "width": { "type": "integer", "minimum": 320, "maximum": 8192 },
+        "height": { "type": "integer", "minimum": 200, "maximum": 8192 },
+        "pixels_per_inch": { "type": "integer", "minimum": 72, "maximum": 600 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] },
+          "then": { "required": ["width", "height", "pixels_per_inch"] }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "runtimeSerial": {
+      "type": "object",
+      "required": ["enabled", "capture", "log_path"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "capture": { "type": "boolean" },
+        "log_path": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "runtimeGuestAgent": {
+      "type": "object",
+      "required": ["enabled", "vsock_port"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "vsock_port": { "type": "integer", "minimum": 1024, "maximum": 4294967295 }
+      },
+      "additionalProperties": false
+    },
+    "eventNotification": {
+      "type": "object",
+      "required": ["jsonrpc", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "method": {
+          "enum": [
+            "runtime.state_changed",
+            "runtime.clean_shutdown",
+            "runtime.error",
+            "display.state_changed",
+            "console.ready",
+            "guest.channel_ready",
+            "driver.warning"
+          ]
+        },
+        "params": { "$ref": "#/$defs/eventParams" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "method": { "const": "runtime.state_changed" } } },
+          "then": { "properties": { "params": { "required": ["runtime_state"] } } }
+        },
+        {
+          "if": { "properties": { "method": { "const": "runtime.error" } } },
+          "then": { "properties": { "params": { "required": ["error"] } } }
+        },
+        {
+          "if": { "properties": { "method": { "const": "display.state_changed" } } },
+          "then": { "properties": { "params": { "required": ["display_state"] } } }
+        },
+        {
+          "if": { "properties": { "method": { "const": "console.ready" } } },
+          "then": { "properties": { "params": { "required": ["console"] } } }
+        },
+        {
+          "if": { "properties": { "method": { "const": "guest.channel_ready" } } },
+          "then": { "properties": { "params": { "required": ["guest"] } } }
+        },
+        {
+          "if": { "properties": { "method": { "const": "driver.warning" } } },
+          "then": { "properties": { "params": { "required": ["warning"] } } }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "eventParams": {
+      "type": "object",
+      "required": ["vm_id", "driver_generation", "operation_id", "occurred_at"],
+      "properties": {
+        "vm_id": { "$ref": "#/$defs/vmId" },
+        "driver_generation": { "$ref": "#/$defs/driverGeneration" },
+        "operation_id": { "$ref": "#/$defs/operationIdOrNull" },
+        "occurred_at": { "type": "string", "format": "date-time" },
+        "runtime_state": {
+          "enum": ["configured", "starting", "running", "stopping", "stopped", "error"]
+        },
+        "clean_shutdown": { "type": "boolean" },
+        "error": { "$ref": "#/$defs/driverError" },
+        "display_state": { "enum": ["closed", "opening", "open", "closing", "error"] },
+        "console": {
+          "type": "object",
+          "required": ["ready", "log_path"],
+          "properties": {
+            "ready": { "const": true },
+            "log_path": { "type": "string", "minLength": 1 }
+          },
+          "additionalProperties": false
+        },
+        "guest": {
+          "type": "object",
+          "required": ["ready"],
+          "properties": {
+            "ready": { "type": "boolean" },
+            "vsock_port": { "type": "integer", "minimum": 1 }
+          },
+          "additionalProperties": false
+        },
+        "warning": {
+          "type": "object",
+          "required": ["code", "message"],
+          "properties": {
+            "code": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" },
+            "message": { "type": "string", "minLength": 1 },
+            "details": { "type": "object" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "helloSuccessResponse": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "result"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/rpcId" },
+        "result": {
+          "type": "object",
+          "required": ["protocol_version", "vm_id", "driver_generation", "operation_id", "accepted_capabilities"],
+          "properties": {
+            "protocol_version": { "const": "gaovm.driver.v2" },
+            "vm_id": { "$ref": "#/$defs/vmId" },
+            "driver_generation": { "$ref": "#/$defs/driverGeneration" },
+            "operation_id": { "type": "null" },
+            "accepted_capabilities": { "$ref": "#/$defs/capabilitySet" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "commandSuccessResponse": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "result"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/rpcId" },
+        "result": {
+          "type": "object",
+          "required": ["vm_id", "driver_generation", "operation_id", "status"],
+          "properties": {
+            "vm_id": { "$ref": "#/$defs/vmId" },
+            "driver_generation": { "$ref": "#/$defs/driverGeneration" },
+            "operation_id": { "$ref": "#/$defs/operationIdOrNull" },
+            "status": { "enum": ["accepted", "succeeded", "noop"] },
+            "data": { "type": ["object", "null"] }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "errorResponse": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "error"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": {
+          "oneOf": [
+            { "$ref": "#/$defs/rpcId" },
+            { "type": "null" }
+          ]
+        },
+        "error": {
+          "type": "object",
+          "required": ["code", "message", "data"],
+          "properties": {
+            "code": {
+              "type": "integer",
+              "description": "JSON-RPC error code. Stable GaoVM code is carried in data.code."
+            },
+            "message": { "type": "string", "minLength": 1 },
+            "data": {
+              "type": "object",
+              "required": ["code", "vm_id", "driver_generation", "operation_id", "retryable"],
+              "properties": {
+                "code": {
+                  "enum": [
+                    "PROTOCOL_VERSION_MISMATCH",
+                    "AUTHENTICATION_FAILED",
+                    "CAPABILITY_MISMATCH",
+                    "CAPABILITY_NOT_NEGOTIATED",
+                    "GENERATION_MISMATCH",
+                    "INVALID_RUNTIME_CONFIG",
+                    "INVALID_RUNTIME_STATE",
+                    "RUNTIME_START_FAILED",
+                    "RUNTIME_STOP_FAILED",
+                    "RUNTIME_KILL_FAILED",
+                    "DISPLAY_UNAVAILABLE",
+                    "DRIVER_INTERNAL_ERROR"
+                  ]
+                },
+                "vm_id": { "$ref": "#/$defs/vmId" },
+                "driver_generation": { "$ref": "#/$defs/driverGeneration" },
+                "operation_id": { "$ref": "#/$defs/operationIdOrNull" },
+                "retryable": { "type": "boolean" },
+                "details": { "type": "object" }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "driverError": {
+      "type": "object",
+      "required": ["code", "message", "retryable"],
+      "properties": {
+        "code": {
+          "enum": [
+            "INVALID_RUNTIME_CONFIG",
+            "INVALID_RUNTIME_STATE",
+            "RUNTIME_START_FAILED",
+            "RUNTIME_STOP_FAILED",
+            "RUNTIME_KILL_FAILED",
+            "DRIVER_UNHEALTHY",
+            "DRIVER_INTERNAL_ERROR"
+          ]
+        },
+        "message": { "type": "string", "minLength": 1 },
+        "retryable": { "type": "boolean" },
+        "details": { "type": "object" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "examples": [
+    {
+      "jsonrpc": "2.0",
+      "id": "hello-daemon-1",
+      "method": "session.hello",
+      "params": {
+        "protocol_version": "gaovm.driver.v2",
+        "peer_role": "daemon",
+        "vm_id": "vm_01J00000000000000000000000",
+        "driver_generation": 8,
+        "operation_id": null,
+        "auth_token": "0123456789abcdef0123456789abcdef",
+        "offered_capabilities": [
+          "runtime.configure",
+          "runtime.start",
+          "runtime.stop",
+          "runtime.kill",
+          "runtime.status",
+          "console.status",
+          "guest.status"
+        ],
+        "required_capabilities": ["runtime.configure", "runtime.start", "runtime.stop"]
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "start-1",
+      "method": "runtime.start",
+      "params": {
+        "vm_id": "vm_01J00000000000000000000000",
+        "driver_generation": 8,
+        "operation_id": "op_01J00000000000000000000001"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "runtime.state_changed",
+      "params": {
+        "vm_id": "vm_01J00000000000000000000000",
+        "driver_generation": 8,
+        "operation_id": "op_01J00000000000000000000001",
+        "occurred_at": "2026-09-04T08:10:00Z",
+        "runtime_state": "running"
+      }
+    }
+  ]
+}
