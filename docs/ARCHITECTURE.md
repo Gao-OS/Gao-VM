@@ -510,6 +510,8 @@ occurred_at
 
 ### 7.5 TestRun
 
+持久化资源以 `spec` 保存完整、不可变的原始 orchestration input；运行状态、step result、cleanup decision 与 artifact 引用位于 `status`/resource 字段。daemon 重启后必须仅依靠持久化的 `spec` 恢复未完成 TestRun，不得从临时内存重建。
+
 ```text
 TestRun
 ├── source image/template
@@ -1065,6 +1067,8 @@ artifact.collect
 ## 15. TestRun 架构
 
 TestRun 是持久化 orchestration resource。MVP source 必须支持 image；template source 属于 P1/Beta：
+
+公共资源响应中的 `spec` 必须完整回显以下创建输入；它与运行中产生的 step/status/result 分离并持久化。
 
 ```json
 {

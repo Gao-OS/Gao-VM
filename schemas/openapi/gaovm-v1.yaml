@@ -1406,14 +1406,14 @@ components:
       additionalProperties: false
     TestRun:
       type: object
-      required: [id, state, source, vm_id, operation_id, steps, cleanup, retain_on_failure, result, error, artifact_ids, created_at, completed_at]
+      required: [id, state, spec, vm_id, operation_id, steps, result, error, artifact_ids, created_at, completed_at]
       properties:
         id:
           $ref: '#/components/schemas/TestRunId'
         state:
           enum: [pending, provisioning, starting_vm, waiting_ready, running_steps, collecting, cleaning_up, succeeded, failed, cancelled]
-        source:
-          type: object
+        spec:
+          $ref: '#/components/schemas/TestRunCreateRequest'
         vm_id:
           oneOf:
             - $ref: '#/components/schemas/VmId'
@@ -1424,10 +1424,6 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/TestStep'
-        cleanup:
-          enum: [delete_on_success, always_delete, retain]
-        retain_on_failure:
-          type: boolean
         cleanup_decision:
           type: [string, 'null']
         result:
