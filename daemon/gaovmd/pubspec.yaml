@@ -6,7 +6,10 @@ environment:
   sdk: ^3.9.0
 dependencies:
   ffi: ^2.1.4
+  gaovm_models:
+    path: ../../libs/gaovm_models
   gaovm_rpc:
     path: ../../libs/gaovm_rpc
+  sqlite3: ^2.9.4
 dev_dependencies:
   test: ^1.25.0
