@@ -1,6 +1,17 @@
 # GaoVM
 
-GaoVM is a macOS-native virtual machine manager for GaoOS built on Apple's `Virtualization.framework`. It provides a robust, decoupled architecture separating the control plane from the hypervisor runtime plane.
+GaoVM is a macOS-native, multi-VM manager for ARM64 Linux guests built on Apple's `Virtualization.framework`. GaoOS is its first Guest Profile and automated-test target, while the VM core remains guest-independent.
+
+## Project Status
+
+The checked-in code is a working single-VM prototype being migrated to the accepted multi-VM v2 contract. The canonical documents are:
+
+- [Product requirements](docs/PRD.md)
+- [Architecture](docs/ARCHITECTURE.md)
+- [Development plan](docs/DEVELOPMENT_PLAN.md)
+- [Non-negotiable implementation rules](AGENTS.md)
+
+Those documents are frozen for M0. Prototype commands and JSON state paths documented below describe current behavior only; they are not alternatives to the SQLite/public-API target.
 
 ---
 
@@ -9,48 +20,45 @@ GaoVM is a macOS-native virtual machine manager for GaoOS built on Apple's `Virt
 - **Platform:** macOS 14.0+ (Sonoma) on Apple Silicon (`arm64`)
 - **Guest Support:** Linux guests via `VZLinuxBootLoader`
 - **Architecture:** Two-process separation
-  - **Control Plane:** Dart daemon (`gaovmd`) managing desired state, configuration persistence, and driver supervision
-  - **Runtime Plane:** Swift driver (`gaovm-driver-vz`) interfacing directly with `Virtualization.framework` and AppKit
-  - **Clients:** Dart CLI (`gaovm_cli`) and planned Flutter menubar UI
-  - **Shared RPC:** Pure Dart library (`gaovm_rpc`) implementing length-prefixed JSON-RPC 2.0
+  - **Control Plane:** Dart daemon (`gaovmd`) managing the SQLite catalog, per-VM controllers, operations, events, and driver supervision
+  - **Runtime Plane:** One Swift driver (`gaovm-driver-vz`) per active VM, interfacing directly with `Virtualization.framework` and AppKit
+  - **MVP Client:** Dart CLI (`gaovm_cli`) over the public HTTP API
+  - **Beta Clients:** Flutter UI and MCP Adapter; neither blocks MVP
+  - **Internal RPC:** Length-prefixed JSON-RPC 2.0 only between daemon and drivers
 
 ---
 
 ## Architecture Overview
 
 ```text
-┌──────────────────────────────────────────────────────────┐
-│                     Clients                              │
-│       gaovm_cli (Dart)      /    Flutter Menubar UI      │
-└────────────────────────────┬─────────────────────────────┘
-                             │  Length-Prefixed JSON-RPC
-                             │  (Unix Domain Socket)
-┌────────────────────────────▼─────────────────────────────┐
-│              gaovmd (Dart Control Daemon)                │
-│  - Desired State Machine        - Config Store (Atomic)  │
-│  - Driver Supervisor (Retries)  - Event Bus & Rotation   │
-└────────────────────────────┬─────────────────────────────┘
-                             │  Length-Prefixed JSON-RPC
-                             │  (Unix Domain Socket + Auth Token)
-┌────────────────────────────▼─────────────────────────────┐
-│          gaovm-driver-vz (Swift Runtime Driver)          │
-│  - Virtualization.framework     - AppKit Display Window  │
-│  - Linux Boot Loader (kernel)   - Liveness Watchdog      │
-└──────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│ CLI / API Agent             Beta: Flutter UI / MCP Adapter  │
+└──────────────────────────────┬──────────────────────────────┘
+                               │ HTTP/1.1 over private UDS
+┌──────────────────────────────▼──────────────────────────────┐
+│ gaovmd: public API, SQLite, Operation/Event/Outbox           │
+│          VmRegistry + one serialized VmController per VM    │
+└───────────────────┬────────────────────────┬─────────────────┘
+                    │ framed JSON-RPC v2     │ framed JSON-RPC v2
+┌───────────────────▼────────────┐ ┌─────────▼────────────────┐
+│ Swift driver VM-A + VZ queue   │ │ Swift driver VM-B + VZ  │
+│ AppKit display owned here      │ │ AppKit display owned here│
+└────────────────────────────────┘ └───────────────────────────┘
 ```
 
 ### Architectural Invariants
 
-As specified in [`AGENTS.md`](AGENTS.md) and [`PRD.md`](PRD.md):
+As specified in [`AGENTS.md`](AGENTS.md), [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), and [`docs/PRD.md`](docs/PRD.md):
 
 1. **Strict Plane Separation:** The daemon never imports `Virtualization.framework`; the driver never persists desired state.
-2. **IPC Protocol:** Length-prefixed (4-byte big-endian) JSON-RPC 2.0 frames over Unix domain sockets. One frame equals one JSON-RPC object (batch requests are not supported).
-3. **Handshake & Capability Negotiation:** All connections require a bidirectional `hello` handshake with capability negotiation.
-4. **Security & Liveness:** The driver is launched with a one-time `GAOVM_AUTH_TOKEN` environment variable. The driver automatically terminates on socket EOF or if no authenticated RPC is received within 15 seconds.
-5. **Supervision & Recovery:** The daemon monitors the driver via process exit codes, runs a 5-second reconcile tick, and uses exponential backoff (up to 5 retries capped at 30 seconds).
-6. **Independent Display Lifecycle:** The guest display window is owned by the driver process and can be opened, closed, and reopened without interrupting the VM lifecycle.
-7. **Atomic Persistence:** All configurations and state files use atomic write semantics (write to temporary file + fsync + atomic rename).
-8. **Config Staging:** Restart-required configuration changes (`cpu`, `memory`, `boot.*`, `disk.path`, `network.mode`, `graphics.*`) submitted while a VM is running are safely staged to `pending_config.json` and applied upon the next start.
+2. **Multi-VM Ownership:** SQLite is the source of truth; each VM has one serialized controller and each active VM has one independent driver generation.
+3. **Protocol Separation:** The public API is HTTP/1.1 over UDS. Internal IPC uses length-prefixed JSON-RPC 2.0; one frame equals one object and batch requests are unsupported.
+4. **Handshake & Capability Negotiation:** Every driver session requires a bidirectional `hello`, capability negotiation, and a per-generation auth token.
+5. **Operation/Event Durability:** Long actions return Operations; state, operation, event, and outbox rows commit through a SQLite transactional outbox.
+6. **Generation Safety:** All asynchronous runtime results carry VM/generation correlation; stale generations cannot overwrite current state.
+7. **No Public Passthrough:** Public handlers and clients never call arbitrary driver methods.
+8. **VZ Queue Safety:** Every VZ access uses the driver's associated serial queue without semaphore-blocking that queue.
+9. **Independent Display Lifecycle:** The driver owns the display, which may close and reopen without stopping the VM.
 
 ---
 
@@ -58,9 +66,12 @@ As specified in [`AGENTS.md`](AGENTS.md) and [`PRD.md`](PRD.md):
 
 ```text
 .
-├── PRD.md                             # Product Requirements Document
 ├── AGENTS.md                          # Architectural invariants and rules
 ├── README.md                          # Project documentation
+├── docs/
+│   ├── PRD.md                         # Product requirements
+│   ├── ARCHITECTURE.md                # Accepted v2 architecture
+│   └── DEVELOPMENT_PLAN.md            # Milestones and verification gates
 ├── libs/
 │   └── gaovm_rpc/                     # Length-prefixed JSON-RPC 2.0 Dart library
 ├── daemon/
@@ -88,7 +99,7 @@ As specified in [`AGENTS.md`](AGENTS.md) and [`PRD.md`](PRD.md):
 
 ---
 
-## Building
+## Building the Current Prototype
 
 ### 1. Swift Driver (`gaovm-driver-vz`)
 
@@ -123,7 +134,7 @@ dart pub get
 
 ---
 
-## Running the Daemon (`gaovmd`)
+## Running the Current Prototype Daemon (`gaovmd`)
 
 Start the daemon from the repository root or project directory:
 
@@ -143,9 +154,10 @@ dart run bin/gaovmd.dart \
 | `--state-dir PATH` | `./state` | Directory storing configs, state files, and logs |
 | `--driver-bin PATH` | `$GAOVM_DRIVER_BIN` or relative build path | Absolute or relative path to the `gaovm-driver-vz` binary |
 
-### Daemon State & Logs
+### Legacy Prototype State & Logs
 
-The daemon organizes its state directory as follows:
+The prototype organizes its state directory as follows. M1 migrates these inputs once into SQLite; they must not remain an active source of truth in v2:
+
 - `state/config/vm.json`: Current VM specification
 - `state/config/pending_config.json`: Staged configuration changes pending VM restart
 - `state/state/desired_state.json`: Desired state (`running` / `stopped`)
@@ -155,7 +167,7 @@ The daemon organizes its state directory as follows:
 
 ---
 
-## Using the CLI (`gaovm_cli`)
+## Using the Current Prototype CLI (`gaovm_cli`)
 
 The CLI communicates with `gaovmd` over the Unix socket.
 
@@ -186,7 +198,7 @@ dart run bin/gaovm_cli.dart [options] <command>
 | `config-get` | — | Output current VM configuration JSON |
 | `config-set` | `--json '<JSON>'` | Set complete VM configuration |
 | `config-patch` | `--json '<JSON>'` | Partially update VM configuration fields |
-| `driver-exec` | `--method <M> [--params-json '<JSON>']` | Forward an RPC method directly to the runtime driver |
+| `driver-exec` | `--method <M> [--params-json '<JSON>']` | Legacy debug passthrough; forbidden in the v2 public API |
 
 ### Examples
 
