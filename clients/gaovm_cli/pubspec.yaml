@@ -3,7 +3,7 @@ description: GaoVM CLI (stub)
 version: 0.1.0
 publish_to: none
 environment:
-  sdk: ^3.0.0
+  sdk: ^3.9.0
 dependencies:
   gaovm_rpc:
     path: ../../libs/gaovm_rpc

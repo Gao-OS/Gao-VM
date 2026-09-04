@@ -95,7 +95,7 @@ As specified in [`AGENTS.md`](AGENTS.md), [`docs/ARCHITECTURE.md`](docs/ARCHITEC
 
 - **macOS:** 14.0 or newer (Apple Silicon)
 - **Xcode Command Line Tools / Swift:** Swift 5.9+ (`xcode-select --install`)
-- **Dart SDK:** Dart 3.0+ (or via Flutter SDK)
+- **Dart SDK:** Dart 3.9+ (or a Flutter SDK that bundles Dart 3.9+)
 
 ---
 
