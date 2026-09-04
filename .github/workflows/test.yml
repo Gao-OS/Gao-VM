@@ -1,0 +1,67 @@
+name: Tests
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dart-test:
+    name: Dart tests (${{ matrix.package }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package: gaovm_rpc
+            directory: libs/gaovm_rpc
+          - package: gaovmd
+            directory: daemon/gaovmd
+    defaults:
+      run:
+        working-directory: ${{ matrix.directory }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Dart
+        uses: dart-lang/setup-dart@v1
+        with:
+          sdk: 3.9.0
+
+      - name: Cache Pub packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.pub-cache
+          key: pub-${{ runner.os }}-${{ hashFiles(format('{0}/pubspec.lock', matrix.directory)) }}
+          restore-keys: |
+            pub-${{ runner.os }}-
+
+      - name: Resolve dependencies
+        run: dart pub get --enforce-lockfile
+
+      - name: Run tests
+        run: dart test
+
+  swift-test:
+    name: Swift tests
+    runs-on: macos-14
+    defaults:
+      run:
+        working-directory: drivers/vz_macos
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Run tests
+        run: swift test

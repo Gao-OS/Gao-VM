@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contracts:
+    name: Contract schemas
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Validate JSON Schema and OpenAPI
+        run: bash scripts/validate_contracts.sh
+
+  dart-static:
+    name: Dart static checks (${{ matrix.package }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package: gaovm_rpc
+            directory: libs/gaovm_rpc
+            paths: lib test
+            entrypoint: ''
+          - package: gaovmd
+            directory: daemon/gaovmd
+            paths: bin lib test
+            entrypoint: bin/gaovmd.dart
+          - package: gaovm_cli
+            directory: clients/gaovm_cli
+            paths: bin
+            entrypoint: bin/gaovm_cli.dart
+    defaults:
+      run:
+        working-directory: ${{ matrix.directory }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Dart
+        uses: dart-lang/setup-dart@v1
+        with:
+          sdk: 3.9.0
+
+      - name: Cache Pub packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.pub-cache
+          key: pub-${{ runner.os }}-${{ hashFiles(format('{0}/pubspec.lock', matrix.directory)) }}
+          restore-keys: |
+            pub-${{ runner.os }}-
+
+      - name: Resolve dependencies
+        run: dart pub get --enforce-lockfile
+
+      - name: Check formatting
+        run: dart format --output=none --set-exit-if-changed ${{ matrix.paths }}
+
+      - name: Analyze
+        run: dart analyze
+
+      - name: Compile executable
+        if: matrix.entrypoint != ''
+        run: dart compile exe ${{ matrix.entrypoint }} -o "${RUNNER_TEMP}/${{ matrix.package }}"
+
+  swift-build:
+    name: Swift build
+    runs-on: macos-14
+    defaults:
+      run:
+        working-directory: drivers/vz_macos
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build driver
+        run: swift build
