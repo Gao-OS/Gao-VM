@@ -5,11 +5,11 @@ import AppKit
 #if canImport(Virtualization)
 import Virtualization
 #endif
-import Darwin
 
 extension VzRuntime {
 #if canImport(Virtualization)
     func statusLocked() -> [String: Any] {
+        vzRuntimeQueue.preconditionIsCurrent()
         var out: [String: Any] = [
             "configured": config != nil,
             "graphicsWindowOpen": isDisplayOpen()
@@ -26,39 +26,10 @@ extension VzRuntime {
         return out
     }
 
-    func waitForStoppedState(_ vm: VZVirtualMachine, timeoutSeconds: TimeInterval) -> Bool {
-        let deadline = Date().addingTimeInterval(timeoutSeconds)
-        while Date() < deadline {
-            switch vm.state {
-            case .stopped:
-                return true
-            case .error:
-                return false
-            default:
-                usleep(200_000)
-            }
-        }
-        return vm.state == .stopped
-    }
-
-    @available(macOS 14.0, *)
-    func forceStop(_ vm: VZVirtualMachine, timeoutSeconds: TimeInterval) throws {
-        let sem = DispatchSemaphore(value: 0)
-        var stopError: Error?
-        vm.stop { error in
-            stopError = error
-            sem.signal()
-        }
-        if sem.wait(timeout: .now() + timeoutSeconds) == .timedOut {
-            throw DriverError.io("vm force stop callback timed out after \(Int(timeoutSeconds))s")
-        }
-        if let stopError {
-            throw stopError
-        }
-    }
 #else
     func statusLocked() -> [String: Any] {
-        [
+        vzRuntimeQueue.preconditionIsCurrent()
+        return [
             "configured": config != nil,
             "graphicsWindowOpen": isDisplayOpen(),
             "state": "virtualization_unavailable"

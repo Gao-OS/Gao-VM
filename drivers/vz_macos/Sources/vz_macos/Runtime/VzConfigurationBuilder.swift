@@ -7,6 +7,7 @@ extension VzRuntime {
 #if canImport(Virtualization)
     @available(macOS 14.0, *)
     func buildConfiguration(_ spec: NormalizedVmConfig) throws -> VZVirtualMachineConfiguration {
+        vzRuntimeQueue.preconditionIsCurrent()
         let cfg = VZVirtualMachineConfiguration()
         cfg.cpuCount = spec.cpu
         cfg.memorySize = UInt64(spec.memoryBytes)
@@ -133,11 +134,8 @@ extension VzRuntime {
         return try normalizedConfig(config)
     }
 
-    func onVmQueue<T>(_ work: () throws -> T) rethrows -> T {
-        if DispatchQueue.getSpecific(key: vmQueueKey) != nil {
-            return try work()
-        }
-        return try vmQueue.sync(execute: work)
+    func onVzRuntimeQueue<T>(_ work: () throws -> T) rethrows -> T {
+        try vzRuntimeQueue.sync(work)
     }
 }
 

@@ -12,7 +12,7 @@ extension VzRuntime {
             throw DriverError.invalidArgs("display requires macOS 14+")
         }
 #if canImport(AppKit) && canImport(Virtualization)
-        let (vm, spec): (VZVirtualMachine, NormalizedVmConfig) = try onVmQueue {
+        let (vm, spec): (VZVirtualMachine, NormalizedVmConfig) = try onVzRuntimeQueue {
             guard let vm = virtualMachine else {
                 throw DriverError.invalidArgs("vm is not created")
             }

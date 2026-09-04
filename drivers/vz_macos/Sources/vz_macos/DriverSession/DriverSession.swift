@@ -10,11 +10,31 @@ struct Config {
     let logPath: String
 }
 
-final class UnixSocket {
-    private(set) var fd: Int32
+final class UnixSocket: SocketWriteTransport {
+    private let fdLock = NSLock()
+    private var storedFD: Int32
 
-    init(fd: Int32) {
-        self.fd = fd
+    var fd: Int32 {
+        fdLock.lock()
+        defer { fdLock.unlock() }
+        return storedFD
+    }
+
+    init(fd: Int32) throws {
+        self.storedFD = fd
+        var enabled: Int32 = 1
+        guard Darwin.setsockopt(
+            fd,
+            SOL_SOCKET,
+            SO_NOSIGPIPE,
+            &enabled,
+            socklen_t(MemoryLayout.size(ofValue: enabled))
+        ) == 0 else {
+            let message = String(cString: strerror(errno))
+            Darwin.close(fd)
+            self.storedFD = -1
+            throw DriverError.io("setsockopt(SO_NOSIGPIPE) failed: \(message)")
+        }
     }
 
     func writeAll(_ data: Data) throws {
@@ -66,10 +86,16 @@ final class UnixSocket {
     }
 
     func close() {
-        if fd >= 0 {
-            Darwin.close(fd)
-            fd = -1
-        }
+        fdLock.lock()
+        let fd = storedFD
+        storedFD = -1
+        fdLock.unlock()
+        if fd >= 0 { Darwin.close(fd) }
+    }
+
+    func interrupt() {
+        let fd = self.fd
+        if fd >= 0 { Darwin.shutdown(fd, SHUT_RDWR) }
     }
 
     deinit { close() }
@@ -125,7 +151,7 @@ final class UnixListener {
         guard clientFD >= 0 else {
             throw DriverError.socketAccept("accept() failed: \(String(cString: strerror(errno)))")
         }
-        return UnixSocket(fd: clientFD)
+        return try UnixSocket(fd: clientFD)
     }
 
     func close() {
@@ -143,9 +169,11 @@ final class DriverSession {
     let config: Config
     let logger: RotatingLogger
     private let vmRuntime: VzRuntime
+    private lazy var runtimeDispatcher = RuntimeCommandDispatcher(runtime: vmRuntime) { [weak self] error in
+        self?.recordFatal(error)
+    }
     private let codec = LengthPrefixedJsonRpc()
-    private let handlerQueue = DispatchQueue(label: "gaovm.driver.requests", qos: .userInitiated, attributes: .concurrent)
-    private let sendQueue = DispatchQueue(label: "gaovm.driver.send")
+    private let socketWriter = SerializedSocketWriter()
     let stateQueue = DispatchQueue(label: "gaovm.driver.state")
     private var listener: UnixListener?
     private var socket: UnixSocket?
@@ -175,6 +203,11 @@ final class DriverSession {
         logger.log(.info, "listening for daemon connection")
         let socket = try listener.acceptOne()
         self.socket = socket
+        try socketWriter.attach(socket)
+        defer {
+            socketWriter.close()
+            listener.close()
+        }
         markControlConnectionAccepted()
         logger.log(.info, "daemon connected")
         try sendHello()
@@ -195,14 +228,7 @@ final class DriverSession {
             } catch DriverError.eof {
                 try gracefulExit(reason: "control socket EOF", code: 0)
             }
-            handlerQueue.async { [weak self] in
-                guard let self else { return }
-                do {
-                    try self.handle(message: message)
-                } catch {
-                    self.recordFatal(error)
-                }
-            }
+            try handle(message: message)
         }
     }
 
@@ -223,11 +249,8 @@ final class DriverSession {
     }
 
     private func send(_ object: [String: Any]) throws {
-        guard let socket else { throw DriverError.io("no control socket") }
         let data = try codec.encode(object)
-        try sendQueue.sync {
-            try socket.writeAll(data)
-        }
+        try socketWriter.write(data)
     }
 
     private func sendHello() throws {
@@ -300,26 +323,30 @@ final class DriverSession {
         do {
             switch method {
             case "ping":
-                try sendResult(id: id, result: [
-                    "ok": true,
-                    "ts": ISO8601DateFormatter().string(from: Date())
-                ])
+                runtimeDispatcher.ping { result in
+                    self.sendRuntimeResponse(id: id, method: method, result: result)
+                }
             case "vm.configure":
                 guard let params = message["params"] as? [String: Any],
                       let cfg = params["config"] as? [String: Any] else {
                     try sendError(id: id, code: -32602, message: "vm.configure requires params.config object")
                     return
                 }
-                let result = try vmRuntime.configure(with: cfg)
-                try sendResult(id: id, result: result)
+                runtimeDispatcher.configure(with: cfg) { result in
+                    self.sendRuntimeResponse(id: id, method: method, result: result)
+                }
             case "vm.start":
-                let result = try vmRuntime.start()
-                try sendResult(id: id, result: result)
+                runtimeDispatcher.start { result in
+                    self.sendRuntimeResponse(id: id, method: method, result: result)
+                }
             case "vm.stop":
-                let result = try vmRuntime.stop()
-                try sendResult(id: id, result: result)
+                runtimeDispatcher.stop { result in
+                    self.sendRuntimeResponse(id: id, method: method, result: result)
+                }
             case "vm.status":
-                try sendResult(id: id, result: vmRuntime.status())
+                runtimeDispatcher.status { result in
+                    self.sendRuntimeResponse(id: id, method: method, result: result)
+                }
             case "open_display":
                 let result = try vmRuntime.openDisplay()
                 try sendResult(id: id, result: result)
@@ -332,6 +359,20 @@ final class DriverSession {
         } catch {
             logger.log(.error, "request \(method) failed: \(error)")
             try sendError(id: id, code: -32603, message: "\(error)")
+        }
+    }
+
+    private func sendRuntimeResponse(id: Any, method: String, result: RuntimeResult) {
+        do {
+            switch result {
+            case .success(let payload):
+                try sendResult(id: id, result: payload)
+            case .failure(let error):
+                logger.log(.error, "request \(method) failed: \(error)")
+                try sendError(id: id, code: -32603, message: "\(error)")
+            }
+        } catch {
+            recordFatal(error)
         }
     }
 
@@ -367,7 +408,7 @@ final class DriverSession {
         }
         if shouldStore {
             logger.log(.error, "fatal driver loop error: \(error)")
-            socket?.close()
+            socketWriter.close()
         }
     }
 
@@ -382,14 +423,23 @@ final class DriverSession {
     private func gracefulExit(reason: String, code: Int32) throws -> Never {
         logger.log(.warn, reason)
         fputs("[gaovm-driver-vz] \(reason)\n", stderr)
-        do {
-            _ = try vmRuntime.stop()
-            logger.log(.info, "VM stopped before driver exit")
-        } catch {
+        let stopFinished = DispatchGroup()
+        var stopResult: RuntimeResult?
+        stopFinished.enter()
+        runtimeDispatcher.closeAndShutdown(reason: reason) { result in
+            stopResult = result
+            stopFinished.leave()
+        }
+        socketWriter.close()
+        if stopFinished.wait(timeout: .now() + 50) == .timedOut {
+            logger.log(.error, "timed out waiting for VM stop before driver exit")
+            fputs("[gaovm-driver-vz] timed out waiting for VM stop before exit\n", stderr)
+        } else if case .failure(let error) = stopResult {
             logger.log(.error, "failed to stop VM before driver exit: \(error)")
             fputs("[gaovm-driver-vz] failed to stop VM before exit: \(error)\n", stderr)
+        } else {
+            logger.log(.info, "VM stopped before driver exit")
         }
-        socket?.close()
         listener?.close()
         Foundation.exit(code)
     }
