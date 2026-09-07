@@ -1,9 +1,10 @@
 # VM provisioning foundations (PR021)
 
-This document records the implemented plan and disk primitives for M5.3/M5.4.
-They do **not yet** constitute a public VM-create workflow. Bundle publication,
-durable provisioning jobs, cancellation orchestration, and application acceptance
-remain integration work. The accepted architecture and PRD remain authoritative.
+This document records the implemented plan, disk primitives, and durable create
+acceptance for M5.3/M5.4. They do **not yet** constitute a public VM-create
+workflow. Bundle publication, worker recovery, cancellation cleanup, and public
+application composition remain integration work. The accepted architecture and
+PRD remain authoritative.
 
 ## Pinned plan v1
 
@@ -44,12 +45,34 @@ requires the logical disk size plus 1 MiB headroom. This is **not** a concurrent
 reservation: the bundle worker still needs admission/reservation coordination.
 Successful materialization is not bundle publication or Operation completion.
 
+## Durable create acceptance
+
+`SqliteVmCreateAcceptance.accept` owns its commit boundary and performs no
+filesystem IO. One transaction creates the VM/spec, pending `vm.create`
+Operation, pinned provisioning job, durable events, dedicated work outbox row,
+and immutable idempotency response. Missing/invalid images roll back the entire
+acceptance. Identical request retries return the acceptance-time snapshot even
+after the operation becomes terminal; changed bytes conflict within retention.
+
+Schema v5 adds `vm_provisioning`, keyed by VM and uniquely linked to the create
+operation and retained spec generation. Work uses outbox topic `vm.provisioning`,
+not lifecycle `vm.commands`; acceptance leaves lifecycle intent checkpoints at
+zero. The VM remains desired=`stopped`, phase=`provisioning`, until a future
+worker publishes its bundle and commits completion. `requestCancellation`
+durably records intent and emits one event without terminalizing the operation:
+it does not claim that owned-file cleanup has already happened.
+
+Registry startup skips provisioning VMs, and lazy activation rejects them before
+operation recovery can mistake `vm.create` for an orphan. Lifecycle acceptance
+and metadata/spec writes reject provisioning with `VM_OPERATION_CONFLICT`
+(HTTP 409 at the resource API boundary). Legacy `defined` VMs remain supported.
+
 ## Remaining integration contract
 
 - Keep provisioning jobs separate from lifecycle `vm.commands` and its applied
   intent checkpoint; create/patch are not lifecycle adoption commands.
-- Create acceptance must atomically persist the provisional VM/spec, operation,
-  pinned plan/job, event/outbox, and immutable idempotency response.
+- Connect durable create acceptance to the public application mutation adapter
+  only alongside the provisioning worker; acceptance alone cannot finish create.
 - Prevent runtime activation until bundle publication and its durable completion
   proof commit. Validate external files before declaring provisioning complete.
 - Publish a complete owned bundle without replacing an existing publication;
@@ -64,3 +87,9 @@ The focused tests cover plan pinning/validation, APFS clone isolation, exclusive
 output creation, descriptor/path swaps, copy verification, cancellation, capacity,
 and existing-file preservation. Apple Silicon and Linux runtime execution remain
 separate platform gates; compilation alone does not prove native behavior there.
+
+Database-only tests additionally verify job/acceptance durability, rollback,
+idempotent replay/conflicts, cancellation intent, and provisioning readiness
+gates. These contribute evidence for `VM-002`, `VM-009`, `API-005`/`API-006`,
+`OP-002`/`OP-004`/`OP-007`, and `IMG-005`/`IMG-006`; none of those requirements is
+declared end-to-end complete by this foundation.

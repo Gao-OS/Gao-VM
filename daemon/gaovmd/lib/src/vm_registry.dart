@@ -85,7 +85,11 @@ final class VmRegistry {
     _requireAccepting();
     final virtualMachines = await _repository.list();
     _requireAccepting();
-    final controllers = await Future.wait(virtualMachines.map(_activateLoaded));
+    final controllers = await Future.wait(
+      virtualMachines
+          .where((vm) => vm.status.phase != VmPhase.provisioning)
+          .map(_activateLoaded),
+    );
     _requireAccepting();
     await Future.wait(
       controllers.map((controller) async {
@@ -174,6 +178,9 @@ final class VmRegistry {
   }
 
   Future<VmController> _restoreAndCreate(VirtualMachine vm) async {
+    if (vm.status.phase == VmPhase.provisioning) {
+      throw VmProvisioningConflictException(vm.metadata.id);
+    }
     final recovered = await _recovery?.restore(vm.metadata.id);
     if (recovered == null) return _createController(await _restoreState(vm));
     _requireAccepting();

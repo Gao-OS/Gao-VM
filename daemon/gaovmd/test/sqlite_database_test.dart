@@ -26,8 +26,8 @@ void main() {
   test('bootstrap configures SQLite and applies the schema once', () async {
     var database = await GaoVmDatabase.open(databasePath);
 
-    expect(database.schemaVersion, 4);
-    expect(database.appliedMigrationVersions, [1, 2, 3, 4]);
+    expect(database.schemaVersion, 5);
+    expect(database.appliedMigrationVersions, [1, 2, 3, 4, 5]);
     expect(database.journalMode, 'wal');
     expect(database.foreignKeysEnabled, isTrue);
     expect(database.busyTimeout, const Duration(seconds: 5));
@@ -54,10 +54,61 @@ void main() {
     database.close();
 
     database = await GaoVmDatabase.open(databasePath);
-    expect(database.schemaVersion, 4);
-    expect(database.appliedMigrationVersions, [1, 2, 3, 4]);
+    expect(database.schemaVersion, 5);
+    expect(database.appliedMigrationVersions, [1, 2, 3, 4, 5]);
     database.close();
   });
+
+  test(
+    'v5 adds an empty provisioning catalog without changing v4 data',
+    () async {
+      final legacy = sqlite3.open(databasePath);
+      legacy.execute('''
+        CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+        INSERT INTO schema_migrations VALUES(1, 'old'), (2, 'old'), (3, 'old'), (4, 'old');
+        CREATE TABLE vms(id TEXT PRIMARY KEY);
+        CREATE TABLE vm_specs(vm_id TEXT NOT NULL, generation INTEGER NOT NULL, PRIMARY KEY(vm_id, generation));
+        CREATE TABLE operations(id TEXT PRIMARY KEY);
+        INSERT INTO vms VALUES('retained');
+        INSERT INTO vm_specs VALUES('retained', 7);
+        INSERT INTO operations VALUES('operation');
+      ''');
+      legacy.userVersion = 4;
+      legacy.dispose();
+      final database = await GaoVmDatabase.open(databasePath);
+      try {
+        expect(database.schemaVersion, 5);
+        expect(database.appliedMigrationVersions, [1, 2, 3, 4, 5]);
+        await database.read((db) {
+          expect(db.select('SELECT * FROM vm_provisioning'), isEmpty);
+          expect(db.select('SELECT * FROM vm_specs').single['generation'], 7);
+          for (final values in [
+            ['retained', 'operation', 8],
+            ['retained', 'missing', 7],
+            ['missing', 'operation', 7],
+          ]) {
+            expect(
+              () => db.execute('''
+              INSERT INTO vm_provisioning(vm_id, operation_id, spec_generation, plan_json, created_at)
+              VALUES (?, ?, ?, '{}', 'now')
+            ''', values),
+              throwsA(isA<SqliteException>()),
+            );
+          }
+          db.execute(
+            "INSERT INTO vm_provisioning(vm_id, operation_id, spec_generation, plan_json, created_at) VALUES('retained', 'operation', 7, '{}', 'now')",
+          );
+          expect(
+            () => db.execute("DELETE FROM vm_specs WHERE vm_id = 'retained'"),
+            throwsA(isA<SqliteException>()),
+          );
+          expect(db.select('SELECT * FROM vms').single['id'], 'retained');
+        });
+      } finally {
+        database.close();
+      }
+    },
+  );
 
   test(
     'v4 preserves an existing v3 checkpoint with nullable compatibility fields',
@@ -73,7 +124,7 @@ void main() {
       legacy.dispose();
       final database = await GaoVmDatabase.open(databasePath);
       try {
-        expect(database.schemaVersion, 4);
+        expect(database.schemaVersion, 5);
         await database.read((db) {
           final row = db.select('SELECT * FROM vm_runtime').single;
           expect(row['applied_intent_revision'], 7);
@@ -103,8 +154,8 @@ void main() {
       legacy.dispose();
       final database = await GaoVmDatabase.open(databasePath);
       try {
-        expect(database.schemaVersion, 4);
-        expect(database.appliedMigrationVersions, [1, 2, 3, 4]);
+        expect(database.schemaVersion, 5);
+        expect(database.appliedMigrationVersions, [1, 2, 3, 4, 5]);
         await database.read((db) {
           final vm = db.select('SELECT * FROM vms').single;
           expect(vm['revision'], 7);
@@ -178,8 +229,8 @@ void main() {
 
       final database = await GaoVmDatabase.open(databasePath);
 
-      expect(database.schemaVersion, 4);
-      expect(database.appliedMigrationVersions, [1, 2, 3, 4]);
+      expect(database.schemaVersion, 5);
+      expect(database.appliedMigrationVersions, [1, 2, 3, 4, 5]);
       await database.read((connection) {
         expect(
           connection
@@ -413,8 +464,8 @@ void main() {
     ]);
 
     for (final database in databases) {
-      expect(database.schemaVersion, 4);
-      expect(database.appliedMigrationVersions, [1, 2, 3, 4]);
+      expect(database.schemaVersion, 5);
+      expect(database.appliedMigrationVersions, [1, 2, 3, 4, 5]);
       database.close();
     }
   });
@@ -434,8 +485,8 @@ void main() {
     ]);
 
     for (final result in results) {
-      expect(result.schemaVersion, 4);
-      expect(result.migrations, [1, 2, 3, 4]);
+      expect(result.schemaVersion, 5);
+      expect(result.migrations, [1, 2, 3, 4, 5]);
     }
   });
 }

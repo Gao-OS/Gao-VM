@@ -189,6 +189,30 @@ void main() {
         ),
       );
     });
+    test('provisioning conflicts return stable HTTP409 problem', () async {
+      mutations.error = VmProvisioningConflictException(_vmId);
+      await expectLater(
+        request('POST', '/v1/vms/${_vmId.value}/actions/start', {}),
+        throwsA(
+          isA<PublicApiException>()
+              .having(
+                (error) => error.problem.status,
+                'status',
+                HttpStatus.conflict,
+              )
+              .having(
+                (error) => error.problem.code,
+                'code',
+                ErrorCode.vmOperationConflict,
+              )
+              .having(
+                (error) => error.problem.details.toJson()['vm_id'],
+                'vm_id',
+                _vmId.value,
+              ),
+        ),
+      );
+    });
     test('accepted deletion conflicts return stable HTTP409 problem', () async {
       mutations.error = VmAcceptanceConflict(_vmId);
       await expectLater(

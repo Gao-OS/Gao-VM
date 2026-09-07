@@ -47,12 +47,15 @@ final class SqliteVmLifecycleAcceptance
     Future<IdempotencyResponse> accept() async {
       final rows = await _database.read(
         (db) => db.select(
-          'SELECT * FROM vms WHERE id = ? AND deleted_at IS NULL',
+          'SELECT v.*, r.phase FROM vms v JOIN vm_runtime r ON r.vm_id = v.id WHERE v.id = ? AND v.deleted_at IS NULL',
           [command.vmId.value],
         ),
       );
       if (rows.isEmpty) throw VmNotFoundException(command.vmId);
       final vm = rows.single;
+      if (vm['phase'] == 'provisioning') {
+        throw VmProvisioningConflictException(command.vmId);
+      }
       if (vm['deleting_at'] != null) {
         if (command.action != VmLifecycleAction.delete) {
           throw VmAcceptanceConflict(command.vmId);

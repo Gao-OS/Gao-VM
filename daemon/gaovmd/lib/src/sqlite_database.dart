@@ -10,6 +10,7 @@ const coreTableNames = <String>{
   'vms',
   'vm_specs',
   'vm_runtime',
+  'vm_provisioning',
   'images',
   'operations',
   'events',
@@ -21,7 +22,7 @@ const coreTableNames = <String>{
   'outbox',
 };
 
-const _latestSchemaVersion = 4;
+const _latestSchemaVersion = 5;
 final _transactionContextKey = Object();
 final _savepointScopeKey = Object();
 final _transactionGates = <String, _AsyncGate>{};
@@ -420,6 +421,25 @@ const _migrations = <_Migration>[
       CHECK (execution_desired_state IN ('stopped', 'running'));
     ALTER TABLE vm_runtime ADD COLUMN execution_spec_generation INTEGER
       CHECK (execution_spec_generation >= 1);
+  '''),
+  _Migration(5, '''
+    CREATE TABLE vm_provisioning (
+      vm_id TEXT PRIMARY KEY REFERENCES vms(id),
+      operation_id TEXT NOT NULL UNIQUE REFERENCES operations(id),
+      spec_generation INTEGER NOT NULL CHECK (spec_generation >= 1),
+      plan_json TEXT NOT NULL,
+      cancellation_requested INTEGER NOT NULL DEFAULT 0
+        CHECK (cancellation_requested IN (0, 1)),
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (vm_id, spec_generation) REFERENCES vm_specs(vm_id, generation)
+    );
+
+    CREATE TRIGGER vm_provisioning_immutable_input
+      BEFORE UPDATE OF vm_id, operation_id, spec_generation, plan_json, created_at
+      ON vm_provisioning
+      BEGIN
+        SELECT RAISE(ABORT, 'provisioning input is immutable');
+      END;
   '''),
 ];
 

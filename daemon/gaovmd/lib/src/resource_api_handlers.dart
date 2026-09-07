@@ -322,6 +322,15 @@ PublicApiHandler _guard(
       title: 'Operation not found',
       detail: 'No operation exists with id ${error.id.value}.',
     );
+  } on VmProvisioningConflictException catch (error) {
+    throw _problem(
+      status: HttpStatus.conflict,
+      code: ErrorCode.vmOperationConflict,
+      type: 'vm-operation-conflict',
+      title: 'VM operation conflict',
+      detail: 'The VM is still provisioning and cannot accept this action.',
+      details: JsonObjectValue.fromJson({'vm_id': error.vmId.value}),
+    );
   } on VmAcceptanceConflict catch (error) {
     throw _problem(
       status: HttpStatus.conflict,

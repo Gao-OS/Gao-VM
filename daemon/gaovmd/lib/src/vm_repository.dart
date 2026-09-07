@@ -121,6 +121,15 @@ final class VmNotFoundException implements Exception {
   String toString() => 'VM not found: $id';
 }
 
+final class VmProvisioningConflictException implements Exception {
+  const VmProvisioningConflictException(this.vmId);
+
+  final VmId vmId;
+
+  @override
+  String toString() => 'VM provisioning has not completed: $vmId';
+}
+
 final class RevisionConflictException implements Exception {
   const RevisionConflictException({
     required this.id,
@@ -313,6 +322,9 @@ final class SqliteVmRepository implements VmRepository {
     VmSpec? replacementSpec,
   }) => _database.transaction((connection) {
     final current = _requireCurrent(connection, id, expectedRevision);
+    if (current.status.phase == VmPhase.provisioning) {
+      throw VmProvisioningConflictException(id);
+    }
     final nextSpec =
         replacementSpec ??
         (specPatch == null
