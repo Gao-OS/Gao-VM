@@ -71,6 +71,16 @@ final class GaoVmDatabase {
   final _AsyncGate _transactionGate;
   bool _closed = false;
 
+  /// True when this caller already owns a transaction on this catalog, even
+  /// through another connection sharing its gate. Filesystem publication must
+  /// not mistake a nested savepoint for an independently committed transaction.
+  bool get hasActiveCallerTransaction {
+    final context = Zone.current[_transactionContextKey];
+    return context is _TransactionContext &&
+        context.active &&
+        identical(context.gate, _transactionGate);
+  }
+
   int get schemaVersion => _database.userVersion;
 
   String get journalMode =>
