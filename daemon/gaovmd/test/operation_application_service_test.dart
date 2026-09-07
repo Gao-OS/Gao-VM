@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:gaovm_models/gaovm_models.dart';
@@ -7,6 +8,135 @@ import 'package:gaovmd/src/sqlite_database.dart';
 import 'package:test/test.dart';
 
 void main() {
+  test('wait deadline includes a blocked initial repository read', () async {
+    final read = Completer<Operation?>();
+    final service = OperationApplicationService(
+      repository: _ReadRepository(() => read.future),
+      mutations: _OperationMutations(),
+      waiter: _OperationWaiter(),
+    );
+    await expectLater(
+      service
+          .wait(
+            OperationWaitCommand(
+              operationId: _cancelOperation.id,
+              timeout: const Duration(milliseconds: 20),
+            ),
+          )
+          .timeout(
+            const Duration(milliseconds: 500),
+            onTimeout: () =>
+                throw StateError('service deadline was not enforced'),
+          ),
+      throwsA(isA<TimeoutException>()),
+    );
+    read.complete(_cancelOperation);
+  });
+
+  test('initial read consumes the budget passed to the waiter', () async {
+    final pending = Operation.fromJson({
+      ..._cancelOperation.toJson(),
+      'state': 'running',
+      'completed_at': null,
+    });
+    Duration? received;
+    final service = OperationApplicationService(
+      repository: _ReadRepository(
+        () => Future<Operation>.delayed(
+          const Duration(milliseconds: 30),
+          () => pending,
+        ),
+      ),
+      mutations: _OperationMutations(),
+      waiter: _CallbackWaiter((command) async {
+        received = command.timeout;
+        return _cancelOperation;
+      }),
+    );
+    expect(
+      await service.wait(
+        OperationWaitCommand(
+          operationId: pending.id,
+          timeout: const Duration(seconds: 1),
+        ),
+      ),
+      _cancelOperation,
+    );
+    expect(received!, lessThan(const Duration(milliseconds: 980)));
+    expect(received!, greaterThan(Duration.zero));
+  });
+
+  test(
+    'bounds a stalled waiter and preserves immediate terminal behavior',
+    () async {
+      final pending = Operation.fromJson({
+        ..._cancelOperation.toJson(),
+        'state': 'running',
+        'completed_at': null,
+      });
+      final blocked = Completer<Operation>();
+      final service = OperationApplicationService(
+        repository: _ReadRepository(() async => pending),
+        mutations: _OperationMutations(),
+        waiter: _CallbackWaiter((_) => blocked.future),
+      );
+      await expectLater(
+        service.wait(
+          OperationWaitCommand(
+            operationId: pending.id,
+            timeout: const Duration(milliseconds: 20),
+          ),
+        ),
+        throwsA(isA<TimeoutException>()),
+      );
+      blocked.complete(_cancelOperation);
+      final terminalService = OperationApplicationService(
+        repository: _ReadRepository(() async => _cancelOperation),
+        mutations: _OperationMutations(),
+        waiter: _OperationWaiter(),
+      );
+      expect(
+        await terminalService.wait(
+          OperationWaitCommand(
+            operationId: pending.id,
+            timeout: const Duration(seconds: 1),
+          ),
+        ),
+        _cancelOperation,
+      );
+    },
+  );
+
+  test('still rejects a nonterminal or wrong-ID waiter result', () async {
+    final pending = Operation.fromJson({
+      ..._cancelOperation.toJson(),
+      'state': 'running',
+      'completed_at': null,
+    });
+    for (final invalid in [
+      pending,
+      Operation.fromJson({
+        ..._cancelOperation.toJson(),
+        'id': _operation(99).value,
+      }),
+    ]) {
+      final service = OperationApplicationService(
+        repository: _ReadRepository(() async => pending),
+        mutations: _OperationMutations(),
+        waiter: _CallbackWaiter((_) async => invalid),
+      );
+      await expectLater(
+        service.wait(
+          OperationWaitCommand(
+            operationId: pending.id,
+            timeout: const Duration(seconds: 1),
+          ),
+        ),
+        throwsStateError,
+      );
+    }
+  });
+
   test('lists and resumes durable operations with filters', () async {
     final directory = await Directory.systemTemp.createTemp('operation-app-');
     final database = await GaoVmDatabase.open('${directory.path}/gaovm.db');
@@ -124,6 +254,23 @@ void main() {
       await directory.delete(recursive: true);
     },
   );
+}
+
+final class _ReadRepository implements OperationRepository {
+  _ReadRepository(this.read);
+  final Future<Operation?> Function() read;
+  @override
+  Future<Operation?> get(OperationId id) => read();
+  @override
+  dynamic noSuchMethod(Invocation invocation) =>
+      throw StateError('unexpected repository mutation');
+}
+
+final class _CallbackWaiter implements OperationWaiter {
+  _CallbackWaiter(this.callback);
+  final Future<Operation> Function(OperationWaitCommand) callback;
+  @override
+  Future<Operation> wait(OperationWaitCommand command) => callback(command);
 }
 
 final class _OperationMutations implements OperationMutationAcceptor {

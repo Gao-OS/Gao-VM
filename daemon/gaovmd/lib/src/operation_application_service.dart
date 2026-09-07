@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:gaovm_models/gaovm_models.dart';
@@ -200,13 +201,36 @@ final class OperationApplicationService {
       _mutations.cancel(command);
 
   Future<Operation> wait(OperationWaitCommand command) async {
-    final current = await get(command.operationId);
-    if (_isTerminal(current.state)) return current;
-    final completed = await _waiter.wait(command);
-    if (completed.id != command.operationId || !_isTerminal(completed.state)) {
-      throw StateError('operation waiter returned a non-terminal result');
+    final elapsed = Stopwatch()..start();
+    Duration remaining() {
+      final budget = command.timeout - elapsed.elapsed;
+      if (budget <= Duration.zero) {
+        throw TimeoutException('operation wait timed out', command.timeout);
+      }
+      return budget;
     }
-    return completed;
+
+    try {
+      final current = await get(command.operationId).timeout(remaining());
+      remaining();
+      if (_isTerminal(current.state)) return current;
+      final completed = await _waiter
+          .wait(
+            OperationWaitCommand(
+              operationId: command.operationId,
+              timeout: remaining(),
+            ),
+          )
+          .timeout(remaining());
+      remaining();
+      if (completed.id != command.operationId ||
+          !_isTerminal(completed.state)) {
+        throw StateError('operation waiter returned a non-terminal result');
+      }
+      return completed;
+    } finally {
+      elapsed.stop();
+    }
   }
 }
 
