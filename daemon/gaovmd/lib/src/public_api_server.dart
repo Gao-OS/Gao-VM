@@ -114,9 +114,11 @@ final class PublicApiRequest {
     required this.jsonBody,
     Map<String, String> pathParameters = const {},
     List<int> bodyBytes = const [],
+    bool allowsExtendedWait = false,
   }) : headers = Map<String, List<String>>.unmodifiable(headers),
        pathParameters = Map<String, String>.unmodifiable(pathParameters),
-       bodyBytes = List<int>.unmodifiable(bodyBytes);
+       bodyBytes = List<int>.unmodifiable(bodyBytes),
+       _allowsExtendedWait = allowsExtendedWait;
 
   final RequestId requestId;
   final String method;
@@ -125,6 +127,33 @@ final class PublicApiRequest {
   final JsonObjectValue? jsonBody;
   final Map<String, String> pathParameters;
   final List<int> bodyBytes;
+  final bool _allowsExtendedWait;
+  Duration? _waitTimeout;
+  bool _responseDeadlineSelected = false;
+
+  /// Extends only a route explicitly registered as a wait endpoint. Callers
+  /// must invoke this after validating the public wait request and before the
+  /// first asynchronous wait boundary.
+  void extendResponseDeadlineForWait(Duration timeout) {
+    if (!_allowsExtendedWait) {
+      throw StateError('this route cannot extend its response deadline');
+    }
+    if (_responseDeadlineSelected) {
+      throw StateError('the response deadline was already selected');
+    }
+    if (_waitTimeout != null) {
+      throw StateError('the wait response deadline was already configured');
+    }
+    if (timeout <= Duration.zero || timeout > const Duration(days: 1)) {
+      throw ArgumentError.value(timeout, 'timeout', 'must be in (0, 24h]');
+    }
+    _waitTimeout = timeout;
+  }
+
+  Duration _selectResponseDeadline(Duration ordinaryDeadline) {
+    _responseDeadlineSelected = true;
+    return ordinaryDeadline + (_waitTimeout ?? Duration.zero);
+  }
 }
 
 final class PublicApiResponse {
@@ -203,8 +232,14 @@ final class PublicApiException implements Exception {
 
 final class PublicApiRouter {
   final Map<String, Map<String, PublicApiHandler>> _routes = {};
+  final Set<String> _extendedWaitRoutes = {};
 
-  void add(String method, String path, PublicApiHandler handler) {
+  void add(
+    String method,
+    String path,
+    PublicApiHandler handler, {
+    bool allowsExtendedWait = false,
+  }) {
     final normalizedMethod = method.toUpperCase();
     final segments = path.split('/');
     final parameterNames = <String>{};
@@ -245,6 +280,9 @@ final class PublicApiRouter {
       throw StateError('$normalizedMethod $path is already registered');
     }
     methods[normalizedMethod] = handler;
+    if (allowsExtendedWait) {
+      _extendedWaitRoutes.add('$normalizedMethod $path');
+    }
   }
 
   String? _matchingPath(String path) {
@@ -292,6 +330,12 @@ final class PublicApiRouter {
 
   PublicApiHandler? handler(String method, String path) =>
       _routes[_matchingPath(path)]?[method.toUpperCase()];
+
+  bool allowsExtendedWait(String method, String path) {
+    final template = _matchingPath(path);
+    return template != null &&
+        _extendedWaitRoutes.contains('${method.toUpperCase()} $template');
+  }
 }
 
 final class PublicApiServer {
@@ -518,7 +562,7 @@ final class PublicApiServer {
     }
     response.headers.set('X-Request-ID', requestId.value);
     try {
-      await _dispatch(request, requestId).timeout(requestDeadline);
+      await _dispatch(request, requestId);
     } on PublicApiException catch (failure) {
       try {
         _writePublicProblem(response, requestId, failure.problem);
@@ -572,6 +616,12 @@ final class PublicApiServer {
   }
 
   Future<void> _dispatch(HttpRequest request, RequestId requestId) async {
+    final requestStopwatch = Stopwatch()..start();
+    Duration remainingOrdinaryDeadline() {
+      final remaining = requestDeadline - requestStopwatch.elapsed;
+      return remaining > Duration.zero ? remaining : Duration.zero;
+    }
+
     if (request.protocolVersion != '1.1') {
       throw const _PublicApiFailure(
         status: HttpStatus.httpVersionNotSupported,
@@ -622,22 +672,30 @@ final class PublicApiServer {
       return;
     }
     if (routed && !builtIn) {
-      final jsonBody = await _readJsonBody(request);
+      final jsonBody = await _readJsonBody(
+        request,
+      ).timeout(remainingOrdinaryDeadline());
       final handler = _router.handler(request.method, request.uri.path)!;
       final headers = <String, List<String>>{};
       request.headers.forEach((name, values) {
         headers[name.toLowerCase()] = List<String>.unmodifiable(values);
       });
-      final result = await handler(
-        PublicApiRequest(
-          requestId: requestId,
-          method: request.method,
-          uri: request.uri,
-          headers: headers,
-          jsonBody: jsonBody.json,
-          bodyBytes: jsonBody.bytes,
-          pathParameters: _router.pathParameters(request.uri.path),
+      final apiRequest = PublicApiRequest(
+        requestId: requestId,
+        method: request.method,
+        uri: request.uri,
+        headers: headers,
+        jsonBody: jsonBody.json,
+        bodyBytes: jsonBody.bytes,
+        pathParameters: _router.pathParameters(request.uri.path),
+        allowsExtendedWait: _router.allowsExtendedWait(
+          request.method,
+          request.uri.path,
         ),
+      );
+      final response = handler(apiRequest);
+      final result = await response.timeout(
+        apiRequest._selectResponseDeadline(remainingOrdinaryDeadline()),
       );
       for (final entry in result.headers.entries) {
         if (entry.key.toLowerCase() == 'x-request-id') continue;
@@ -655,7 +713,9 @@ final class PublicApiServer {
       case '/v1/openapi.json':
         _writeJson(request.response, HttpStatus.ok, _openApiDocument);
       case '/v1/system/live':
-        final status = await _systemHealth.liveness();
+        final status = await _systemHealth.liveness().timeout(
+          remainingOrdinaryDeadline(),
+        );
         _writeJson(
           request.response,
           status.healthy ? HttpStatus.ok : HttpStatus.serviceUnavailable,
@@ -665,7 +725,9 @@ final class PublicApiServer {
           },
         );
       case '/v1/system/ready':
-        final status = await _systemHealth.readiness();
+        final status = await _systemHealth.readiness().timeout(
+          remainingOrdinaryDeadline(),
+        );
         _writeJson(
           request.response,
           status.healthy ? HttpStatus.ok : HttpStatus.serviceUnavailable,

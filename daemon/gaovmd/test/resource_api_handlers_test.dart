@@ -60,6 +60,7 @@ void main() {
         pathParameters: {'vm_id': _vmId.value},
         jsonBody: JsonObjectValue.fromJson(body),
         bodyBytes: utf8.encode(jsonEncode(body)),
+        allowsExtendedWait: router.allowsExtendedWait(method, path),
       ),
     );
     for (final metadata in [

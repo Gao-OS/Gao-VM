@@ -466,6 +466,132 @@ void main() {
     _expectProblem(response, HttpStatus.gatewayTimeout, 'WAIT_TIMEOUT');
   });
 
+  test('body read and handler share one ordinary request deadline', () async {
+    final handlerStarted = Completer<void>();
+    final release = Completer<void>();
+    final router = PublicApiRouter()
+      ..add('POST', '/v1/slow', (_) async {
+        handlerStarted.complete();
+        await release.future;
+        return PublicApiResponse.json(status: HttpStatus.ok, body: const {});
+      });
+    final server = PublicApiServer(
+      socketPath: socketPath,
+      openApiDocument: const {'openapi': '3.1.0'},
+      systemHealth: _HealthService(),
+      router: router,
+      requestDeadline: const Duration(milliseconds: 200),
+      newRequestId: () => _requestId,
+    );
+    addTearDown(server.close);
+    addTearDown(() {
+      if (!release.isCompleted) release.complete();
+    });
+    await server.start();
+
+    final response = _request(
+      socketPath,
+      'POST',
+      '/v1/slow',
+      headers: {'Content-Type': 'application/json'},
+      body: utf8.encode('{}'),
+      bodyDelay: const Duration(milliseconds: 100),
+    );
+    await handlerStarted.future;
+    final releaseTimer = Timer(
+      const Duration(milliseconds: 130),
+      release.complete,
+    );
+    addTearDown(releaseTimer.cancel);
+
+    _expectProblem(await response, HttpStatus.gatewayTimeout, 'WAIT_TIMEOUT');
+  });
+
+  test('validated explicit wait extends only its response deadline', () async {
+    final release = Completer<void>();
+    final handlerStarted = Completer<void>();
+    final router = PublicApiRouter()
+      ..add('POST', '/v1/vms/{vm_id}/wait', (request) async {
+        final body = request.jsonBody!.toJson();
+        if (body.keys.toSet().difference(const {
+              'condition',
+              'timeout_seconds',
+            }).isNotEmpty ||
+            body['condition'] != 'runtime_running' ||
+            body['timeout_seconds'] is! num) {
+          throw const FormatException('invalid wait request');
+        }
+        final timeout = Duration(
+          milliseconds: ((body['timeout_seconds'] as num) * 1000).round(),
+        );
+        request.extendResponseDeadlineForWait(timeout);
+        handlerStarted.complete();
+        await release.future;
+        return PublicApiResponse.json(
+          status: HttpStatus.ok,
+          body: const {'reached': true},
+        );
+      }, allowsExtendedWait: true);
+    final server = PublicApiServer(
+      socketPath: socketPath,
+      openApiDocument: const {'openapi': '3.1.0'},
+      systemHealth: _HealthService(),
+      router: router,
+      requestDeadline: const Duration(milliseconds: 20),
+      newRequestId: () => _requestId,
+    );
+    addTearDown(server.close);
+    addTearDown(() {
+      if (!release.isCompleted) release.complete();
+    });
+    await server.start();
+
+    final request = _request(
+      socketPath,
+      'POST',
+      '/v1/vms/vm_01J00000000000000000000000/wait',
+      headers: {'Content-Type': 'application/json'},
+      body: utf8.encode(
+        '{"condition":"runtime_running","timeout_seconds":0.2}',
+      ),
+    );
+    await handlerStarted.future;
+    await Future<void>.delayed(const Duration(milliseconds: 80));
+    release.complete();
+
+    expect((await request).status, HttpStatus.ok);
+  });
+
+  test('wait route cannot extend its body-read deadline', () async {
+    var handlerCalled = false;
+    final router = PublicApiRouter()
+      ..add('POST', '/v1/vms/{vm_id}/wait', (request) async {
+        handlerCalled = true;
+        request.extendResponseDeadlineForWait(const Duration(seconds: 1));
+        return PublicApiResponse.json(status: HttpStatus.ok, body: const {});
+      }, allowsExtendedWait: true);
+    final server = PublicApiServer(
+      socketPath: socketPath,
+      openApiDocument: const {'openapi': '3.1.0'},
+      systemHealth: _HealthService(),
+      router: router,
+      requestDeadline: const Duration(milliseconds: 20),
+      newRequestId: () => _requestId,
+    );
+    addTearDown(server.close);
+    await server.start();
+
+    final response = await _request(
+      socketPath,
+      'POST',
+      '/v1/vms/vm_01J00000000000000000000000/wait',
+      headers: {'Content-Type': 'application/json', 'Content-Length': '64'},
+    );
+
+    _expectProblem(response, HttpStatus.gatewayTimeout, 'WAIT_TIMEOUT');
+    expect(handlerCalled, isFalse);
+  });
+
   test('concurrent UDS requests are not globally serialized', () async {
     const requestCount = 8;
     final release = Completer<void>();
@@ -1094,6 +1220,7 @@ Future<_HttpResponse> _request(
   Map<String, String> headers = const {},
   List<int> body = const [],
   String protocol = 'HTTP/1.1',
+  Duration bodyDelay = Duration.zero,
 }) async {
   final socket = await Socket.connect(
     InternetAddress(socketPath, type: InternetAddressType.unix),
@@ -1117,6 +1244,10 @@ Future<_HttpResponse> _request(
   }
   request.write('\r\n');
   socket.add(utf8.encode(request.toString()));
+  if (bodyDelay > Duration.zero) {
+    await socket.flush();
+    await Future<void>.delayed(bodyDelay);
+  }
   if (body.isNotEmpty) socket.add(body);
   await socket.flush();
   final bytes = await socket.fold<List<int>>(<int>[], (out, chunk) {

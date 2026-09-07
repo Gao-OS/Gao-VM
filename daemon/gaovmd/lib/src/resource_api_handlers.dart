@@ -47,7 +47,12 @@ final class ResourceApiHandlers {
         '/v1/vms/{vm_id}/actions/kill',
         _guard((request) => _lifecycle(request, VmLifecycleAction.kill)),
       )
-      ..add('POST', '/v1/vms/{vm_id}/wait', _guard(_waitForVm))
+      ..add(
+        'POST',
+        '/v1/vms/{vm_id}/wait',
+        _guard(_waitForVm),
+        allowsExtendedWait: true,
+      )
       ..add('GET', '/v1/operations', _guard(_listOperations))
       ..add('GET', '/v1/operations/{operation_id}', _guard(_getOperation))
       ..add(
@@ -59,6 +64,7 @@ final class ResourceApiHandlers {
         'POST',
         '/v1/operations/{operation_id}/wait',
         _guard(_waitForOperation),
+        allowsExtendedWait: true,
       );
   }
 
@@ -211,18 +217,16 @@ final class ResourceApiHandlers {
       allowed: const {'condition', 'timeout_seconds', 'service_name'},
       name: 'VM wait request',
     );
-    final result = await _vms.wait(
-      VmWaitCommand(
-        vmId: _vmId(request),
-        condition: parseVmWaitCondition(
-          _string(body['condition'], 'condition'),
-        ),
-        timeout: _timeout(body['timeout_seconds']),
-        serviceName: body.containsKey('service_name')
-            ? _string(body['service_name'], 'service_name')
-            : null,
-      ),
+    final command = VmWaitCommand(
+      vmId: _vmId(request),
+      condition: parseVmWaitCondition(_string(body['condition'], 'condition')),
+      timeout: _timeout(body['timeout_seconds']),
+      serviceName: body.containsKey('service_name')
+          ? _string(body['service_name'], 'service_name')
+          : null,
     );
+    request.extendResponseDeadlineForWait(command.timeout);
+    final result = await _vms.wait(command);
     return PublicApiResponse.json(status: HttpStatus.ok, body: result.toJson());
   }
 
@@ -282,12 +286,12 @@ final class ResourceApiHandlers {
       required: const {'timeout_seconds'},
       name: 'operation wait request',
     );
-    final operation = await _operations.wait(
-      OperationWaitCommand(
-        operationId: _operationId(request),
-        timeout: _timeout(body['timeout_seconds']),
-      ),
+    final command = OperationWaitCommand(
+      operationId: _operationId(request),
+      timeout: _timeout(body['timeout_seconds']),
     );
+    request.extendResponseDeadlineForWait(command.timeout);
+    final operation = await _operations.wait(command);
     return PublicApiResponse.json(
       status: HttpStatus.ok,
       body: operation.toJson(),
