@@ -256,7 +256,7 @@ final class SqliteEventRepository implements EventRepository {
           .select(
             '''
               SELECT * FROM outbox
-              WHERE published_at IS NULL AND id > ?
+              WHERE topic = 'events' AND published_at IS NULL AND id > ?
               ORDER BY id
               LIMIT ?
             ''',
@@ -282,7 +282,7 @@ final class SqliteEventRepository implements EventRepository {
     final rows = connection.select(
       '''
         SELECT id FROM outbox
-        WHERE published_at IS NULL
+        WHERE topic = 'events' AND published_at IS NULL
           AND (claimed_by IS NULL OR claim_expires_at <= ?)
         ORDER BY id
         LIMIT ?
@@ -332,7 +332,7 @@ final class SqliteEventRepository implements EventRepository {
           '''
             UPDATE outbox
             SET published_at = ?, claimed_by = NULL, claim_expires_at = NULL
-            WHERE id = ? AND published_at IS NULL AND claimed_by = ?
+            WHERE topic = 'events' AND id = ? AND published_at IS NULL AND claimed_by = ?
               AND claim_expires_at > ?
           ''',
           [
@@ -355,7 +355,7 @@ final class SqliteEventRepository implements EventRepository {
             UPDATE outbox
             SET claimed_by = NULL, claim_expires_at = NULL,
                 attempts = attempts + 1
-            WHERE id = ? AND published_at IS NULL AND claimed_by = ?
+            WHERE topic = 'events' AND id = ? AND published_at IS NULL AND claimed_by = ?
           ''',
           [id, owner],
         );

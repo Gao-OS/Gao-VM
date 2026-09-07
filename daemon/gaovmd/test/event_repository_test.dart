@@ -22,6 +22,39 @@ void main() {
     }
   });
 
+  test(
+    'event delivery cannot claim or acknowledge command outbox rows',
+    () async {
+      final database = await GaoVmDatabase.open(databasePath);
+      addTearDown(database.close);
+      final repository = SqliteEventRepository(database);
+      await database.transaction((connection) {
+        connection.execute(
+          '''INSERT INTO outbox(topic, key, payload_json, created_at,
+        claimed_by, claim_expires_at) VALUES (?, ?, ?, ?, ?, ?)''',
+          [
+            'vm.commands',
+            'command',
+            '{}',
+            '2026-01-01T00:00:00.000000Z',
+            'worker',
+            '2099-01-01T00:00:00.000000Z',
+          ],
+        );
+      });
+      expect(await repository.readUnpublishedOutbox(), isEmpty);
+      expect(
+        await repository.claimOutbox(
+          owner: 'worker',
+          lease: const Duration(seconds: 30),
+        ),
+        isEmpty,
+      );
+      expect(await repository.markOutboxPublished(1, owner: 'worker'), isFalse);
+      expect(await repository.releaseOutbox(1, owner: 'worker'), isFalse);
+    },
+  );
+
   test('append persists an event and one unpublished outbox record', () async {
     final database = await GaoVmDatabase.open(databasePath);
     final repository = SqliteEventRepository(

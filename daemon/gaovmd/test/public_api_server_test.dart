@@ -41,6 +41,111 @@ void main() {
     );
   });
 
+  test(
+    'passes resource path parameters through the HTTP handler boundary',
+    () async {
+      final router = PublicApiRouter()
+        ..add(
+          'GET',
+          '/v1/vms/{vm_id}',
+          (request) async =>
+              PublicApiResponse.json(status: 200, body: request.pathParameters),
+        );
+      final server = PublicApiServer(
+        socketPath: socketPath,
+        openApiDocument: const {},
+        systemHealth: _HealthService(),
+        router: router,
+      );
+      addTearDown(server.close);
+      await server.start();
+
+      final response = await _request(socketPath, 'GET', '/v1/vms/vm_example');
+
+      expect(response.status, 200);
+      expect(jsonDecode(response.body), {'vm_id': 'vm_example'});
+      final unsupported = await _request(
+        socketPath,
+        'POST',
+        '/v1/vms/vm_example',
+      );
+      expect(unsupported.status, 405);
+      expect(unsupported.headers['allow'], 'GET');
+    },
+  );
+
+  test(
+    'preserves exact immutable request bytes for idempotency hashing',
+    () async {
+      final router = PublicApiRouter()
+        ..add('POST', '/v1/echo', (request) async {
+          expect(() => request.bodyBytes.add(0), throwsUnsupportedError);
+          return PublicApiResponse.json(
+            status: 200,
+            body: {
+              'raw': utf8.decode(request.bodyBytes),
+              'json': request.jsonBody!.toJson(),
+            },
+          );
+        });
+      final server = PublicApiServer(
+        socketPath: socketPath,
+        openApiDocument: const {},
+        systemHealth: _HealthService(),
+        router: router,
+      );
+      addTearDown(server.close);
+      await server.start();
+      const raw = '{ "name" : "vm" }\n';
+
+      final response = await _request(
+        socketPath,
+        'POST',
+        '/v1/echo',
+        headers: {'Content-Type': 'application/json'},
+        body: utf8.encode(raw),
+      );
+
+      expect(response.status, 200);
+      expect(jsonDecode(response.body), {
+        'raw': raw,
+        'json': {'name': 'vm'},
+      });
+    },
+  );
+
+  test('accepts merge-patch JSON only for PATCH', () async {
+    final router = PublicApiRouter();
+    for (final method in ['PATCH', 'POST']) {
+      router.add(
+        method,
+        '/v1/vms/{vm_id}',
+        (request) async => PublicApiResponse.json(
+          status: 200,
+          body: request.jsonBody!.toJson(),
+        ),
+      );
+    }
+    final server = PublicApiServer(
+      socketPath: socketPath,
+      openApiDocument: const {},
+      systemHealth: _HealthService(),
+      router: router,
+    );
+    addTearDown(server.close);
+    await server.start();
+    for (final method in ['PATCH', 'POST']) {
+      final response = await _request(
+        socketPath,
+        method,
+        '/v1/vms/vm_example',
+        headers: {'Content-Type': 'application/merge-patch+json'},
+        body: utf8.encode('{"description":null}'),
+      );
+      expect(response.status, method == 'PATCH' ? 200 : 415);
+    }
+  });
+
   test('serves OpenAPI and injected health over a mode-0600 UDS', () async {
     final server = PublicApiServer(
       socketPath: socketPath,

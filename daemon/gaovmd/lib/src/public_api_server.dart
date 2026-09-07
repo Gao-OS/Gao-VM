@@ -112,13 +112,19 @@ final class PublicApiRequest {
     required this.uri,
     required Map<String, List<String>> headers,
     required this.jsonBody,
-  }) : headers = Map<String, List<String>>.unmodifiable(headers);
+    Map<String, String> pathParameters = const {},
+    List<int> bodyBytes = const [],
+  }) : headers = Map<String, List<String>>.unmodifiable(headers),
+       pathParameters = Map<String, String>.unmodifiable(pathParameters),
+       bodyBytes = List<int>.unmodifiable(bodyBytes);
 
   final RequestId requestId;
   final String method;
   final Uri uri;
   final Map<String, List<String>> headers;
   final JsonObjectValue? jsonBody;
+  final Map<String, String> pathParameters;
+  final List<int> bodyBytes;
 }
 
 final class PublicApiResponse {
@@ -200,12 +206,39 @@ final class PublicApiRouter {
 
   void add(String method, String path, PublicApiHandler handler) {
     final normalizedMethod = method.toUpperCase();
-    if (!path.startsWith('/v1/') || path.contains('{')) {
+    final segments = path.split('/');
+    final parameterNames = <String>{};
+    var valid = path.startsWith('/v1/');
+    for (final segment in segments.skip(1)) {
+      if (segment.isEmpty) valid = false;
+      if (segment.contains('{') || segment.contains('}')) {
+        final match = RegExp(r'^\{([a-z][a-z0-9_]*)\}$').firstMatch(segment);
+        if (match == null || !parameterNames.add(match.group(1)!))
+          valid = false;
+      }
+    }
+    if (!valid) {
       throw ArgumentError.value(
         path,
         'path',
-        'M4.1 supports exact routes under /v1 only',
+        'must be a versioned path with unique whole-segment parameters',
       );
+    }
+    for (final existing in _routes.keys) {
+      if (existing == path) continue;
+      final other = existing.split('/');
+      if (segments.length != other.length) continue;
+      final count = segments.where((part) => part.startsWith('{')).length;
+      final otherCount = other.where((part) => part.startsWith('{')).length;
+      if (count != otherCount) continue;
+      final overlaps = List.generate(segments.length, (i) => i).every(
+        (i) =>
+            segments[i] == other[i] ||
+            segments[i].startsWith('{') ||
+            other[i].startsWith('{'),
+      );
+      if (overlaps)
+        throw ArgumentError('ambiguous route templates: $existing and $path');
     }
     final methods = _routes.putIfAbsent(path, () => {});
     if (methods.containsKey(normalizedMethod)) {
@@ -214,13 +247,51 @@ final class PublicApiRouter {
     methods[normalizedMethod] = handler;
   }
 
-  bool containsPath(String path) => _routes.containsKey(path);
+  String? _matchingPath(String path) {
+    if (_routes.containsKey(path)) return path;
+    final parts = path.split('/');
+    String? best;
+    var bestParameterCount = 1 << 30;
+    for (final template in _routes.keys) {
+      final segments = template.split('/');
+      if (segments.length != parts.length) continue;
+      var matches = true;
+      var count = 0;
+      for (var i = 0; i < segments.length; i++) {
+        if (segments[i].startsWith('{')) {
+          count++;
+          if (parts[i].isEmpty) matches = false;
+        } else if (segments[i] != parts[i]) {
+          matches = false;
+        }
+      }
+      if (matches && count < bestParameterCount) {
+        best = template;
+        bestParameterCount = count;
+      }
+    }
+    return best;
+  }
+
+  Map<String, String> pathParameters(String path) {
+    final template = _matchingPath(path);
+    if (template == null) return const {};
+    final segments = template.split('/');
+    final parts = path.split('/');
+    return Map.unmodifiable({
+      for (var i = 0; i < segments.length; i++)
+        if (segments[i].startsWith('{'))
+          segments[i].substring(1, segments[i].length - 1): parts[i],
+    });
+  }
+
+  bool containsPath(String path) => _matchingPath(path) != null;
 
   Set<String> allowedMethods(String path) =>
-      Set<String>.unmodifiable(_routes[path]?.keys ?? const []);
+      Set<String>.unmodifiable(_routes[_matchingPath(path)]?.keys ?? const []);
 
   PublicApiHandler? handler(String method, String path) =>
-      _routes[path]?[method.toUpperCase()];
+      _routes[_matchingPath(path)]?[method.toUpperCase()];
 }
 
 final class PublicApiServer {
@@ -563,7 +634,9 @@ final class PublicApiServer {
           method: request.method,
           uri: request.uri,
           headers: headers,
-          jsonBody: jsonBody,
+          jsonBody: jsonBody.json,
+          bodyBytes: jsonBody.bytes,
+          pathParameters: _router.pathParameters(request.uri.path),
         ),
       );
       for (final entry in result.headers.entries) {
@@ -601,7 +674,9 @@ final class PublicApiServer {
     }
   }
 
-  Future<JsonObjectValue?> _readJsonBody(HttpRequest request) async {
+  Future<({JsonObjectValue? json, List<int> bytes})> _readJsonBody(
+    HttpRequest request,
+  ) async {
     final contentLength = request.contentLength;
     if (contentLength > maxJsonBodyBytes) {
       throw const _PublicApiFailure(
@@ -615,14 +690,18 @@ final class PublicApiServer {
       HttpHeaders.transferEncodingHeader,
     );
     final hasBody = contentLength > 0 || transferEncoding == 'chunked';
-    if (!hasBody) return null;
+    if (!hasBody) return (json: null, bytes: const <int>[]);
     final contentType = request.headers.contentType;
-    if (contentType?.mimeType != ContentType.json.mimeType) {
+    final isMergePatch =
+        request.method == 'PATCH' &&
+        contentType?.mimeType == 'application/merge-patch+json';
+    if (contentType?.mimeType != ContentType.json.mimeType && !isMergePatch) {
       throw const _PublicApiFailure(
         status: HttpStatus.unsupportedMediaType,
         type: 'unsupported-media-type',
         title: 'Unsupported media type',
-        detail: 'Requests with a body must use application/json.',
+        detail:
+            'Requests must use application/json or application/merge-patch+json for PATCH.',
       );
     }
     final bytes = <int>[];
@@ -642,7 +721,7 @@ final class PublicApiServer {
       if (decoded is! Map) {
         throw const FormatException('JSON body must be an object');
       }
-      return JsonObjectValue.fromJson(decoded);
+      return (json: JsonObjectValue.fromJson(decoded), bytes: bytes);
     } on FormatException {
       throw const _PublicApiFailure(
         status: HttpStatus.badRequest,
