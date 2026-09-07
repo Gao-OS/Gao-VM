@@ -224,7 +224,7 @@ final class VmRegistry {
                   VmOperationKind.restart,
                   VmOperationKind.recovery,
                 }.contains(kind)
-              : kind == VmOperationKind.stop);
+              : kind == VmOperationKind.stop || kind == VmOperationKind.kill);
       if (selectedRecord == null && eligible) {
         selectedRecord = operation;
         selected = VmControllerOperation(
@@ -308,5 +308,6 @@ VmOperationKind? _operationKind(String type) {
   if (type.contains('recovery')) return VmOperationKind.recovery;
   if (type.contains('start')) return VmOperationKind.start;
   if (type.contains('stop')) return VmOperationKind.stop;
+  if (type.contains('kill')) return VmOperationKind.kill;
   return null;
 }

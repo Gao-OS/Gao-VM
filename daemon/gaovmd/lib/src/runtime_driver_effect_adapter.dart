@@ -292,6 +292,11 @@ final class RuntimeDriverEffectAdapter
     final record = _requireRecord(vmId, driverGeneration);
     final operationId = command.correlation.operationId;
     if (operationId != null) record.latestOperationId = operationId;
+    if (command is RuntimeKillCommand) {
+      // A stop may exit before its superseding kill reaches the socket. Process
+      // termination still satisfies the kill for this exact owned generation.
+      record.terminalOperationId = operationId;
+    }
     await record.session.execute(command);
   });
 
@@ -444,7 +449,9 @@ final class RuntimeDriverEffectAdapter
     _enqueue(
       record,
       DriverExited(
-        operationId: _eventOperationId(record, correlation),
+        operationId:
+            record.terminalOperationId ??
+            _eventOperationId(record, correlation),
         driverGeneration: correlation.driverGeneration,
         cleanShutdown: clean,
         error: error,
@@ -537,6 +544,7 @@ final class _RuntimeDriverRecord {
   final RuntimeDriverSession session;
   final OperationId launchOperationId;
   OperationId latestOperationId;
+  OperationId? terminalOperationId;
   StreamSubscription<RuntimeEvent>? eventSubscription;
   StreamSubscription<RuntimeDriverLogChunk>? logSubscription;
   Future<void> dispatchTail = Future<void>.value();

@@ -243,6 +243,78 @@ void main() {
       ]);
     });
 
+    test(
+      'kill immediately terminates a running generation and waits for lease release',
+      () {
+        var transition = reduce(_running(), KillRequested(_operation2));
+        expect(transition.state.desiredState, DesiredState.stopped);
+        expect(transition.state.currentOperation?.kind, VmOperationKind.kill);
+        expect(transition.effects.last, isA<KillDriver>());
+        expect(transition.effects.whereType<StopRuntime>(), isEmpty);
+        transition = reduce(
+          transition.state,
+          DriverExited(
+            operationId: _operation2,
+            driverGeneration: 1,
+            cleanShutdown: false,
+          ),
+        );
+        expect(transition.state.leaseState, VmLeaseState.releasing);
+        transition = reduce(transition.state, HostLeaseReleased(_operation2));
+        expect(
+          transition.state.currentOperation?.state,
+          OperationState.succeeded,
+        );
+        expect(transition.state.phase, VmPhase.stopped);
+      },
+    );
+
+    test('kill supersedes a pending graceful stop', () {
+      final stopping = reduce(_running(), StopRequested(_operation1)).state;
+      final transition = reduce(stopping, KillRequested(_operation2));
+      expect(transition.state.currentOperation?.id, _operation2);
+      expect(transition.effects.last, isA<KillDriver>());
+      expect(
+        transition.effects.whereType<FailOperation>().single.operationId,
+        _operation1,
+      );
+    });
+
+    test(
+      'kill consumes a queued superseded stop exit but fences old generations',
+      () {
+        final stopping = reduce(_running(), StopRequested(_operation1)).state;
+        final killing = reduce(stopping, KillRequested(_operation2)).state;
+        final stale = reduce(
+          killing,
+          DriverExited(
+            operationId: _operation1,
+            driverGeneration: 0,
+            cleanShutdown: true,
+          ),
+        );
+        expect(stale.state, same(killing));
+        var transition = reduce(
+          killing,
+          DriverExited(
+            operationId: _operation1,
+            driverGeneration: 1,
+            cleanShutdown: true,
+          ),
+        );
+        expect(transition.state.activeDriverGeneration, isNull);
+        expect(
+          transition.effects.whereType<ReleaseHostLease>().single.operationId,
+          _operation2,
+        );
+        transition = reduce(transition.state, HostLeaseReleased(_operation2));
+        expect(
+          transition.state.currentOperation?.state,
+          OperationState.succeeded,
+        );
+      },
+    );
+
     test('restart replaces the generation and rejects a late old exit', () {
       var transition = reduce(_running(), RestartRequested(_operation2));
       expect(transition.state.desiredState, DesiredState.running);

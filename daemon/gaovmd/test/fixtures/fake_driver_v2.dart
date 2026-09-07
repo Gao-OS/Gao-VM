@@ -137,6 +137,7 @@ Future<void> main(List<String> args) async {
       }
     } else if (method == 'runtime.stop' || method == 'runtime.kill') {
       await _event(send, vmId, generation, correlatedOperation, 'stopping');
+      if (method == 'runtime.stop' && scenario == 'accepted-stop') continue;
       await _event(send, vmId, generation, correlatedOperation, 'stopped');
       if (method == 'runtime.stop') {
         await send({

@@ -4,7 +4,7 @@ enum VmLeaseState { none, acquiring, held, releasing }
 
 enum VmDeletionState { active, deleting, removingFiles, deleted }
 
-enum VmOperationKind { start, stop, restart, recovery, delete }
+enum VmOperationKind { start, stop, kill, restart, recovery, delete }
 
 final class VmControllerOperation {
   const VmControllerOperation({
@@ -186,6 +186,12 @@ final class StartRequested extends VmCommand {
 
 final class StopRequested extends VmCommand {
   const StopRequested(this.operationId);
+
+  final OperationId operationId;
+}
+
+final class KillRequested extends VmCommand {
+  const KillRequested(this.operationId);
 
   final OperationId operationId;
 }
@@ -692,6 +698,7 @@ VmTransition reduce(VmControllerState state, VmCommand command) {
   return switch (command) {
     StartRequested(:final operationId) => _start(state, operationId),
     StopRequested(:final operationId) => _stop(state, operationId),
+    KillRequested(:final operationId) => _stop(state, operationId, force: true),
     RestartRequested(:final operationId) => _restart(state, operationId),
     DeleteRequested(:final operationId) => _delete(state, operationId),
     SpecUpdated(
@@ -1246,7 +1253,8 @@ VmTransition _reconcile(VmControllerState state) {
     final completesStop =
         currentOperation != null &&
         !currentOperation.isTerminal &&
-        currentOperation.kind == VmOperationKind.stop;
+        (currentOperation.kind == VmOperationKind.stop ||
+            currentOperation.kind == VmOperationKind.kill);
     final transientPhase = const {
       VmPhase.spawningDriver,
       VmPhase.handshaking,
@@ -1442,9 +1450,16 @@ VmTransition _controllerShutdownFailed(
   );
 }
 
-VmTransition _stop(VmControllerState state, OperationId operationId) {
+VmTransition _stop(
+  VmControllerState state,
+  OperationId operationId, {
+  bool force = false,
+}) {
+  final kind = force ? VmOperationKind.kill : VmOperationKind.stop;
   if (state.currentOperation case final current?
-      when !current.isTerminal && current.kind == VmOperationKind.stop) {
+      when !current.isTerminal &&
+          (current.kind == VmOperationKind.kill ||
+              !force && current.kind == VmOperationKind.stop)) {
     return VmTransition(
       state: state,
       effects: [
@@ -1463,7 +1478,7 @@ VmTransition _stop(VmControllerState state, OperationId operationId) {
     final previous = state.currentOperation;
     final completed = VmControllerOperation(
       id: operationId,
-      kind: VmOperationKind.stop,
+      kind: kind,
       state: OperationState.succeeded,
     );
     return VmTransition(
@@ -1518,7 +1533,7 @@ VmTransition _stop(VmControllerState state, OperationId operationId) {
     leaseState: releasesLease ? VmLeaseState.releasing : state.leaseState,
     currentOperation: VmControllerOperation(
       id: operationId,
-      kind: VmOperationKind.stop,
+      kind: kind,
       state: OperationState.running,
     ),
     clearPendingRecoveryGeneration: true,
@@ -1540,7 +1555,7 @@ VmTransition _stop(VmControllerState state, OperationId operationId) {
         driverGeneration: state.activeDriverGeneration,
       ),
       if (state.activeDriverGeneration case final generation?)
-        if (state.phase == VmPhase.running)
+        if (!force && state.phase == VmPhase.running)
           StopRuntime(
             vmId: state.vmId,
             operationId: operationId,
@@ -1814,6 +1829,7 @@ VmTransition _leaseReleased(VmControllerState state, OperationId? operationId) {
           state.desiredState == DesiredState.stopped &&
               const {
                 VmOperationKind.stop,
+                VmOperationKind.kill,
                 VmOperationKind.delete,
               }.contains(operation.kind));
   if (state.leaseState != VmLeaseState.releasing ||
@@ -2150,6 +2166,7 @@ VmTransition _vmStateChanged(
   final operationKind = state.currentOperation?.kind;
   if (state.desiredState != DesiredState.running ||
       operationKind == VmOperationKind.stop ||
+      operationKind == VmOperationKind.kill ||
       operationKind == VmOperationKind.delete ||
       state.currentOperation?.state == OperationState.cancelled) {
     return VmTransition(state: state);
@@ -2219,6 +2236,18 @@ VmTransition _driverExited(
   OperationError? error,
   DateTime? occurredAt,
 }) {
+  final current = state.currentOperation;
+  if (state.activeDriverGeneration == driverGeneration &&
+      state.desiredState == DesiredState.stopped &&
+      state.phase == VmPhase.stopping &&
+      current != null &&
+      current.kind == VmOperationKind.kill &&
+      !current.isTerminal &&
+      state.driverOperationId == current.id) {
+    // Exit may already be queued for the superseded graceful stop when kill
+    // takes ownership. A confirmed exit of this generation satisfies kill.
+    operationId = current.id;
+  }
   if (!_matchesRuntimeCallback(state, operationId, driverGeneration)) {
     return VmTransition(state: state);
   }
@@ -2227,6 +2256,7 @@ VmTransition _driverExited(
       operation?.id == operationId &&
       !operation!.isTerminal &&
       (operation.kind == VmOperationKind.stop ||
+          operation.kind == VmOperationKind.kill ||
           operation.kind == VmOperationKind.delete ||
           operation.kind == VmOperationKind.restart &&
               state.phase == VmPhase.stopping);
@@ -2679,6 +2709,7 @@ VmTransition _leaseReleaseFailed(
           state.desiredState == DesiredState.stopped &&
               const {
                 VmOperationKind.stop,
+                VmOperationKind.kill,
                 VmOperationKind.delete,
               }.contains(currentOperation.kind));
   if (state.leaseState != VmLeaseState.releasing ||

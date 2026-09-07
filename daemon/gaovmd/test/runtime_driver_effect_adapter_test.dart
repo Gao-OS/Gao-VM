@@ -10,6 +10,47 @@ import 'package:test/test.dart';
 
 void main() {
   test(
+    'exit before kill dispatch completes the superseding kill generation',
+    () async {
+      final scheduler = ManualRuntimeScheduler();
+      final factory = FakeRuntimeDriverFactory(scheduler: scheduler);
+      final commands = <VmCommand>[];
+      final adapter = RuntimeDriverEffectAdapter(
+        factory: factory,
+        resolveConfiguration: (_) async => _configuration,
+        dispatch: (_, command) async => commands.add(command),
+      );
+      addTearDown(adapter.close);
+      final state = _state(_vm1);
+      final correlation = DriverCorrelation(
+        vmId: _vm1,
+        driverGeneration: 1,
+        operationId: _operation1,
+      );
+      await adapter.spawn(state, _operation1, 1);
+      await adapter.connect(state, _operation1, 1);
+      await adapter.configure(state, _operation1, 1);
+      await adapter.start(state, _operation1, 1);
+      scheduler.advanceBy(Duration.zero);
+      await adapter.waitUntilEventsDispatched();
+
+      // Exit is already authoritative but its Future callback has not run. Kill
+      // cannot dispatch to this process; it must still own terminal completion.
+      factory.controlFor(correlation).crash();
+      await expectLater(
+        adapter.kill(state, _operation2, 1),
+        throwsA(isA<VmEffectException>()),
+      );
+      await adapter.waitUntilEventsDispatched();
+
+      final exit = commands.whereType<DriverExited>().single;
+      expect(exit.operationId, _operation2);
+      expect(exit.driverGeneration, 1);
+      expect(adapter.activeSessionCount, 0);
+    },
+  );
+
+  test(
     'routes correlated state and deduplicates terminal observations',
     () async {
       final scheduler = ManualRuntimeScheduler();

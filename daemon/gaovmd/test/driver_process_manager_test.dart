@@ -7,6 +7,8 @@ import 'package:gaovm_models/gaovm_models.dart';
 import 'package:gaovmd/src/driver_process_manager.dart';
 import 'package:gaovmd/src/driver_runtime_layout.dart';
 import 'package:gaovmd/src/runtime_driver.dart';
+import 'package:gaovmd/src/runtime_driver_effect_adapter.dart';
+import 'package:gaovmd/src/vm_controller_reducer.dart';
 import 'package:test/test.dart';
 
 void main() {
@@ -103,6 +105,81 @@ void main() {
       ),
     );
   });
+
+  test(
+    'kill escalates an accepted graceful stop with new correlation',
+    () async {
+      final stoppingManager = _manager(
+        temporaryDirectory,
+        scenario: 'accepted-stop',
+      );
+      addTearDown(stoppingManager.close);
+      final correlation = _correlation(_vm1, 1, _operation1);
+      final session = await stoppingManager.spawn(
+        RuntimeDriverLaunch(correlation: correlation),
+      );
+      await session.connect(DriverCapabilities.runtimeCore);
+      await session.execute(RuntimeStartCommand(correlation: correlation));
+      await session.execute(RuntimeStopCommand(correlation: correlation));
+      final events = <RuntimeEvent>[];
+      final subscription = session.events.listen(events.add);
+      addTearDown(subscription.cancel);
+
+      await session.execute(
+        RuntimeKillCommand(correlation: _correlation(_vm1, 1, _operation2)),
+      );
+      final exit = await session.exited.timeout(const Duration(seconds: 3));
+      expect(exit.correlation.operationId, _operation2);
+      expect(exit.correlation.driverGeneration, 1);
+      expect(exit.exitCode, 137);
+      expect(
+        events.whereType<RuntimeStateChanged>().any(
+          (event) =>
+              event.correlation.operationId == _operation2 &&
+              event.state == RuntimeDriverState.stopped,
+        ),
+        isTrue,
+      );
+      await stoppingManager.release(correlation);
+      expect(stoppingManager.activeProcessCount, 0);
+    },
+  );
+
+  test(
+    'real process adapter routes stop escalation exit and releases session',
+    () async {
+      final stoppingManager = _manager(
+        temporaryDirectory,
+        scenario: 'accepted-stop',
+      );
+      addTearDown(stoppingManager.close);
+      final commands = <VmCommand>[];
+      final adapter = RuntimeDriverEffectAdapter(
+        factory: stoppingManager,
+        resolveConfiguration: (_) async => throw StateError('not configuring'),
+        dispatch: (_, command) async => commands.add(command),
+      );
+      addTearDown(adapter.close);
+      final state = VmControllerState.initial(
+        vmId: _vm1,
+        specGeneration: 1,
+        restartPolicy: RestartPolicy.onFailure,
+      );
+      await adapter.spawn(state, _operation1, 1);
+      await adapter.connect(state, _operation1, 1);
+      await adapter.start(state, _operation1, 1);
+      await adapter.stop(state, _operation1, 1);
+      await adapter.kill(state, _operation2, 1);
+      await _eventually(() => commands.whereType<DriverExited>().isNotEmpty);
+      await adapter.waitUntilEventsDispatched();
+
+      final exit = commands.whereType<DriverExited>().single;
+      expect(exit.operationId, _operation2);
+      expect(exit.driverGeneration, 1);
+      expect(adapter.activeSessionCount, 0);
+      expect(stoppingManager.activeProcessCount, 0);
+    },
+  );
 
   test(
     'identity mismatch fails handshake and release kills the process',

@@ -565,7 +565,9 @@ final class ProcessRuntimeDriverSession implements RuntimeDriverSession {
         .catchError((Object _) {})
         .then((_) async {
           _requireConnected();
-          if (_terminalRequested) {
+          // A kill is an explicit escalation of an accepted graceful stop.
+          // Other queued lifecycle work must still fail once termination begins.
+          if (_terminalRequested && command is! RuntimeKillCommand) {
             throw _cancelled('driver session is terminating');
           }
           final operationId = command.correlation.operationId;
@@ -574,6 +576,11 @@ final class ProcessRuntimeDriverSession implements RuntimeDriverSession {
           }
           if (operationId != null) _latestOperationId = operationId;
           _activeLifecycleOperation = operationId;
+          if (command is RuntimeKillCommand) {
+            // Even a failed or hung kill RPC must terminate the owned process.
+            _terminalRequested = true;
+            _armStopEscalation(Duration.zero);
+          }
           try {
             return await _executeNow(command);
           } finally {
