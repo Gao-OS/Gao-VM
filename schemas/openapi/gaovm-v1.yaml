@@ -226,8 +226,6 @@ paths:
           $ref: '#/components/responses/Problem'
         '409':
           $ref: '#/components/responses/Problem'
-        '412':
-          $ref: '#/components/responses/Problem'
         default:
           $ref: '#/components/responses/Problem'
     delete:
@@ -364,7 +362,7 @@ paths:
           $ref: '#/components/responses/VmWaitResult'
         '404':
           $ref: '#/components/responses/Problem'
-        '408':
+        '504':
           $ref: '#/components/responses/Problem'
         default:
           $ref: '#/components/responses/Problem'
@@ -490,6 +488,48 @@ paths:
           $ref: '#/components/responses/Problem'
         default:
           $ref: '#/components/responses/Problem'
+  /v1/operations:
+    get:
+      tags: [Operations]
+      operationId: listOperations
+      summary: List durable operations
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - name: resource_type
+          in: query
+          schema:
+            enum: [virtual_machine, image, operation, test_run, artifact]
+        - name: resource_id
+          in: query
+          schema:
+            type: string
+            pattern: '^(?:vm|img|op|tr|art)_[0-7][0-9A-HJKMNP-TV-Z]{25}$'
+        - name: state
+          in: query
+          schema:
+            $ref: '#/components/schemas/OperationState'
+      responses:
+        '200':
+          description: A page of durable operations
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next_cursor]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Operation'
+                  next_cursor:
+                    type: [string, 'null']
+                additionalProperties: false
+        default:
+          $ref: '#/components/responses/Problem'
   /v1/operations/{operation_id}:
     get:
       tags: [Operations]
@@ -501,6 +541,35 @@ paths:
         '200':
           $ref: '#/components/responses/Operation'
         '404':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /v1/operations/{operation_id}/wait:
+    post:
+      tags: [Operations]
+      operationId: waitForOperation
+      summary: Wait for an operation to reach a terminal state
+      parameters:
+        - $ref: '#/components/parameters/OperationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [timeout_seconds]
+              properties:
+                timeout_seconds:
+                  type: number
+                  exclusiveMinimum: 0
+                  maximum: 86400
+              additionalProperties: false
+      responses:
+        '200':
+          $ref: '#/components/responses/Operation'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '504':
           $ref: '#/components/responses/Problem'
         default:
           $ref: '#/components/responses/Problem'
