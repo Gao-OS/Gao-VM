@@ -45,6 +45,218 @@ void main() {
         ),
       )).operationId;
 
+  Future<OperationId> checkpointUnfinishedStart() async {
+    final start = await accept(VmLifecycleAction.start);
+    await SqliteOperationRepository(database).start(start);
+    await SqliteVmStateEffectAdapter(database).persistRuntime(
+      VmControllerState.initial(
+        vmId: vm.metadata.id,
+        specGeneration: 1,
+        restartPolicy: RestartPolicy.never,
+        appliedIntentRevision: 1,
+      ).copyWith(
+        desiredState: DesiredState.running,
+        phase: VmPhase.starting,
+        currentOperation: VmControllerOperation(
+          id: start,
+          kind: VmOperationKind.start,
+          state: OperationState.running,
+        ),
+      ),
+    );
+    final commands = SqliteVmCommandRepository(database);
+    final first = (await commands.claim(
+      owner: 'worker',
+      lease: const Duration(seconds: 10),
+    )).single;
+    expect(await commands.acknowledge(first), isTrue);
+    return start;
+  }
+
+  for (final action in [
+    VmLifecycleAction.stop,
+    VmLifecycleAction.kill,
+    VmLifecycleAction.delete,
+  ]) {
+    test(
+      'unapplied $action head prevents restarting the older execution',
+      () async {
+        final start = await checkpointUnfinishedStart();
+        final head = await accept(action);
+        final runner = _NoEffects();
+        final registry = VmRegistry(
+          repository: SqliteVmRepository(database),
+          operations: SqliteOperationRepository(database),
+          effectRunner: runner,
+          recovery: SqliteVmIntentRecoveryRepository(database),
+        );
+        try {
+          final restored = (await registry.reconcileOnStartup()).single;
+          expect(restored.state.currentOperation!.id, start);
+          expect(restored.state.appliedIntentRevision, 1);
+          expect(runner.effects, isEmpty);
+          expect(
+            (await SqliteOperationRepository(database).get(head))!.state,
+            OperationState.pending,
+          );
+        } finally {
+          await registry.shutdown();
+        }
+      },
+    );
+  }
+
+  test(
+    'start head followed by stop resumes the dependency without bypassing FIFO',
+    () async {
+      final start = await checkpointUnfinishedStart();
+      final head = await accept(VmLifecycleAction.start);
+      final stop = await accept(VmLifecycleAction.stop);
+      final runner = _NoEffects();
+      final registry = VmRegistry(
+        repository: SqliteVmRepository(database),
+        operations: SqliteOperationRepository(database),
+        effectRunner: runner,
+        recovery: SqliteVmIntentRecoveryRepository(database),
+      );
+      try {
+        final restored = (await registry.reconcileOnStartup()).single;
+        expect(restored.state.currentOperation!.id, start);
+        expect(restored.state.appliedIntentRevision, 1);
+        expect(runner.effects.whereType<AcquireHostLease>(), hasLength(1));
+        final pendingHead = (await SqliteVmCommandRepository(
+          database,
+        ).claim(owner: 'probe', lease: const Duration(seconds: 10))).single;
+        expect(pendingHead.record.operationId, head);
+        expect(
+          (await SqliteOperationRepository(database).get(stop))!.state,
+          OperationState.pending,
+        );
+        expect(
+          (await SqliteVmRepository(
+            database,
+          ).get(vm.metadata.id))!.status.desiredState,
+          DesiredState.stopped,
+        );
+      } finally {
+        await registry.shutdown();
+      }
+    },
+  );
+
+  for (final cancelled in [false, true]) {
+    test(
+      'recovery resumes dependency for ${cancelled ? 'cancelled' : 'restart'} head',
+      () async {
+        final start = await checkpointUnfinishedStart();
+        final head = await accept(
+          cancelled ? VmLifecycleAction.stop : VmLifecycleAction.restart,
+        );
+        if (cancelled) await SqliteOperationRepository(database).cancel(head);
+        final runner = _NoEffects();
+        final registry = VmRegistry(
+          repository: SqliteVmRepository(database),
+          operations: SqliteOperationRepository(database),
+          effectRunner: runner,
+          recovery: SqliteVmIntentRecoveryRepository(database),
+        );
+        try {
+          final restored = (await registry.reconcileOnStartup()).single;
+          expect(restored.state.currentOperation!.id, start);
+          expect(runner.effects.whereType<AcquireHostLease>(), hasLength(1));
+          expect(
+            (await SqliteOperationRepository(database).get(head))!.state,
+            cancelled ? OperationState.cancelled : OperationState.pending,
+          );
+        } finally {
+          await registry.shutdown();
+        }
+      },
+    );
+  }
+
+  test('dependency recovery rejects a mismatched actor checkpoint', () async {
+    await checkpointUnfinishedStart();
+    await accept(VmLifecycleAction.start);
+    final recovery = SqliteVmIntentRecoveryRepository(database);
+    final state = (await recovery.restore(vm.metadata.id))!.executionState;
+    for (final changed in [
+      state.copyWith(appliedIntentRevision: 0),
+      state.copyWith(specGeneration: 2),
+      state.copyWith(
+        currentOperation: VmControllerOperation(
+          id: OperationId.generate(),
+          kind: VmOperationKind.start,
+          state: OperationState.running,
+        ),
+      ),
+    ]) {
+      await expectLater(
+        recovery.shouldDeferReconciliation(changed),
+        throwsStateError,
+      );
+    }
+  });
+
+  test(
+    'reopened unfinished start resumes behind a deferred start head',
+    () async {
+      final start = await accept(VmLifecycleAction.start);
+      final later = await accept(VmLifecycleAction.start);
+      await SqliteOperationRepository(database).start(start);
+      await SqliteVmStateEffectAdapter(database).persistRuntime(
+        VmControllerState.initial(
+          vmId: vm.metadata.id,
+          specGeneration: 1,
+          restartPolicy: RestartPolicy.never,
+          appliedIntentRevision: 1,
+        ).copyWith(
+          desiredState: DesiredState.running,
+          phase: VmPhase.starting,
+          currentOperation: VmControllerOperation(
+            id: start,
+            kind: VmOperationKind.start,
+            state: OperationState.running,
+          ),
+        ),
+      );
+      final first = (await SqliteVmCommandRepository(
+        database,
+      ).claim(owner: 'worker', lease: const Duration(seconds: 10))).single;
+      expect(
+        await SqliteVmCommandRepository(database).acknowledge(first),
+        isTrue,
+      );
+      database.close();
+      database = await GaoVmDatabase.open('${directory.path}/db');
+      final runner = _NoEffects();
+      final registry = VmRegistry(
+        repository: SqliteVmRepository(database),
+        operations: SqliteOperationRepository(database),
+        effectRunner: runner,
+        recovery: SqliteVmIntentRecoveryRepository(database),
+      );
+      try {
+        final restored = (await registry.reconcileOnStartup()).single;
+        expect(restored.state.currentOperation!.id, start);
+        expect(restored.state.appliedIntentRevision, 1);
+        expect(runner.effects.whereType<AcquireHostLease>(), hasLength(1));
+        expect(
+          (await SqliteOperationRepository(database).get(later))!.state,
+          OperationState.pending,
+        );
+        expect(
+          await SqliteVmIntentRecoveryRepository(
+            database,
+          ).hasUnpublishedCommands(vm.metadata.id),
+          isTrue,
+        );
+      } finally {
+        await registry.shutdown();
+      }
+    },
+  );
+
   test(
     'skipped cancelled start restores exact stopped state and older spec',
     () async {

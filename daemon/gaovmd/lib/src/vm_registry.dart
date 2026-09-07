@@ -77,13 +77,19 @@ final class VmRegistry {
   }
 
   Future<List<VmController>> _reconcileOnStartup() async {
+    await Future.wait([
+      for (final controller in List<VmController>.of(_controllers.values))
+        if (_isDurablyDeleted(controller.state))
+          _retire(controller.state.vmId, controller),
+    ]);
+    _requireAccepting();
     final virtualMachines = await _repository.list();
     _requireAccepting();
     final controllers = await Future.wait(virtualMachines.map(_activateLoaded));
     _requireAccepting();
     await Future.wait(
       controllers.map((controller) async {
-        if (await _recovery?.hasUnpublishedCommands(controller.state.vmId) ??
+        if (await _recovery?.shouldDeferReconciliation(controller.state) ??
             false)
           return;
         await controller.submit(const ReconcileRequested());

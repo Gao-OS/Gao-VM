@@ -24,6 +24,10 @@ abstract interface class VmIntentRecoveryRepository {
   Future<VmIntentRecoverySnapshot?> restore(VmId vmId);
 
   Future<bool> hasUnpublishedCommands(VmId vmId);
+
+  /// Allows the applied operation to finish when the next FIFO intent cannot
+  /// be adopted until it is terminal. Superseding heads retain precedence.
+  Future<bool> shouldDeferReconciliation(VmControllerState executionState);
 }
 
 /// Restores execution independently of the newer accepted catalog intent.
@@ -32,6 +36,60 @@ final class SqliteVmIntentRecoveryRepository
     implements VmIntentRecoveryRepository {
   const SqliteVmIntentRecoveryRepository(this._database);
   final GaoVmDatabase _database;
+
+  @override
+  Future<bool> shouldDeferReconciliation(
+    VmControllerState executionState,
+  ) => _database.transaction((db) async {
+    final vmId = executionState.vmId;
+    if (!await hasUnpublishedCommands(vmId)) return false;
+    final current = executionState.currentOperation;
+    if (current == null || current.isTerminal) return true;
+    final restored = await restore(vmId);
+    final checkpoint = restored?.executionState;
+    if (checkpoint == null ||
+        checkpoint.appliedIntentRevision !=
+            executionState.appliedIntentRevision ||
+        checkpoint.currentOperation?.id != current.id ||
+        checkpoint.currentOperation?.state != current.state ||
+        checkpoint.currentOperation?.kind != current.kind ||
+        checkpoint.desiredState != executionState.desiredState ||
+        checkpoint.specGeneration != executionState.specGeneration) {
+      throw StateError(
+        'controller execution disagrees with durable recovery checkpoint',
+      );
+    }
+    final rows = db.select(
+      '''SELECT id, key, payload_json, published_at FROM outbox
+      WHERE topic = ? AND key = ?
+        AND json_extract(payload_json, '\$.payload.intent_revision') > ?
+      ORDER BY id LIMIT 1''',
+      [vmCommandOutboxTopic, vmId.value, checkpoint.appliedIntentRevision],
+    );
+    if (rows.isEmpty) return true;
+    final row = rows.single;
+    final head = _IntentCommand.decode(
+      row['id'] as int,
+      row['key'] as String,
+      row['payload_json'] as String,
+      row['published_at'] == null,
+    );
+    if (!head.unpublished ||
+        head.revision != checkpoint.appliedIntentRevision + 1) {
+      throw StateError('recovery requires the next unapplied FIFO intent');
+    }
+    final operation = (await SqliteOperationRepository(
+      _database,
+    ).get(head.operationId))!;
+    final terminal =
+        operation.state != OperationState.pending &&
+        operation.state != OperationState.running;
+    // These are exactly the heads adoption defers behind a nonterminal
+    // current operation. A later stop does not bypass an earlier FIFO start.
+    return !(terminal ||
+        head.action == VmCommandAction.start ||
+        head.action == VmCommandAction.restart);
+  });
 
   @override
   Future<bool> hasUnpublishedCommands(VmId vmId) => _database.read((db) {
