@@ -28,6 +28,29 @@ abstract interface class VmAcceptanceAction<T> {
   Future<VmAcceptedIntent<T>> commit(VmControllerState executionState);
 }
 
+/// Prepares and commits the durable adoption prefix without external effects.
+/// A failed commit must leave persistence unchanged. Duplicate and deferred
+/// results must return the unchanged execution snapshot and no effects.
+abstract interface class VmIntentAdoptionAction {
+  Future<VmIntentAdoption> commit(VmControllerState executionState);
+}
+
+enum VmIntentAdoptionDisposition { adopted, duplicate, deferred }
+
+final class VmIntentAdoption {
+  VmIntentAdoption({
+    required this.disposition,
+    required this.state,
+    required List<VmEffect> remainingEffects,
+    this.sourceCommand,
+  }) : remainingEffects = List<VmEffect>.unmodifiable(remainingEffects);
+
+  final VmIntentAdoptionDisposition disposition;
+  final VmControllerState state;
+  final List<VmEffect> remainingEffects;
+  final VmCommand? sourceCommand;
+}
+
 final class VmAcceptedIntent<T> {
   VmAcceptedIntent({required this.intentRevision, required this.result}) {
     if (intentRevision < 0)
@@ -131,7 +154,7 @@ final class VmController {
   final Duration _effectTimeout;
   final Duration _shutdownTimeout;
   final OperationId Function() _newTeardownOperationId;
-  final Queue<_QueuedCommand> _externalCommands = Queue<_QueuedCommand>();
+  final Queue<_QueuedWork> _externalCommands = Queue<_QueuedWork>();
   final Queue<_QueuedCommand> _internalCommands = Queue<_QueuedCommand>();
   final List<Completer<void>> _idleWaiters = [];
 
@@ -195,6 +218,20 @@ final class VmController {
     return completer.future;
   }
 
+  /// Queues adoption in the external FIFO. Completion acknowledges the durable
+  /// prefix and installed state, not completion of the remaining effect lane.
+  Future<VmIntentAdoptionDisposition> adopt(VmIntentAdoptionAction action) {
+    if (!_acceptingExternal) {
+      return Future<VmIntentAdoptionDisposition>.error(
+        const VmControllerClosedException(),
+      );
+    }
+    final completer = Completer<VmIntentAdoptionDisposition>();
+    _externalCommands.add(_QueuedAdoption(action, completer, Zone.current));
+    _startDrain();
+    return completer.future;
+  }
+
   Future<void> waitUntilIdle() {
     if (isIdle) return Future<void>.value();
     final completer = Completer<void>();
@@ -219,7 +256,7 @@ final class VmController {
     _cancelTimers();
     _cancelActiveEffect();
     while (_externalCommands.isNotEmpty) {
-      _externalCommands.removeFirst().completer?.completeError(
+      _externalCommands.removeFirst().reject(
         const VmControllerClosedException(),
       );
     }
@@ -261,26 +298,31 @@ final class VmController {
       final queued = _internalCommands.isNotEmpty
           ? _internalCommands.removeFirst()
           : _externalCommands.removeFirst();
+      if (queued is _QueuedAdoption) {
+        await _adoptQueued(queued);
+        continue;
+      }
+      final commandWork = queued as _QueuedCommand;
       try {
-        final transition = reduce(_state, queued.command);
+        final transition = reduce(_state, commandWork.command);
         _state = transition.state;
         _onStateChanged?.call(_state);
         _synchronizeTimers();
         await _executeEffects(
           transition.effects,
           transition.state,
-          queued.command,
+          commandWork.command,
         );
-        if (queued.completer != null) {
-          _causalCompleter = queued.completer;
+        if (commandWork.completer != null) {
+          _causalCompleter = commandWork.completer;
         }
         if (_internalCommands.isEmpty && _causalCompleter != null) {
           _causalCompleter!.complete(_state);
           _causalCompleter = null;
         }
       } catch (error, stackTrace) {
-        queued.completer?.completeError(error, stackTrace);
-        if (identical(_causalCompleter, queued.completer)) {
+        commandWork.reject(error, stackTrace);
+        if (identical(_causalCompleter, commandWork.completer)) {
           _causalCompleter = null;
         }
       }
@@ -300,10 +342,41 @@ final class VmController {
     }
   }
 
+  Future<void> _adoptQueued(_QueuedAdoption queued) async {
+    late VmIntentAdoption adoption;
+    try {
+      adoption = await _mutate(() async {
+        final result = await queued.callerZone.run(
+          () => queued.action.commit(_state),
+        );
+        if (result.disposition != VmIntentAdoptionDisposition.adopted) {
+          if (!identical(result.state, _state) ||
+              result.remainingEffects.isNotEmpty) {
+            throw StateError('unadopted intent must preserve execution');
+          }
+        } else {
+          _state = result.state;
+          _onStateChanged?.call(_state);
+          _synchronizeTimers();
+        }
+        queued.completer.complete(result.disposition);
+        return result;
+      });
+    } catch (error, stackTrace) {
+      queued.reject(error, stackTrace);
+      return;
+    }
+    await _executeEffects(
+      adoption.remainingEffects,
+      adoption.state,
+      adoption.sourceCommand,
+    );
+  }
+
   Future<void> _executeEffects(
     List<VmEffect> effects,
     VmControllerState state,
-    VmCommand sourceCommand,
+    VmCommand? sourceCommand,
   ) async {
     for (var index = 0; index < effects.length;) {
       final effect = effects[index];
@@ -693,11 +766,35 @@ final class VmController {
   }
 }
 
-final class _QueuedCommand {
+sealed class _QueuedWork {
+  const _QueuedWork();
+
+  void reject(Object error, [StackTrace? stackTrace]);
+}
+
+final class _QueuedAdoption extends _QueuedWork {
+  const _QueuedAdoption(this.action, this.completer, this.callerZone);
+
+  final VmIntentAdoptionAction action;
+  final Completer<VmIntentAdoptionDisposition> completer;
+  // Commit-time guards must see the enqueue caller's transaction context,
+  // even when another caller started the active drain.
+  final Zone callerZone;
+
+  @override
+  void reject(Object error, [StackTrace? stackTrace]) =>
+      completer.completeError(error, stackTrace);
+}
+
+final class _QueuedCommand extends _QueuedWork {
   const _QueuedCommand(this.command, this.completer);
 
   final VmCommand command;
   final Completer<VmControllerState>? completer;
+
+  @override
+  void reject(Object error, [StackTrace? stackTrace]) =>
+      completer?.completeError(error, stackTrace);
 }
 
 final class _DartVmTimerHandle implements VmTimerHandle {
