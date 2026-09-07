@@ -26,6 +26,21 @@ final class SqliteVmIntentAdoption implements VmIntentAdoptionAction {
   final VmCommandRecord record;
   final TransactionalVmEffectRunner _effectRunner;
 
+  /// Proves a redelivery was checkpointed even after VM deletion. Owns a
+  /// read-only transaction so command, operation and checkpoint cannot drift.
+  static Future<bool> isDurablyAdopted({
+    required GaoVmDatabase database,
+    required VmCommandRecord record,
+  }) {
+    if (database.hasActiveCallerTransaction) {
+      throw StateError('adoption proof must own its transaction boundary');
+    }
+    return database.transaction((_) async {
+      final validated = await _readDurableIntent(database, record);
+      return validated.revision <= validated.applied;
+    });
+  }
+
   @override
   Future<VmIntentAdoption> commit(VmControllerState executionState) {
     if (_database.hasActiveCallerTransaction) {
@@ -35,60 +50,17 @@ final class SqliteVmIntentAdoption implements VmIntentAdoptionAction {
       throw ArgumentError('intent does not belong to this controller');
     }
     return _database.transaction((db) async {
-      final commandRows = db.select(
-        'SELECT key, payload_json FROM outbox WHERE topic = ? AND id = ?',
-        [vmCommandOutboxTopic, record.id],
-      );
-      if (commandRows.isEmpty) throw StateError('durable command is missing');
-      final envelope = jsonDecode(commandRows.single['payload_json'] as String);
-      if (envelope is! Map<String, dynamic> ||
-          envelope['version'] is! int ||
-          envelope['version'] != 1 ||
-          envelope['vm_id'] != record.vmId.value ||
-          commandRows.single['key'] != record.vmId.value ||
-          envelope['operation_id'] != record.operationId.value ||
-          envelope['action'] != record.action.name ||
-          envelope['payload'] is! Map<String, dynamic>) {
-        throw StateError('durable command correlation is invalid');
-      }
-      final payload = envelope['payload'] as Map<String, dynamic>;
-      final revision = _positiveInt(payload['intent_revision']);
-      final generation = _positiveInt(payload['spec_generation']);
-      final source = _sourceCommand(record);
-      final desired = switch (record.action) {
-        VmCommandAction.start || VmCommandAction.restart => 'running',
-        _ => 'stopped',
-      };
-      if (payload['desired_state'] != desired) {
-        throw StateError(
-          'durable command desired state contradicts its action',
-        );
-      }
-      final vmRows = db.select(
-        '''SELECT v.intent_revision, v.deleted_at, r.applied_intent_revision
-        FROM vms v JOIN vm_runtime r ON r.vm_id = v.id WHERE v.id = ?''',
-        [record.vmId.value],
-      );
-      if (vmRows.isEmpty) throw VmNotFoundException(record.vmId);
-      final vm = vmRows.single;
-      final applied = vm['applied_intent_revision'] as int;
-      if (applied > (vm['intent_revision'] as int)) {
-        throw StateError('durable checkpoint exceeds accepted intent');
-      }
+      final validated = await _readDurableIntent(_database, record);
+      final revision = validated.revision;
+      final generation = validated.generation;
+      final applied = validated.applied;
+      final source = validated.source;
+      final operation = validated.operation;
+      final operations = SqliteOperationRepository(_database);
       if (applied != executionState.appliedIntentRevision) {
         throw StateError(
           'controller execution disagrees with durable checkpoint',
         );
-      }
-      final operations = SqliteOperationRepository(_database);
-      final operation = await operations.get(record.operationId);
-      if (operation == null ||
-          operation.resourceType != ResourceType.virtualMachine ||
-          operation.resourceId != record.vmId ||
-          operation.type != 'vm.${record.action.name}' ||
-          operation.request.toJson()['intent_revision'] != revision ||
-          operation.request.toJson()['spec_generation'] != generation) {
-        throw StateError('durable command operation correlation is invalid');
       }
       if (revision <= applied) {
         return _unchanged(
@@ -96,11 +68,10 @@ final class SqliteVmIntentAdoption implements VmIntentAdoptionAction {
           VmIntentAdoptionDisposition.duplicate,
         );
       }
-      if (revision != applied + 1 ||
-          revision > (vm['intent_revision'] as int)) {
+      if (revision != applied + 1 || revision > validated.accepted) {
         throw StateError('intent adoption must follow consecutive revisions');
       }
-      if (vm['deleted_at'] != null) throw VmNotFoundException(record.vmId);
+      if (validated.deleted) throw VmNotFoundException(record.vmId);
 
       final current = executionState.currentOperation;
       final terminal = _isTerminal(operation.state);
@@ -218,6 +189,92 @@ final class SqliteVmIntentAdoption implements VmIntentAdoptionAction {
     });
   }
 }
+
+Future<
+  ({
+    int revision,
+    int generation,
+    int applied,
+    int accepted,
+    bool deleted,
+    Operation operation,
+    VmCommand source,
+  })
+>
+_readDurableIntent(
+  GaoVmDatabase database,
+  VmCommandRecord record,
+) => database.read((db) async {
+  final commandRows = db.select(
+    'SELECT key, payload_json FROM outbox WHERE topic = ? AND id = ?',
+    [vmCommandOutboxTopic, record.id],
+  );
+  if (commandRows.isEmpty) throw StateError('durable command is missing');
+  final envelope = jsonDecode(commandRows.single['payload_json'] as String);
+  if (envelope is! Map<String, dynamic> ||
+      envelope['version'] is! int ||
+      envelope['version'] != 1 ||
+      envelope['vm_id'] != record.vmId.value ||
+      commandRows.single['key'] != record.vmId.value ||
+      envelope['operation_id'] != record.operationId.value ||
+      envelope['action'] != record.action.name ||
+      envelope['payload'] is! Map<String, dynamic>) {
+    throw StateError('durable command correlation is invalid');
+  }
+  final payload = envelope['payload'] as Map<String, dynamic>;
+  final revision = _positiveInt(payload['intent_revision']);
+  final generation = _positiveInt(payload['spec_generation']);
+  if (JsonObjectValue.fromJson(payload) != record.payload) {
+    throw StateError('delivered command payload differs from durable intent');
+  }
+  final source = _sourceCommand(record);
+  final desired = switch (record.action) {
+    VmCommandAction.start || VmCommandAction.restart => 'running',
+    _ => 'stopped',
+  };
+  if (payload['desired_state'] != desired) {
+    throw StateError('durable command desired state contradicts its action');
+  }
+  final vmRows = db.select(
+    '''SELECT v.intent_revision, v.deleted_at, r.applied_intent_revision
+      FROM vms v JOIN vm_runtime r ON r.vm_id = v.id WHERE v.id = ?''',
+    [record.vmId.value],
+  );
+  if (vmRows.isEmpty) throw VmNotFoundException(record.vmId);
+  final vm = vmRows.single;
+  final applied = vm['applied_intent_revision'] as int;
+  if (applied < 0 ||
+      applied > (vm['intent_revision'] as int) ||
+      revision > (vm['intent_revision'] as int)) {
+    throw StateError('durable checkpoint exceeds accepted intent');
+  }
+  final operations = SqliteOperationRepository(database);
+  final operation = await operations.get(record.operationId);
+  if (operation == null ||
+      operation.resourceType != ResourceType.virtualMachine ||
+      operation.resourceId != record.vmId ||
+      operation.type != 'vm.${record.action.name}' ||
+      operation.request.toJson()['intent_revision'] != revision ||
+      operation.request.toJson()['spec_generation'] != generation) {
+    throw StateError('durable command operation correlation is invalid');
+  }
+
+  final specs = db.select(
+    'SELECT spec_json FROM vm_specs WHERE vm_id = ? AND generation = ?',
+    [record.vmId.value, generation],
+  );
+  if (specs.isEmpty) throw StateError('pinned intent spec is missing');
+  VmSpec.fromJson(jsonDecode(specs.single['spec_json'] as String));
+  return (
+    revision: revision,
+    generation: generation,
+    applied: applied,
+    accepted: vm['intent_revision'] as int,
+    deleted: vm['deleted_at'] != null,
+    operation: operation,
+    source: source,
+  );
+});
 
 VmIntentAdoption _unchanged(
   VmControllerState state,

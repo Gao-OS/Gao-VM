@@ -86,6 +86,90 @@ void main() {
   }
 
   test(
+    'durable adoption proof is read-only for pending, adopted and tombstoned VMs',
+    () async {
+      await accept(VmLifecycleAction.stop);
+      final claimed = await claim();
+      Future<bool> proof() => SqliteVmIntentAdoption.isDurablyAdopted(
+        database: database,
+        record: claimed.record,
+      );
+      expect(await proof(), isFalse);
+      expect(await adopt(claimed), VmIntentAdoptionDisposition.adopted);
+      await controller.waitUntilIdle();
+      expect(await proof(), isTrue);
+      await database.transaction(
+        (db) => db.execute(
+          "UPDATE vms SET deleted_at = '2026-09-07T00:00:00.000000Z' WHERE id = ?",
+          [vm.metadata.id.value],
+        ),
+      );
+      final before = await database.read(
+        (db) => [
+          db.select('SELECT * FROM vm_runtime').single.values.toList(),
+          db.select('SELECT * FROM operations').single.values.toList(),
+          db.select('SELECT COUNT(*) AS n FROM events').single['n'],
+          db.select('SELECT COUNT(*) AS n FROM outbox').single['n'],
+        ],
+      );
+      expect(await proof(), isTrue);
+      final after = await database.read(
+        (db) => [
+          db.select('SELECT * FROM vm_runtime').single.values.toList(),
+          db.select('SELECT * FROM operations').single.values.toList(),
+          db.select('SELECT COUNT(*) AS n FROM events').single['n'],
+          db.select('SELECT COUNT(*) AS n FROM outbox').single['n'],
+        ],
+      );
+      expect(after, before);
+      await database.transaction((_) async {
+        await expectLater(proof, throwsStateError);
+      });
+    },
+  );
+
+  test(
+    'adoption proof rejects corrupt correlation and unknown durable records',
+    () async {
+      await accept(VmLifecycleAction.stop);
+      final claimed = await claim();
+      expect(await adopt(claimed), VmIntentAdoptionDisposition.adopted);
+      await controller.waitUntilIdle();
+      final mutations = [
+        'DELETE FROM outbox WHERE id = ${claimed.record.id}',
+        "UPDATE outbox SET key = 'wrong' WHERE topic = 'vm.commands'",
+        "UPDATE outbox SET payload_json = json_set(payload_json, '\$.version', 2) WHERE topic = 'vm.commands'",
+        "UPDATE outbox SET payload_json = json_set(payload_json, '\$.payload.intent_revision', 0) WHERE topic = 'vm.commands'",
+        "UPDATE outbox SET payload_json = json_set(payload_json, '\$.payload.desired_state', 'running') WHERE topic = 'vm.commands'",
+        "UPDATE operations SET request_json = json_set(request_json, '\$.spec_generation', 99)",
+        "UPDATE operations SET resource_id = 'vm_00000000000000000000000000'",
+        'UPDATE vm_runtime SET applied_intent_revision = 2',
+        'DELETE FROM vm_specs',
+      ];
+      for (final sql in mutations) {
+        // Mutate isolated catalog copies outside the proof's transaction.
+        final copyPath =
+            '${directory.path}/corrupt-${mutations.indexOf(sql)}.db';
+        await database.read((db) => db.execute('VACUUM INTO ?', [copyPath]));
+        final corrupted = await GaoVmDatabase.open(copyPath);
+        try {
+          await corrupted.transaction((db) => db.execute(sql));
+          await expectLater(
+            () => SqliteVmIntentAdoption.isDurablyAdopted(
+              database: corrupted,
+              record: claimed.record,
+            ),
+            throwsA(anyOf(isA<StateError>(), isA<FormatException>())),
+            reason: sql,
+          );
+        } finally {
+          corrupted.close();
+        }
+      }
+    },
+  );
+
+  test(
     'running no-op start checkpoints its operation without replacing the live driver identity',
     () async {
       final original = await accept(VmLifecycleAction.start);
