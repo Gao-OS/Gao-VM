@@ -4,16 +4,6 @@ import XCTest
 @testable import vz_macos
 
 final class RuntimeCommandDispatcherTests: XCTestCase {
-  func testLiveProtocolSurfaceRemainsV12() {
-    XCTAssertEqual(DriverProtocol.protocolVersion, "gaovm.v1.2")
-    XCTAssertEqual(
-      DriverProtocol.capabilities,
-      [
-        "hello", "ping", "vm.configure", "vm.start", "vm.stop", "vm.status", "open_display",
-        "close_display",
-      ])
-  }
-
   func testLifecycleCommandsRunInSubmissionOrder() {
     let runtime = ControllableRuntime()
     let dispatcher = RuntimeCommandDispatcher(runtime: runtime)
@@ -231,6 +221,7 @@ final class RuntimeCommandDispatcherTests: XCTestCase {
 }
 
 private final class ControllableRuntime: RuntimeServicing {
+  func setOperationContext(_ operationID: String?) {}
   private let condition = NSCondition()
   private var calls: [String] = []
   private var completions: [RuntimeCompletion] = []

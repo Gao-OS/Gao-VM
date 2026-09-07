@@ -475,6 +475,9 @@ enum RuntimeDriverErrorCode {
   driverInternalError,
   capabilityMismatch,
   generationMismatch,
+  protocolViolation,
+  authenticationFailed,
+  displayUnavailable,
   cancelled,
 }
 
@@ -596,6 +599,13 @@ final class RuntimeDriverWarning extends RuntimeEvent {
   final String code;
   final String message;
   final JsonObjectValue? details;
+}
+
+final class RuntimeHeartbeatMissed extends RuntimeEvent {
+  const RuntimeHeartbeatMissed({
+    required super.correlation,
+    required super.occurredAt,
+  });
 }
 
 enum RuntimeDriverLogStream { stdout, stderr, serial }

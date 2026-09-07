@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ffi';
 import 'dart:io';
 
 import 'package:gaovmd/gaovmd.dart';
@@ -53,6 +54,41 @@ void main() {
         expect(s['vmState'], 'stopped');
         expect(s['actual'], 'stopped');
       });
+
+      test(
+        'real Swift binary retains exact transitional v1.2 launch',
+        () async {
+          final target = switch (Abi.current()) {
+            Abi.macosArm64 => 'arm64-apple-macosx',
+            Abi.macosX64 => 'x86_64-apple-macosx',
+            _ => null,
+          };
+          if (target == null) {
+            markTestSkipped('Swift VZ driver is only built on macOS');
+            return;
+          }
+          final binary = File(
+            '${Directory.current.path}/../../drivers/vz_macos/'
+            '.build/$target/debug/gaovm-driver-vz',
+          );
+          if (!await binary.exists()) {
+            markTestSkipped('build drivers/vz_macos before integration test');
+            return;
+          }
+          final supervisor = DriverSupervisor(
+            driverBinary: binary.absolute.path,
+            stateDir: tempDir.path,
+          );
+          addTearDown(supervisor.dispose);
+
+          await supervisor.start();
+
+          final status = supervisor.status();
+          expect(status['driverActual'], 'running', reason: '$status');
+          expect(status['vmState'], 'not_created');
+          expect(status['actual'], 'stopped');
+        },
+      );
 
       test('tracks VM state from driver RPC responses', () async {
         final fixturePath =

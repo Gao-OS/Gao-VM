@@ -5,6 +5,15 @@ import Virtualization
 import Darwin
 
 struct Config {
+    let vmId: DriverProtocolV2.VMID
+    let generation: Int
+    let socketPath: String
+    let bundlePath: String
+    let authToken: String
+    let logPath: String
+}
+
+struct LegacyConfig {
     let socketPath: String
     let authToken: String
     let logPath: String
@@ -104,13 +113,13 @@ final class UnixSocket: SocketWriteTransport {
 final class UnixListener {
     private(set) var fd: Int32 = -1
     private let path: String
+    private var boundIdentity: UnixSocketIdentity?
 
     init(path: String) {
         self.path = path
     }
 
     func bindAndListen() throws {
-        unlink(path)
         fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else {
             throw DriverError.socketBind("socket() failed: \(String(cString: strerror(errno)))")
@@ -139,6 +148,7 @@ final class UnixListener {
             close()
             throw DriverError.socketBind("bind() failed: \(err)")
         }
+        boundIdentity = socketIdentity(at: path)
         guard Darwin.listen(fd, 16) == 0 else {
             let err = String(cString: strerror(errno))
             close()
@@ -159,14 +169,28 @@ final class UnixListener {
             Darwin.close(fd)
             fd = -1
         }
-        unlink(path)
+        if let boundIdentity, socketIdentity(at: path) == boundIdentity {
+            unlink(path)
+        }
+        boundIdentity = nil
     }
 
     deinit { close() }
 }
 
+private struct UnixSocketIdentity: Equatable {
+    let device: dev_t
+    let inode: ino_t
+}
+
+private func socketIdentity(at path: String) -> UnixSocketIdentity? {
+    var status = stat()
+    guard lstat(path, &status) == 0 else { return nil }
+    return UnixSocketIdentity(device: status.st_dev, inode: status.st_ino)
+}
+
 final class DriverSession {
-    let config: Config
+    let config: LegacyConfig
     let logger: RotatingLogger
     private let vmRuntime: VzRuntime
     private lazy var runtimeDispatcher = RuntimeCommandDispatcher(runtime: vmRuntime) { [weak self] error in
@@ -183,7 +207,7 @@ final class DriverSession {
     var lastAuthenticatedDaemonRPC = Date()
     private var fatalError: Error?
 
-    init(config: Config, logger: RotatingLogger) {
+    init(config: LegacyConfig, logger: RotatingLogger) {
         self.config = config
         self.logger = logger
         self.vmRuntime = VzRuntime(logger: logger)
@@ -235,9 +259,7 @@ final class DriverSession {
     private func readFrame() throws -> [String: Any] {
         guard let socket else { throw DriverError.io("no control socket") }
         let header = try socket.readExact(4, context: "frame header")
-        let length = header.withUnsafeBytes { rawBuf -> UInt32 in
-            rawBuf.load(as: UInt32.self).bigEndian
-        }
+        let length = header.reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
         if length == 0 {
             throw DriverError.protocolViolation("zero-length frame not allowed")
         }

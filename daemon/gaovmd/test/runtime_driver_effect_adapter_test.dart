@@ -225,41 +225,44 @@ void main() {
     );
   });
 
-  test(
-    'late old-generation events retain their original correlation',
-    () async {
-      final scheduler = ManualRuntimeScheduler();
-      final factory = FakeRuntimeDriverFactory(scheduler: scheduler);
-      final commands = <VmCommand>[];
-      final adapter = RuntimeDriverEffectAdapter(
-        factory: factory,
-        resolveConfiguration: (_) async => _configuration,
-        dispatch: (_, command) async => commands.add(command),
-      );
-      addTearDown(adapter.close);
-      final state = _state(_vm1);
-      await adapter.spawn(state, _operation1, 1);
-      await adapter.spawn(state, _operation2, 2);
-      final oldCorrelation = DriverCorrelation(
-        vmId: _vm1,
-        driverGeneration: 1,
-        operationId: _operation1,
-      );
+  test('one VM cannot install a second active driver generation', () async {
+    final scheduler = ManualRuntimeScheduler();
+    final factory = FakeRuntimeDriverFactory(scheduler: scheduler);
+    final commands = <VmCommand>[];
+    final adapter = RuntimeDriverEffectAdapter(
+      factory: factory,
+      resolveConfiguration: (_) async => _configuration,
+      dispatch: (_, command) async => commands.add(command),
+    );
+    addTearDown(adapter.close);
+    final state = _state(_vm1);
+    await adapter.spawn(state, _operation1, 1);
+    final oldCorrelation = DriverCorrelation(
+      vmId: _vm1,
+      driverGeneration: 1,
+      operationId: _operation1,
+    );
 
-      final oldControl = factory.controlFor(oldCorrelation);
-      oldControl.crash();
-      oldControl.emitState(RuntimeDriverState.running, late: true);
-      await Future<void>.value();
-      await adapter.waitUntilEventsDispatched();
+    await expectLater(
+      adapter.spawn(state, _operation2, 2),
+      throwsA(isA<VmEffectException>()),
+    );
 
-      expect(commands.whereType<DriverExited>().single.driverGeneration, 1);
-      final late = commands.whereType<VmStateChanged>().single;
-      expect(late.driverGeneration, 1);
-      expect(late.operationId, _operation1);
-      expect(adapter.activeSessionCount, 1);
-      expect(factory.activeSessionCount, 1);
-    },
-  );
+    final oldControl = factory.controlFor(oldCorrelation);
+    oldControl.crash();
+    oldControl.emitState(RuntimeDriverState.running, late: true);
+    await Future<void>.value();
+    await adapter.waitUntilEventsDispatched();
+
+    expect(commands.whereType<DriverExited>().single.driverGeneration, 1);
+    final late = commands.whereType<VmStateChanged>().single;
+    expect(late.driverGeneration, 1);
+    expect(late.operationId, _operation1);
+    expect(adapter.activeSessionCount, 0);
+    expect(factory.activeSessionCount, 0);
+    await adapter.spawn(state, _operation2, 2);
+    expect(adapter.activeSessionCount, 1);
+  });
 
   test('foreign event, log, and exit correlations are contained', () async {
     final scheduler = ManualRuntimeScheduler();
@@ -273,12 +276,12 @@ void main() {
       observeLog: logs.add,
     );
     addTearDown(adapter.close);
-    final state = _state(_vm1);
-    for (var generation = 1; generation <= 3; generation++) {
-      await adapter.spawn(state, _operation1, generation);
+    final sessions = [(_vm1, 1), (_vm2, 2), (_vm3, 3)];
+    for (final (vmId, generation) in sessions) {
+      await adapter.spawn(_state(vmId), _operation1, generation);
     }
     final foreign = DriverCorrelation(
-      vmId: _vm2,
+      vmId: _vm4,
       driverGeneration: 99,
       operationId: _operation2,
     );
@@ -301,7 +304,7 @@ void main() {
     factory
         .controlFor(
           DriverCorrelation(
-            vmId: _vm1,
+            vmId: _vm2,
             driverGeneration: 2,
             operationId: _operation1,
           ),
@@ -316,7 +319,7 @@ void main() {
     factory
         .controlFor(
           DriverCorrelation(
-            vmId: _vm1,
+            vmId: _vm3,
             driverGeneration: 3,
             operationId: _operation1,
           ),
@@ -395,9 +398,9 @@ void main() {
         dispatch: (_, command) async => commands.add(command),
       );
       addTearDown(adapter.close);
-      final state = _state(_vm1);
-      for (var generation = 1; generation <= 3; generation++) {
-        await adapter.spawn(state, _operation1, generation);
+      final sessions = [(_vm1, 1), (_vm2, 2), (_vm3, 3)];
+      for (final (vmId, generation) in sessions) {
+        await adapter.spawn(_state(vmId), _operation1, generation);
       }
 
       await factory
@@ -412,7 +415,7 @@ void main() {
       factory
           .controlFor(
             DriverCorrelation(
-              vmId: _vm1,
+              vmId: _vm2,
               driverGeneration: 2,
               operationId: _operation1,
             ),
@@ -421,7 +424,7 @@ void main() {
       factory
           .controlFor(
             DriverCorrelation(
-              vmId: _vm1,
+              vmId: _vm3,
               driverGeneration: 3,
               operationId: _operation1,
             ),
@@ -478,7 +481,7 @@ void main() {
   );
 
   test(
-    'failed terminal dispatch is surfaced and prevents cleanup or leapfrog',
+    'failed terminal dispatch is surfaced and releases driver ownership',
     () async {
       final scheduler = ManualRuntimeScheduler();
       final factory = FakeRuntimeDriverFactory(scheduler: scheduler);
@@ -508,15 +511,14 @@ void main() {
       );
 
       expect(dispatchAttempts, 1);
-      expect(adapter.activeSessionCount, 1);
-      expect(factory.activeSessionCount, 1);
-      control.emitState(RuntimeDriverState.running, late: true);
+      expect(adapter.activeSessionCount, 0);
+      expect(factory.activeSessionCount, 0);
       await expectLater(
         adapter.waitUntilEventsDispatched(),
         throwsA(isA<RuntimeDriverDispatchException>()),
       );
       expect(dispatchAttempts, 1);
-      expect(adapter.activeSessionCount, 1);
+      expect(adapter.activeSessionCount, 0);
 
       await adapter.close();
       expect(factory.activeSessionCount, 0);
@@ -524,7 +526,7 @@ void main() {
   );
 
   test(
-    'failed nonterminal dispatch puts the session in surfaced fail-stop mode',
+    'failed nonterminal dispatch is surfaced and releases the session',
     () async {
       final scheduler = ManualRuntimeScheduler();
       final factory = FakeRuntimeDriverFactory(scheduler: scheduler);
@@ -554,7 +556,8 @@ void main() {
       );
 
       expect(dispatchAttempts, 1);
-      expect(adapter.activeSessionCount, 1);
+      expect(adapter.activeSessionCount, 0);
+      expect(factory.activeSessionCount, 0);
       await adapter.close();
     },
   );
@@ -628,6 +631,8 @@ VmControllerState _state(VmId vmId) => VmControllerState.initial(
 
 final _vm1 = VmId('vm_01J00000000000000000000000');
 final _vm2 = VmId('vm_01J00000000000000000000002');
+final _vm3 = VmId('vm_01J00000000000000000000003');
+final _vm4 = VmId('vm_01J00000000000000000000004');
 final _operation1 = OperationId('op_01J00000000000000000000001');
 final _operation2 = OperationId('op_01J00000000000000000000002');
 

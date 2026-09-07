@@ -15,8 +15,10 @@ final class VzRuntime: RuntimeServicing {
   private let eventNow: () -> Date
   private let eventDelivery: RuntimeEventDelivery
   private var eventGeneration: RuntimeEventGeneration
-  var config: [String: Any]?
+  var config: NormalizedVmConfig?
   private var isTearingDown = false
+  private var currentOperationID: String?
+  var serialController: SerialController?
   #if canImport(Virtualization)
     var virtualMachine: VZVirtualMachine?
   #endif
@@ -42,24 +44,50 @@ final class VzRuntime: RuntimeServicing {
     eventGeneration = RuntimeEventGeneration(queue: queue, now: now, delivery: delivery)
   }
 
-  func configure(with config: [String: Any], completion: @escaping RuntimeCompletion) {
+  init(
+    logger: RotatingLogger,
+    queue: VzRuntimeQueue = VzRuntimeQueue(),
+    now: @escaping () -> Date = Date.init,
+    eventEnvelopeSink: @escaping RuntimeEventEnvelopeSink
+  ) {
+    self.logger = logger
+    vzRuntimeQueue = queue
+    stopCoordinator = RuntimeStopCoordinator(queue: queue)
+    delegateLifetime = VzDelegateLifetime(queue: queue)
+    eventNow = now
+    let delivery = RuntimeEventDelivery(envelopeSink: eventEnvelopeSink)
+    eventDelivery = delivery
+    eventGeneration = RuntimeEventGeneration(queue: queue, now: now, delivery: delivery)
+  }
+
+  func setOperationContext(_ operationID: String?) {
     vzRuntimeQueue.async {
-      do {
-        _ = try self.normalizedConfig(config)
-        self.config = config
-        #if canImport(Virtualization)
-          let currentRuntimeState = self.virtualMachine.map {
-            runtimeObservedState(from: $0.state)
-          }
-        #else
-          let currentRuntimeState: RuntimeObservedState? = nil
-        #endif
-        self.eventGeneration.observeConfiguration(currentRuntimeState: currentRuntimeState)
-        self.logger.log(.info, "vm configured")
-        completion(.success(self.statusLocked()))
-      } catch {
-        completion(.failure(error))
-      }
+      self.currentOperationID = operationID
+      self.eventGeneration.setOperationID(operationID)
+    }
+  }
+
+  func configure(with config: [String: Any], completion: @escaping RuntimeCompletion) {
+    do {
+      configure(with: try normalizedConfig(config), completion: completion)
+    } catch {
+      completion(.failure(error))
+    }
+  }
+
+  func configure(with config: NormalizedVmConfig, completion: @escaping RuntimeCompletion) {
+    vzRuntimeQueue.async {
+      self.config = config
+      #if canImport(Virtualization)
+        let currentRuntimeState = self.virtualMachine.map {
+          runtimeObservedState(from: $0.state)
+        }
+      #else
+        let currentRuntimeState: RuntimeObservedState? = nil
+      #endif
+      self.eventGeneration.observeConfiguration(currentRuntimeState: currentRuntimeState)
+      self.logger.log(.info, "vm configured")
+      completion(.success(self.statusLocked()))
     }
   }
 
@@ -76,7 +104,7 @@ final class VzRuntime: RuntimeServicing {
           return
         }
         do {
-          let spec = try self.normalizedConfig(config)
+          let spec = config
           if let vm = self.virtualMachine {
             switch vm.state {
             case .running, .starting, .pausing, .paused, .resuming, .stopping, .saving,
@@ -93,7 +121,11 @@ final class VzRuntime: RuntimeServicing {
 
           self.beginRuntimeGenerationLocked()
           let eventGeneration = self.eventGeneration
-          try self.ensureSparseDisk(spec.diskPath, sizeMiB: spec.diskSizeMiB)
+          for disk in spec.disks {
+            if let sizeMiB = disk.createSizeMiB {
+              try self.ensureSparseDisk(disk.path, sizeMiB: sizeMiB)
+            }
+          }
           let vmConfig = try self.buildConfiguration(spec)
           let vm = VZVirtualMachine(
             configuration: vmConfig, queue: self.vzRuntimeQueue.dispatchQueue)
@@ -168,6 +200,20 @@ final class VzRuntime: RuntimeServicing {
       completion: completion)
   }
 
+  func stop(
+    gracePeriod: TimeInterval,
+    forceAfterTimeout: Bool,
+    completion: @escaping RuntimeCompletion
+  ) {
+    stop(
+      gracePeriod: gracePeriod,
+      forceTimeout: 5,
+      allowGracefulStop: true,
+      allowForceStop: forceAfterTimeout,
+      errorClassification: .stopFailed,
+      completion: completion)
+  }
+
   func kill(completion: @escaping RuntimeCompletion) {
     stop(
       gracePeriod: 0,
@@ -180,6 +226,13 @@ final class VzRuntime: RuntimeServicing {
   func status(completion: @escaping RuntimeCompletion) {
     vzRuntimeQueue.async {
       completion(.success(self.statusLocked()))
+    }
+  }
+
+  func flushSerialOutput() {
+    vzRuntimeQueue.sync {
+      serialController?.close()
+      serialController = nil
     }
   }
 
@@ -204,6 +257,7 @@ final class VzRuntime: RuntimeServicing {
     gracePeriod: TimeInterval,
     forceTimeout: TimeInterval,
     allowGracefulStop: Bool = true,
+    allowForceStop: Bool = true,
     errorClassification: RuntimeErrorClassification,
     completion: @escaping RuntimeCompletion
   ) {
@@ -215,6 +269,12 @@ final class VzRuntime: RuntimeServicing {
           return
         }
         guard let vm = self.virtualMachine else {
+          if allowGracefulStop {
+            self.eventGeneration.observeTerminalCleanShutdown(
+              state: .stopped, occurredAt: self.eventNow())
+          } else {
+            self.eventGeneration.observeState(.stopped)
+          }
           completion(.success(self.statusLocked()))
           return
         }
@@ -232,6 +292,7 @@ final class VzRuntime: RuntimeServicing {
         self.stopCoordinator.stop(
           gracePeriod: gracePeriod,
           forceTimeout: forceTimeout,
+          allowForceStop: allowForceStop,
           state: { self.runtimeMachineState(vm.state) },
           canRequestStop: { allowGracefulStop && vm.canRequestStop },
           requestStop: {
@@ -288,6 +349,7 @@ final class VzRuntime: RuntimeServicing {
     releaseRuntimeGenerationLocked()
     eventGeneration = RuntimeEventGeneration(
       queue: vzRuntimeQueue, now: eventNow, delivery: eventDelivery)
+    eventGeneration.setOperationID(currentOperationID)
   }
 
   private func releaseRuntimeGenerationLocked() {
@@ -297,6 +359,8 @@ final class VzRuntime: RuntimeServicing {
     #endif
     delegateLifetime.release()
     eventGeneration.close()
+    serialController?.close()
+    serialController = nil
     #if canImport(Virtualization)
       virtualMachine = nil
     #endif

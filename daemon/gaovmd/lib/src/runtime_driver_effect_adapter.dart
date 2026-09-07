@@ -63,6 +63,8 @@ final class RuntimeDriverEffectAdapter
   final DateTime Function() _now;
   final Map<_RuntimeDriverKey, _RuntimeDriverRecord> _records = {};
   final Map<_RuntimeDriverKey, _InFlightSpawn> _inFlightSpawns = {};
+  final Map<VmId, _RuntimeDriverKey> _activeByVm = {};
+  RuntimeDriverDispatchException? _dispatchFailure;
   bool _closed = false;
   Future<void>? _closeFuture;
 
@@ -84,7 +86,9 @@ final class RuntimeDriverEffectAdapter
       operationId: operationId,
     );
     final key = _RuntimeDriverKey(state.vmId, driverGeneration);
-    if (_records.containsKey(key) || _inFlightSpawns.containsKey(key)) {
+    if (_activeByVm.containsKey(state.vmId) ||
+        _records.containsKey(key) ||
+        _inFlightSpawns.containsKey(key)) {
       throw VmEffectException(
         _operationError(
           RuntimeDriverError(
@@ -99,6 +103,7 @@ final class RuntimeDriverEffectAdapter
       RuntimeDriverLaunch(correlation: correlation),
     );
     _inFlightSpawns[key] = _InFlightSpawn(correlation, spawnFuture);
+    _activeByVm[state.vmId] = key;
     try {
       final session = await spawnFuture;
       if (_closed) {
@@ -136,6 +141,9 @@ final class RuntimeDriverEffectAdapter
       final pending = _inFlightSpawns[key];
       if (pending != null && identical(pending.future, spawnFuture)) {
         _inFlightSpawns.remove(key);
+      }
+      if (!_records.containsKey(key) && _activeByVm[state.vmId] == key) {
+        _activeByVm.remove(state.vmId);
       }
     }
   }
@@ -239,6 +247,8 @@ final class RuntimeDriverEffectAdapter
             identical(entry.key.dispatchTail, entry.value),
       );
       if (stable) {
+        final adapterFailure = _dispatchFailure;
+        if (adapterFailure != null) throw adapterFailure;
         for (final record in _records.values) {
           final failure = record.dispatchFailure;
           if (failure != null) throw failure;
@@ -265,6 +275,7 @@ final class RuntimeDriverEffectAdapter
     }
     final records = List<_RuntimeDriverRecord>.of(_records.values);
     _records.clear();
+    _activeByVm.clear();
     for (final record in records) {
       record.terminalReported = true;
       await record.eventSubscription?.cancel();
@@ -344,6 +355,14 @@ final class RuntimeDriverEffectAdapter
         record.cleanShutdownObserved = true;
       case RuntimeErrorEvent(:final error):
         record.runtimeError = error;
+      case RuntimeHeartbeatMissed():
+        _enqueue(
+          record,
+          HeartbeatMissed(
+            operationId: _eventOperationId(record, event.correlation),
+            driverGeneration: event.correlation.driverGeneration,
+          ),
+        );
       case DisplayStateChanged() ||
           RuntimeConsoleReady() ||
           RuntimeGuestChannelReady() ||
@@ -439,7 +458,6 @@ final class RuntimeDriverEffectAdapter
     if (record.cleanupScheduled) return;
     record.cleanupScheduled = true;
     record.dispatchTail = record.dispatchTail.then((_) async {
-      if (record.dispatchFailure != null) return;
       await _cleanupRecord(record);
     });
   }
@@ -449,10 +467,13 @@ final class RuntimeDriverEffectAdapter
       record.session.correlation.vmId,
       record.session.correlation.driverGeneration,
     );
-    if (identical(_records[key], record)) _records.remove(key);
     await record.eventSubscription?.cancel();
     await record.logSubscription?.cancel();
     await _factory.release(record.session.correlation);
+    if (identical(_records[key], record)) _records.remove(key);
+    if (_activeByVm[record.session.correlation.vmId] == key) {
+      _activeByVm.remove(record.session.correlation.vmId);
+    }
   }
 
   void _enqueue(_RuntimeDriverRecord record, VmCommand command) {
@@ -462,13 +483,17 @@ final class RuntimeDriverEffectAdapter
       try {
         await _dispatch(record.session.correlation.vmId, command);
       } catch (error, stackTrace) {
-        record.dispatchFailure = RuntimeDriverDispatchException(
+        final failure = RuntimeDriverDispatchException(
           vmId: record.session.correlation.vmId,
           driverGeneration: record.session.correlation.driverGeneration,
           command: command,
           error: error,
           stackTrace: stackTrace,
         );
+        record.dispatchFailure = failure;
+        _dispatchFailure ??= failure;
+        record.terminalReported = true;
+        _scheduleCleanup(record);
       }
     });
   }
@@ -548,6 +573,9 @@ OperationError _operationError(RuntimeDriverError error) => OperationError(
     RuntimeDriverErrorCode.driverUnhealthy ||
     RuntimeDriverErrorCode.capabilityMismatch ||
     RuntimeDriverErrorCode.generationMismatch ||
+    RuntimeDriverErrorCode.protocolViolation ||
+    RuntimeDriverErrorCode.authenticationFailed ||
+    RuntimeDriverErrorCode.displayUnavailable ||
     RuntimeDriverErrorCode.cancelled => ErrorCode.driverUnhealthy,
     RuntimeDriverErrorCode.driverInternalError => ErrorCode.internalError,
   },

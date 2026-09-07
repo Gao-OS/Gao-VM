@@ -200,9 +200,9 @@ final class DriverProtocolV2Tests: XCTestCase {
     }
   }
 
-  func testV2ContractDoesNotSwitchLiveV12Adapter() {
+  func testV2IsTheLiveProtocolContract() {
     XCTAssertEqual(DriverProtocolV2.version, "gaovm.driver.v2")
-    XCTAssertEqual(DriverProtocol.protocolVersion, "gaovm.v1.2")
+    XCTAssertTrue(DriverProtocolV2.Capability.allCases.contains(.runtimeKill))
   }
 
   func testConstructsOnlyCanonicalResourceAndJSONRPCIDs() throws {

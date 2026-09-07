@@ -50,7 +50,7 @@ void main() {
       expect(harness.supervisor.startCallCount, 2);
     });
 
-    test('driver.exec is disabled by default', () async {
+    test('driver.exec is always unsupported', () async {
       final harness = await _TestHarness.start();
       addTearDown(harness.close);
 
@@ -64,7 +64,7 @@ void main() {
       final error = Map<String, Object?>.from(response['error']! as Map);
 
       expect(error['code'], JsonRpcErrorCode.methodNotFound);
-      expect(error['message'], contains('disabled'));
+      expect(error['message'], 'driver.exec is unsupported');
     });
 
     test('ping returns ok and timestamp', () async {

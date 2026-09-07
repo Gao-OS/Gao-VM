@@ -12,12 +12,32 @@ struct RuntimeDispatcherClosedError: Error, CustomStringConvertible {
 }
 
 protocol RuntimeServicing: AnyObject {
+  func setOperationContext(_ operationID: String?)
   func configure(with config: [String: Any], completion: @escaping RuntimeCompletion)
+  func configure(with config: NormalizedVmConfig, completion: @escaping RuntimeCompletion)
   func start(completion: @escaping RuntimeCompletion)
   func stop(completion: @escaping RuntimeCompletion)
+  func stop(
+    gracePeriod: TimeInterval,
+    forceAfterTimeout: Bool,
+    completion: @escaping RuntimeCompletion)
   func kill(completion: @escaping RuntimeCompletion)
   func status(completion: @escaping RuntimeCompletion)
   func shutdown(completion: @escaping RuntimeCompletion)
+}
+
+extension RuntimeServicing {
+  func configure(with config: NormalizedVmConfig, completion: @escaping RuntimeCompletion) {
+    completion(.failure(DriverError.invalidArgs("typed v2 configuration is unsupported")))
+  }
+
+  func stop(
+    gracePeriod: TimeInterval,
+    forceAfterTimeout: Bool,
+    completion: @escaping RuntimeCompletion
+  ) {
+    stop(completion: completion)
+  }
 }
 
 final class RuntimeCommandDispatcher {
@@ -62,21 +82,66 @@ final class RuntimeCommandDispatcher {
     fatalErrorHandler = onFatalError
   }
 
-  func configure(with config: [String: Any], completion: @escaping RuntimeCompletion) {
+  func configure(
+    with config: [String: Any], operationID: String? = nil,
+    completion: @escaping RuntimeCompletion
+  ) {
     enqueue(
-      { [runtime] in runtime.configure(with: config, completion: $0) }, completion: completion)
+      { [runtime] in
+        runtime.setOperationContext(operationID)
+        runtime.configure(with: config, completion: $0)
+      }, completion: completion)
   }
 
-  func start(completion: @escaping RuntimeCompletion) {
-    enqueue({ [runtime] in runtime.start(completion: $0) }, completion: completion)
+  func configure(
+    with config: NormalizedVmConfig, operationID: String? = nil,
+    completion: @escaping RuntimeCompletion
+  ) {
+    enqueue(
+      { [runtime] in
+        runtime.setOperationContext(operationID)
+        runtime.configure(with: config, completion: $0)
+      }, completion: completion)
   }
 
-  func stop(completion: @escaping RuntimeCompletion) {
-    enqueue({ [runtime] in runtime.stop(completion: $0) }, completion: completion)
+  func start(operationID: String? = nil, completion: @escaping RuntimeCompletion) {
+    enqueue(
+      { [runtime] in
+        runtime.setOperationContext(operationID)
+        runtime.start(completion: $0)
+      }, completion: completion)
   }
 
-  func kill(completion: @escaping RuntimeCompletion) {
-    enqueue({ [runtime] in runtime.kill(completion: $0) }, completion: completion)
+  func stop(operationID: String? = nil, completion: @escaping RuntimeCompletion) {
+    enqueue(
+      { [runtime] in
+        runtime.setOperationContext(operationID)
+        runtime.stop(completion: $0)
+      }, completion: completion)
+  }
+
+  func stop(
+    operationID: String? = nil,
+    gracePeriod: TimeInterval,
+    forceAfterTimeout: Bool,
+    completion: @escaping RuntimeCompletion
+  ) {
+    enqueue(
+      { [runtime] in
+        runtime.setOperationContext(operationID)
+        runtime.stop(
+          gracePeriod: gracePeriod,
+          forceAfterTimeout: forceAfterTimeout,
+          completion: $0)
+      }, completion: completion)
+  }
+
+  func kill(operationID: String? = nil, completion: @escaping RuntimeCompletion) {
+    enqueue(
+      { [runtime] in
+        runtime.setOperationContext(operationID)
+        runtime.kill(completion: $0)
+      }, completion: completion)
   }
 
   func status(completion: @escaping RuntimeCompletion) {

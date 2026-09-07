@@ -11,6 +11,13 @@ import 'vm_config_store.dart';
 
 typedef EventEmitter = void Function(String type, Map<String, Object?> payload);
 
+String _socketPeerLabel(Socket socket) {
+  if (socket.address.type == InternetAddressType.unix) {
+    return 'unix:${socket.address.address}';
+  }
+  return '${socket.remoteAddress.address}:${socket.remotePort}';
+}
+
 class AsyncMutex {
   Future<void> _tail = Future<void>.value();
 
@@ -53,8 +60,7 @@ class RestartWindowLimiter {
 }
 
 class RpcChannel {
-  RpcChannel(this.socket)
-    : _remote = '${socket.remoteAddress.address}:${socket.remotePort}' {
+  RpcChannel(this.socket) : _remote = _socketPeerLabel(socket) {
     _subscription = _codec
         .decodeObjectStream(socket)
         .listen(
@@ -1104,16 +1110,11 @@ class _ClientSession {
   _ClientSession({required this.server, required Socket socket})
     : channel = RpcChannel(socket);
 
-  static final bool _driverExecEnabled =
-      const bool.fromEnvironment('gaovm.enable_driver_exec') ||
-      Platform.environment['GAOVM_ENABLE_DRIVER_EXEC'] == '1';
-
   static const List<String> daemonCapabilities = [
     'hello',
     'ping',
     'subscribe_events',
     'doctor',
-    'driver.exec',
     'list_vms',
     'vm.start',
     'vm.stop',
@@ -1391,29 +1392,10 @@ class _ClientSession {
           result: await server.supervisor.doctor(),
         );
       case 'driver.exec':
-        if (!_driverExecEnabled) {
-          return JsonRpcProtocol.error(
-            id: id,
-            code: JsonRpcErrorCode.methodNotFound,
-            message:
-                'driver.exec is disabled (set GAOVM_ENABLE_DRIVER_EXEC=1 for debug use)',
-          );
-        }
-        final driverMethod = params['method']?.toString();
-        if (driverMethod == null || driverMethod.isEmpty) {
-          return JsonRpcProtocol.error(
-            id: id,
-            code: JsonRpcErrorCode.invalidParams,
-            message: 'driver.exec requires params.method',
-          );
-        }
-        final response = await server.supervisor.driverExec(
-          driverMethod,
-          params: params['params'],
-        );
-        return JsonRpcProtocol.result(
+        return JsonRpcProtocol.error(
           id: id,
-          result: {'method': driverMethod, 'driverResult': response['result']},
+          code: JsonRpcErrorCode.methodNotFound,
+          message: 'driver.exec is unsupported',
         );
       default:
         return JsonRpcProtocol.error(

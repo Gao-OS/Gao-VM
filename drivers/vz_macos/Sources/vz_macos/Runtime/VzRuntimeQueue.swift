@@ -70,6 +70,7 @@ final class RuntimeStopCoordinator {
   func stop(
     gracePeriod: TimeInterval,
     forceTimeout: TimeInterval,
+    allowForceStop: Bool = true,
     state: @escaping () -> RuntimeMachineState,
     canRequestStop: @escaping () -> Bool,
     requestStop: @escaping () throws -> Void,
@@ -81,6 +82,7 @@ final class RuntimeStopCoordinator {
       pollInterval: pollInterval,
       gracePeriod: gracePeriod,
       forceTimeout: forceTimeout,
+      allowForceStop: allowForceStop,
       state: state,
       canRequestStop: canRequestStop,
       requestStop: requestStop,
@@ -96,6 +98,7 @@ private final class RuntimeStopAttempt {
   private let pollInterval: TimeInterval
   private let gracePeriod: TimeInterval
   private let forceTimeout: TimeInterval
+  private let allowForceStop: Bool
   private let state: () -> RuntimeMachineState
   private let canRequestStop: () -> Bool
   private let requestStop: () throws -> Void
@@ -109,6 +112,7 @@ private final class RuntimeStopAttempt {
     pollInterval: TimeInterval,
     gracePeriod: TimeInterval,
     forceTimeout: TimeInterval,
+    allowForceStop: Bool,
     state: @escaping () -> RuntimeMachineState,
     canRequestStop: @escaping () -> Bool,
     requestStop: @escaping () throws -> Void,
@@ -119,6 +123,7 @@ private final class RuntimeStopAttempt {
     self.pollInterval = pollInterval
     self.gracePeriod = gracePeriod
     self.forceTimeout = forceTimeout
+    self.allowForceStop = allowForceStop
     self.state = state
     self.canRequestStop = canRequestStop
     self.requestStop = requestStop
@@ -164,6 +169,10 @@ private final class RuntimeStopAttempt {
   }
 
   private func beginForceStop() {
+    guard allowForceStop else {
+      finish(.failure(RuntimeLifecycleTimeoutError("vm did not stop before graceful deadline")))
+      return
+    }
     forceStop { error in
       self.queue.async {
         guard !self.finished else { return }

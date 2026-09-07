@@ -1,8 +1,7 @@
 import Foundation
 
-/// Typed representation of the internal `schemas/driver-protocol/v2.schema.json`
-/// contract. The live driver session intentionally remains on `gaovm.v1.2` until
-/// the multi-VM process manager switches both peers in PR 014.
+/// Typed representation of the live internal
+/// `schemas/driver-protocol/v2.schema.json` contract.
 enum DriverProtocolV2 {
   static let version = "gaovm.driver.v2"
 

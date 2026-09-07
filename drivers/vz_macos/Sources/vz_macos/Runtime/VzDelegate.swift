@@ -104,9 +104,8 @@ struct RuntimeEventError: Equatable {
   }
 }
 
-/// Process-local runtime observation. It intentionally has no VM or driver-generation
-/// correlation and must not be written to the live v1.2 session. PR 014 adapts it to a
-/// correlated `DriverProtocolV2.Event` after the v2 handshake establishes that context.
+/// Process-local runtime observation. The live session adds VM/generation and the
+/// operation context captured by `RuntimeEventEnvelope` before writing driver v2.
 enum RuntimeEvent: Equatable {
   case stateChanged(occurredAt: Date, state: RuntimeObservedState)
   case cleanShutdown(occurredAt: Date, state: RuntimeObservedState)
@@ -115,24 +114,40 @@ enum RuntimeEvent: Equatable {
 
 typealias RuntimeEventSink = (RuntimeEvent) -> Void
 
+struct RuntimeEventEnvelope: Equatable {
+  let event: RuntimeEvent
+  let operationID: String?
+}
+
+typealias RuntimeEventEnvelopeSink = (RuntimeEventEnvelope) -> Void
+
 /// Preserves observation order without executing arbitrary sink work on `vzRuntimeQueue`.
-/// PR 014's session adapter must weak-capture its session in the sink closure so the
+/// The session adapter weak-captures its session in the sink closure so the
 /// runtime, delivery queue, and session cannot form a retain cycle.
 final class RuntimeEventDelivery {
   private let queue: DispatchQueue
-  private let sink: RuntimeEventSink
+  private let sink: RuntimeEventEnvelopeSink
 
   init(
     label: String = "gaovm.driver.runtime-event-delivery",
     sink: @escaping RuntimeEventSink
   ) {
     queue = DispatchQueue(label: label, qos: .userInitiated)
-    self.sink = sink
+    self.sink = { sink($0.event) }
   }
 
-  func deliver(_ event: RuntimeEvent) {
+  init(
+    label: String = "gaovm.driver.runtime-event-delivery",
+    envelopeSink: @escaping RuntimeEventEnvelopeSink
+  ) {
+    queue = DispatchQueue(label: label, qos: .userInitiated)
+    sink = envelopeSink
+  }
+
+  func deliver(_ event: RuntimeEvent, operationID: String? = nil) {
+    let envelope = RuntimeEventEnvelope(event: event, operationID: operationID)
     queue.async {
-      self.sink(event)
+      self.sink(envelope)
     }
   }
 }
@@ -169,6 +184,7 @@ final class RuntimeEventGeneration {
   private var lastState: RuntimeObservedState?
   private var terminalEventWasObserved = false
   private var lifecycle = Lifecycle.active
+  private var operationID: String?
 
   init(
     queue: VzRuntimeQueue,
@@ -180,6 +196,11 @@ final class RuntimeEventGeneration {
     self.delivery = delivery
   }
 
+  func setOperationID(_ operationID: String?) {
+    queue.preconditionIsCurrent()
+    self.operationID = operationID
+  }
+
   convenience init(
     queue: VzRuntimeQueue,
     now: @escaping () -> Date = Date.init,
@@ -189,9 +210,10 @@ final class RuntimeEventGeneration {
   }
 
   func observeState(_ state: RuntimeObservedState) {
+    let capturedOperationID = queue.sync { operationID }
     queue.async {
       guard self.lifecycle == .active, !self.terminalEventWasObserved else { return }
-      self.emitStateIfChanged(state)
+      self.emitStateIfChanged(state, operationID: capturedOperationID)
     }
   }
 
@@ -206,6 +228,7 @@ final class RuntimeEventGeneration {
     state: RuntimeObservedState,
     occurredAt: Date
   ) {
+    let capturedOperationID = queue.sync { operationID }
     queue.async {
       guard self.lifecycle == .active, !self.terminalEventWasObserved else { return }
       self.emitError(
@@ -213,16 +236,21 @@ final class RuntimeEventGeneration {
         classification: classification,
         kind: kind,
         state: state,
-        occurredAt: occurredAt)
+        occurredAt: occurredAt,
+        operationID: capturedOperationID)
     }
   }
 
   func observeTerminalCleanShutdown(state: RuntimeObservedState, occurredAt: Date) {
+    let capturedOperationID = queue.sync { operationID }
     queue.async {
       guard self.lifecycle == .active, !self.terminalEventWasObserved else { return }
       self.terminalEventWasObserved = true
-      self.emitTerminalState(state, occurredAt: occurredAt)
-      self.delivery.deliver(.cleanShutdown(occurredAt: occurredAt, state: state))
+      self.emitTerminalState(
+        state, occurredAt: occurredAt, operationID: capturedOperationID)
+      self.delivery.deliver(
+        .cleanShutdown(occurredAt: occurredAt, state: state),
+        operationID: capturedOperationID)
     }
   }
 
@@ -231,16 +259,19 @@ final class RuntimeEventGeneration {
     state: RuntimeObservedState,
     occurredAt: Date
   ) {
+    let capturedOperationID = queue.sync { operationID }
     queue.async {
       guard self.lifecycle == .active, !self.terminalEventWasObserved else { return }
       self.terminalEventWasObserved = true
-      self.emitTerminalState(state, occurredAt: occurredAt)
+      self.emitTerminalState(
+        state, occurredAt: occurredAt, operationID: capturedOperationID)
       self.emitError(
         error,
         classification: .virtualMachineStopped,
         kind: .virtualization,
         state: state,
-        occurredAt: occurredAt)
+        occurredAt: occurredAt,
+        operationID: capturedOperationID)
     }
   }
 
@@ -258,16 +289,22 @@ final class RuntimeEventGeneration {
     }
   }
 
-  private func emitStateIfChanged(_ state: RuntimeObservedState) {
+  private func emitStateIfChanged(_ state: RuntimeObservedState, operationID: String?) {
     guard state != lastState else { return }
     lastState = state
-    delivery.deliver(.stateChanged(occurredAt: now(), state: state))
+    delivery.deliver(
+      .stateChanged(occurredAt: now(), state: state), operationID: operationID)
   }
 
-  private func emitTerminalState(_ state: RuntimeObservedState, occurredAt: Date) {
+  private func emitTerminalState(
+    _ state: RuntimeObservedState,
+    occurredAt: Date,
+    operationID: String?
+  ) {
     guard state != lastState else { return }
     lastState = state
-    delivery.deliver(.stateChanged(occurredAt: occurredAt, state: state))
+    delivery.deliver(
+      .stateChanged(occurredAt: occurredAt, state: state), operationID: operationID)
   }
 
   private func emitError(
@@ -275,7 +312,8 @@ final class RuntimeEventGeneration {
     classification: RuntimeErrorClassification,
     kind: RuntimeErrorKind,
     state: RuntimeObservedState,
-    occurredAt: Date
+    occurredAt: Date,
+    operationID: String?
   ) {
     let nsError = error as NSError
     delivery.deliver(
@@ -287,7 +325,8 @@ final class RuntimeEventGeneration {
           kind: kind,
           message: nsError.localizedDescription,
           domain: nsError.domain,
-          code: nsError.code)))
+          code: nsError.code)),
+      operationID: operationID)
   }
 }
 
