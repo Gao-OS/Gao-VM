@@ -22,6 +22,22 @@ abstract interface class CancellableVmEffectRunner implements VmEffectRunner {
   Future<void> cancel(VmEffect effect, VmControllerState state);
 }
 
+/// A short database-only acceptance transaction. It must commit the operation,
+/// catalog intent, command and event/outbox together before returning.
+abstract interface class VmAcceptanceAction<T> {
+  Future<VmAcceptedIntent<T>> commit(VmControllerState executionState);
+}
+
+final class VmAcceptedIntent<T> {
+  VmAcceptedIntent({required this.intentRevision, required this.result}) {
+    if (intentRevision < 0)
+      throw ArgumentError.value(intentRevision, 'intentRevision');
+  }
+
+  final int intentRevision;
+  final T result;
+}
+
 class VmEffectException implements Exception {
   const VmEffectException(this.operationError, {this.cause});
 
@@ -85,12 +101,15 @@ final class VmController {
   VmController({
     required VmControllerState initialState,
     required VmEffectRunner effectRunner,
+    int? initialAcceptedIntentRevision,
     VmTimerScheduler timerScheduler = const DartVmTimerScheduler(),
     void Function(VmControllerState state)? onStateChanged,
     Duration effectTimeout = const Duration(seconds: 30),
     Duration shutdownTimeout = const Duration(seconds: 35),
     OperationId Function()? newTeardownOperationId,
   }) : _state = initialState,
+       _acceptedIntentRevision =
+           initialAcceptedIntentRevision ?? initialState.appliedIntentRevision,
        _effectRunner = effectRunner,
        _timerScheduler = timerScheduler,
        _onStateChanged = onStateChanged,
@@ -100,6 +119,9 @@ final class VmController {
            newTeardownOperationId ?? OperationId.generate {
     if (effectTimeout <= Duration.zero || shutdownTimeout <= Duration.zero) {
       throw ArgumentError('controller deadlines must be positive');
+    }
+    if (_acceptedIntentRevision < initialState.appliedIntentRevision) {
+      throw ArgumentError('accepted intent revision precedes executing intent');
     }
   }
 
@@ -122,10 +144,34 @@ final class VmController {
   VmControllerState? _activeEffectState;
   final List<OperationError> _shutdownErrors = [];
   final Set<VmEffect> _cancellationsInFlight = HashSet.identity();
+  Future<void> _mutationTail = Future<void>.value();
+  int _acceptedIntentRevision;
   VmTimerHandle? _retryTimer;
   VmTimerHandle? _stableResetTimer;
 
   VmControllerState get state => _state;
+  int get acceptedIntentRevision => _acceptedIntentRevision;
+
+  /// Acceptance shares the durable-write gate, never the external-effect wait.
+  /// The execution snapshot stays intact until the queued intent is adopted.
+  Future<T> accept<T>(VmAcceptanceAction<T> action) => _mutate(() async {
+    if (!_acceptingExternal) throw const VmControllerClosedException();
+    final accepted = await action.commit(_state);
+    if (accepted.intentRevision > _acceptedIntentRevision) {
+      _acceptedIntentRevision = accepted.intentRevision;
+    }
+    return accepted.result;
+  });
+
+  Future<T> _mutate<T>(Future<T> Function() action) {
+    final result = _mutationTail.then((_) => action());
+    _mutationTail = result.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace __) {},
+    );
+    return result;
+  }
+
   bool get isAccepting => _acceptingExternal;
   bool get isIdle =>
       !_processing &&
@@ -176,6 +222,13 @@ final class VmController {
       _externalCommands.removeFirst().completer?.completeError(
         const VmControllerClosedException(),
       );
+    }
+    try {
+      await _mutationTail.timeout(_shutdownTimeout);
+    } on TimeoutException {
+      throw VmControllerShutdownException([
+        _timeoutError('controller acceptance shutdown'),
+      ]);
     }
     _internalCommands.addFirst(
       _QueuedCommand(
@@ -266,10 +319,8 @@ final class VmController {
           next++;
         }
         try {
-          final results = await _runBatchWithDeadline(
-            transactional,
-            batch,
-            state,
+          final results = await _mutate(
+            () => _runBatchWithDeadline(transactional, batch, state),
           );
           for (var offset = 0; offset < batch.length; offset++) {
             _enqueueEffectResult(batch[offset], results[offset]);

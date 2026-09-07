@@ -23,6 +23,7 @@ export 'src/rotating_logger.dart';
 export 'src/runtime_driver.dart';
 export 'src/runtime_driver_effect_adapter.dart';
 export 'src/sqlite_database.dart';
+export 'src/sqlite_vm_lifecycle_acceptance.dart';
 export 'src/sqlite_vm_state_effect_adapter.dart';
 export 'src/vm_application_service.dart';
 export 'src/vm_command_repository.dart';
