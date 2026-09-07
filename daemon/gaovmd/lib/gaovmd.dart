@@ -31,6 +31,7 @@ export 'src/vm_config_store.dart';
 export 'src/vm_controller.dart';
 export 'src/vm_controller_reducer.dart';
 export 'src/vm_effect_runner.dart';
+export 'src/vm_intent_recovery_repository.dart';
 export 'src/vm_registry.dart';
 export 'src/vm_repository.dart';
 export 'src/vm_runtime_configuration_resolver.dart';

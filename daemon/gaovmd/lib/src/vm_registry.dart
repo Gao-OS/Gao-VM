@@ -4,6 +4,7 @@ import 'vm_controller.dart';
 import 'vm_controller_reducer.dart';
 import 'operation_repository.dart';
 import 'vm_repository.dart';
+import 'vm_intent_recovery_repository.dart';
 
 final class VmRegistryClosedException implements Exception {
   const VmRegistryClosedException();
@@ -17,11 +18,13 @@ final class VmRegistry {
     required VmRepository repository,
     required OperationRepository operations,
     required VmEffectRunner effectRunner,
+    VmIntentRecoveryRepository? recovery,
     VmTimerScheduler Function()? timerSchedulerFactory,
     RequestId Function()? newRequestId,
   }) : _repository = repository,
        _operations = operations,
        _effectRunner = effectRunner,
+       _recovery = recovery,
        _timerSchedulerFactory =
            timerSchedulerFactory ?? (() => const DartVmTimerScheduler()),
        _newRequestId = newRequestId ?? RequestId.generate;
@@ -29,6 +32,7 @@ final class VmRegistry {
   final VmRepository _repository;
   final OperationRepository _operations;
   final VmEffectRunner _effectRunner;
+  final VmIntentRecoveryRepository? _recovery;
   final VmTimerScheduler Function() _timerSchedulerFactory;
   final RequestId Function() _newRequestId;
   final Map<VmId, VmController> _controllers = {};
@@ -79,6 +83,9 @@ final class VmRegistry {
     _requireAccepting();
     await Future.wait(
       controllers.map((controller) async {
+        if (await _recovery?.hasUnpublishedCommands(controller.state.vmId) ??
+            false)
+          return;
         await controller.submit(const ReconcileRequested());
         await controller.waitUntilIdle();
         if (_isDurablyDeleted(controller.state)) {
@@ -143,7 +150,7 @@ final class VmRegistry {
     final virtualMachine = await _repository.get(vmId);
     if (virtualMachine == null) return null;
     _requireAccepting();
-    return _createController(await _restoreState(virtualMachine));
+    return _restoreAndCreate(virtualMachine);
   }
 
   Future<VmController> _activateLoaded(VirtualMachine virtualMachine) async {
@@ -157,16 +164,30 @@ final class VmRegistry {
       return controller;
     }
     _requireAccepting();
-    return _createController(await _restoreState(virtualMachine));
+    return _restoreAndCreate(virtualMachine);
   }
 
-  VmController _createController(VmControllerState initialState) {
+  Future<VmController> _restoreAndCreate(VirtualMachine vm) async {
+    final recovered = await _recovery?.restore(vm.metadata.id);
+    if (recovered == null) return _createController(await _restoreState(vm));
+    _requireAccepting();
+    return _createController(
+      recovered.executionState,
+      acceptedIntentRevision: recovered.acceptedIntentRevision,
+    );
+  }
+
+  VmController _createController(
+    VmControllerState initialState, {
+    int? acceptedIntentRevision,
+  }) {
     _requireAccepting();
     final vmId = initialState.vmId;
     final active = _controllers[vmId];
     if (active != null) return active;
     final controller = VmController(
       initialState: initialState,
+      initialAcceptedIntentRevision: acceptedIntentRevision,
       effectRunner: _effectRunner,
       timerScheduler: _timerSchedulerFactory(),
     );
