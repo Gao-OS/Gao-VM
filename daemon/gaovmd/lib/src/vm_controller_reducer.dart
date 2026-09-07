@@ -68,6 +68,7 @@ final class VmControllerState {
     required this.leaseState,
     required this.pendingRecoveryGeneration,
     required this.pendingRecoveryError,
+    this.appliedIntentRevision = 0,
     this.lastError,
   });
 
@@ -76,6 +77,7 @@ final class VmControllerState {
     required int specGeneration,
     required RestartPolicy restartPolicy,
     int maxRestartAttempts = 5,
+    int appliedIntentRevision = 0,
   }) => VmControllerState(
     vmId: vmId,
     desiredState: DesiredState.stopped,
@@ -94,6 +96,7 @@ final class VmControllerState {
     leaseState: VmLeaseState.none,
     pendingRecoveryGeneration: null,
     pendingRecoveryError: null,
+    appliedIntentRevision: appliedIntentRevision,
   );
 
   final VmId vmId;
@@ -114,6 +117,10 @@ final class VmControllerState {
   final int? pendingRecoveryGeneration;
   final OperationError? pendingRecoveryError;
   final OperationError? lastError;
+
+  /// Revision of the accepted intent being executed, which may precede a newer
+  /// desired/spec intent already accepted into the durable command queue.
+  final int appliedIntentRevision;
 
   VmControllerState copyWith({
     DesiredState? desiredState,
@@ -140,6 +147,7 @@ final class VmControllerState {
     bool clearPendingRecoveryError = false,
     OperationError? lastError,
     bool clearLastError = false,
+    int? appliedIntentRevision,
   }) => VmControllerState(
     vmId: vmId,
     desiredState: desiredState ?? this.desiredState,
@@ -171,6 +179,7 @@ final class VmControllerState {
         ? null
         : pendingRecoveryError ?? this.pendingRecoveryError,
     lastError: clearLastError ? null : lastError ?? this.lastError,
+    appliedIntentRevision: appliedIntentRevision ?? this.appliedIntentRevision,
   );
 }
 

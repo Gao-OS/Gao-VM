@@ -21,7 +21,7 @@ const coreTableNames = <String>{
   'outbox',
 };
 
-const _latestSchemaVersion = 2;
+const _latestSchemaVersion = 3;
 final _transactionContextKey = Object();
 final _savepointScopeKey = Object();
 final _transactionGates = <String, _AsyncGate>{};
@@ -407,6 +407,13 @@ const _migrations = <_Migration>[
 
     CREATE INDEX IF NOT EXISTS outbox_claimable_idx
       ON outbox(published_at, claim_expires_at, id);
+  '''),
+  _Migration(3, '''
+    ALTER TABLE vms ADD COLUMN intent_revision INTEGER NOT NULL DEFAULT 0
+      CHECK (intent_revision >= 0);
+    ALTER TABLE vm_runtime ADD COLUMN applied_intent_revision INTEGER NOT NULL DEFAULT 0
+      CHECK (applied_intent_revision >= 0);
+    ALTER TABLE vm_runtime ADD COLUMN active_operation_id TEXT;
   '''),
 ];
 

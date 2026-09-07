@@ -26,8 +26,8 @@ void main() {
   test('bootstrap configures SQLite and applies the schema once', () async {
     var database = await GaoVmDatabase.open(databasePath);
 
-    expect(database.schemaVersion, 2);
-    expect(database.appliedMigrationVersions, [1, 2]);
+    expect(database.schemaVersion, 3);
+    expect(database.appliedMigrationVersions, [1, 2, 3]);
     expect(database.journalMode, 'wal');
     expect(database.foreignKeysEnabled, isTrue);
     expect(database.busyTimeout, const Duration(seconds: 5));
@@ -54,10 +54,55 @@ void main() {
     database.close();
 
     database = await GaoVmDatabase.open(databasePath);
-    expect(database.schemaVersion, 2);
-    expect(database.appliedMigrationVersions, [1, 2]);
+    expect(database.schemaVersion, 3);
+    expect(database.appliedMigrationVersions, [1, 2, 3]);
     database.close();
   });
+
+  test(
+    'v3 adds acceptance checkpoints without changing existing VM state',
+    () async {
+      final legacy = sqlite3.open(databasePath);
+      legacy.execute('''
+      CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+      INSERT INTO schema_migrations VALUES(1, '2026-09-07T00:00:00.000000Z'), (2, '2026-09-07T00:00:00.000000Z');
+      CREATE TABLE vms(id TEXT PRIMARY KEY, revision INTEGER NOT NULL, spec_generation INTEGER NOT NULL);
+      CREATE TABLE vm_runtime(vm_id TEXT PRIMARY KEY, desired_state TEXT NOT NULL, phase TEXT NOT NULL);
+      INSERT INTO vms VALUES('existing-vm', 7, 3);
+      INSERT INTO vm_runtime VALUES('existing-vm', 'running', 'starting');
+    ''');
+      legacy.userVersion = 2;
+      legacy.dispose();
+      final database = await GaoVmDatabase.open(databasePath);
+      try {
+        expect(database.schemaVersion, 3);
+        expect(database.appliedMigrationVersions, [1, 2, 3]);
+        await database.read((db) {
+          final vm = db.select('SELECT * FROM vms').single;
+          expect(vm['revision'], 7);
+          expect(vm['spec_generation'], 3);
+          expect(vm['intent_revision'], 0);
+          final runtime = db.select('SELECT * FROM vm_runtime').single;
+          expect(runtime['desired_state'], 'running');
+          expect(runtime['phase'], 'starting');
+          expect(runtime['applied_intent_revision'], 0);
+          expect(runtime['active_operation_id'], isNull);
+          expect(
+            () => db.execute('UPDATE vms SET intent_revision = -1'),
+            throwsA(isA<SqliteException>()),
+          );
+          expect(
+            () => db.execute(
+              'UPDATE vm_runtime SET applied_intent_revision = -1',
+            ),
+            throwsA(isA<SqliteException>()),
+          );
+        });
+      } finally {
+        database.close();
+      }
+    },
+  );
 
   test(
     'migration preserves duplicate v1 outbox keys and adds claim fields',
@@ -70,6 +115,8 @@ void main() {
       );
       INSERT INTO schema_migrations(version, applied_at)
       VALUES (1, '2026-09-04T09:00:00.000000Z');
+      CREATE TABLE vms(id TEXT PRIMARY KEY);
+      CREATE TABLE vm_runtime(vm_id TEXT PRIMARY KEY);
       CREATE TABLE outbox (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         topic TEXT NOT NULL,
@@ -89,8 +136,8 @@ void main() {
 
       final database = await GaoVmDatabase.open(databasePath);
 
-      expect(database.schemaVersion, 2);
-      expect(database.appliedMigrationVersions, [1, 2]);
+      expect(database.schemaVersion, 3);
+      expect(database.appliedMigrationVersions, [1, 2, 3]);
       await database.read((connection) {
         expect(
           connection
@@ -324,8 +371,8 @@ void main() {
     ]);
 
     for (final database in databases) {
-      expect(database.schemaVersion, 2);
-      expect(database.appliedMigrationVersions, [1, 2]);
+      expect(database.schemaVersion, 3);
+      expect(database.appliedMigrationVersions, [1, 2, 3]);
       database.close();
     }
   });
@@ -345,8 +392,8 @@ void main() {
     ]);
 
     for (final result in results) {
-      expect(result.schemaVersion, 2);
-      expect(result.migrations, [1, 2]);
+      expect(result.schemaVersion, 3);
+      expect(result.migrations, [1, 2, 3]);
     }
   });
 }

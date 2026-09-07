@@ -6,6 +6,26 @@ import 'package:test/test.dart';
 
 void main() {
   group('VmController reducer', () {
+    test(
+      'execution intent revision survives reducer transitions and copyWith',
+      () {
+        final initial = VmControllerState.initial(
+          vmId: _vmId,
+          specGeneration: 1,
+          restartPolicy: RestartPolicy.onFailure,
+        );
+        expect(initial.appliedIntentRevision, 0);
+        final adopted = initial.copyWith(appliedIntentRevision: 3);
+        final starting = reduce(adopted, StartRequested(_operation1)).state;
+        expect(starting.appliedIntentRevision, 3);
+        final spawning = reduce(starting, HostLeaseAcquired(_operation1)).state;
+        expect(spawning.appliedIntentRevision, 3);
+        expect(
+          spawning.copyWith(phase: VmPhase.running).appliedIntentRevision,
+          3,
+        );
+      },
+    );
     test('start records the desired state and requests a host lease', () {
       final state = VmControllerState.initial(
         vmId: _vmId,

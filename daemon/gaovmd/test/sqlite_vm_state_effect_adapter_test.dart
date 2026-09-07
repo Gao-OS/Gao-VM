@@ -5,9 +5,199 @@ import 'package:gaovmd/src/sqlite_database.dart';
 import 'package:gaovmd/src/sqlite_vm_state_effect_adapter.dart';
 import 'package:gaovmd/src/vm_controller_reducer.dart';
 import 'package:gaovmd/src/vm_repository.dart';
+import 'package:gaovmd/src/event_repository.dart';
 import 'package:test/test.dart';
 
 void main() {
+  test(
+    'stale execution cannot overwrite accepted desired state or deletion',
+    () async {
+      await _withPersistence((database, repository, adapter) async {
+        await database.transaction((db) {
+          db.execute('UPDATE vms SET intent_revision = 2 WHERE id = ?', [
+            _vmId.value,
+          ]);
+          db.execute(
+            "UPDATE vm_runtime SET desired_state = 'stopped' WHERE vm_id = ?",
+            [_vmId.value],
+          );
+        });
+        final stale =
+            VmControllerState.initial(
+              vmId: _vmId,
+              specGeneration: 1,
+              restartPolicy: RestartPolicy.onFailure,
+            ).copyWith(
+              desiredState: DesiredState.running,
+              deletionState: VmDeletionState.deleted,
+            );
+        await adapter.persistVm(stale);
+        final stored = await repository.get(_vmId);
+        expect(stored, isNotNull);
+        expect(stored!.metadata.revision, 1);
+        expect(stored.status.desiredState, DesiredState.stopped);
+        final current = stale.copyWith(
+          appliedIntentRevision: 2,
+          deletionState: VmDeletionState.active,
+        );
+        await adapter.persistVm(current);
+        expect(
+          (await repository.get(_vmId))!.status.desiredState,
+          DesiredState.running,
+        );
+      });
+    },
+  );
+
+  test(
+    'runtime observations retain newer spec projection and persist execution checkpoint',
+    () async {
+      await _withPersistence((database, repository, adapter) async {
+        final operationId = OperationId.generate();
+        await database.transaction((db) {
+          db.execute(
+            'UPDATE vms SET intent_revision = 2, spec_generation = 2 WHERE id = ?',
+            [_vmId.value],
+          );
+          db.execute(
+            'UPDATE vm_runtime SET restart_required = 1 WHERE vm_id = ?',
+            [_vmId.value],
+          );
+        });
+        final oldSpec =
+            VmControllerState.initial(
+              vmId: _vmId,
+              specGeneration: 1,
+              restartPolicy: RestartPolicy.onFailure,
+              appliedIntentRevision: 1,
+            ).copyWith(
+              phase: VmPhase.running,
+              observedGeneration: 1,
+              restartRequired: false,
+              currentOperation: VmControllerOperation(
+                id: operationId,
+                kind: VmOperationKind.start,
+                state: OperationState.running,
+              ),
+            );
+        await adapter.persistRuntime(oldSpec);
+        await database.read((db) {
+          final row = db.select('SELECT * FROM vm_runtime WHERE vm_id = ?', [
+            _vmId.value,
+          ]).single;
+          expect(row['restart_required'], 1);
+          expect(row['observed_generation'], 1);
+          expect(row['applied_intent_revision'], 1);
+          expect(row['active_operation_id'], operationId.value);
+        });
+        await adapter.persistRuntime(
+          oldSpec.copyWith(
+            specGeneration: 2,
+            observedGeneration: 2,
+            appliedIntentRevision: 2,
+            clearCurrentOperation: true,
+          ),
+        );
+        await database.read((db) {
+          final row = db.select('SELECT * FROM vm_runtime WHERE vm_id = ?', [
+            _vmId.value,
+          ]).single;
+          expect(row['restart_required'], 0);
+          expect(row['applied_intent_revision'], 2);
+          expect(row['active_operation_id'], isNull);
+        });
+      });
+    },
+  );
+
+  test(
+    'superseded intent is a normal no-op and does not roll back old outcome events',
+    () async {
+      await _withPersistence((database, repository, adapter) async {
+        await database.transaction(
+          (db) => db.execute(
+            'UPDATE vms SET intent_revision = 2 WHERE id = ?',
+            [_vmId.value],
+          ),
+        );
+        final state = VmControllerState.initial(
+          vmId: _vmId,
+          specGeneration: 1,
+          restartPolicy: RestartPolicy.onFailure,
+          appliedIntentRevision: 1,
+        ).copyWith(desiredState: DesiredState.running, phase: VmPhase.running);
+        final events = SqliteEventRepository(database);
+        await database.transaction((_) async {
+          await adapter.persistVm(state);
+          await adapter.persistRuntime(state);
+          await events.append(
+            type: 'vm.started',
+            resourceType: ResourceType.virtualMachine,
+            resourceId: _vmId,
+            vmId: _vmId,
+            payload: JsonObjectValue.empty,
+          );
+        });
+        expect(
+          (await repository.get(_vmId))!.status.desiredState,
+          DesiredState.stopped,
+        );
+        expect((await repository.get(_vmId))!.status.phase, VmPhase.running);
+        expect(await events.list(vmId: _vmId), hasLength(1));
+        expect(await events.readUnpublishedOutbox(), hasLength(1));
+      });
+    },
+  );
+
+  test(
+    'execution checkpoints roll back atomically and missing VMs still fail',
+    () async {
+      await _withPersistence((database, repository, adapter) async {
+        final state =
+            VmControllerState.initial(
+              vmId: _vmId,
+              specGeneration: 1,
+              restartPolicy: RestartPolicy.onFailure,
+              appliedIntentRevision: 1,
+            ).copyWith(
+              currentOperation: VmControllerOperation(
+                id: OperationId.generate(),
+                kind: VmOperationKind.start,
+                state: OperationState.running,
+              ),
+            );
+        await expectLater(
+          database.transaction((_) async {
+            await adapter.persistRuntime(state);
+            throw StateError('rollback checkpoint');
+          }),
+          throwsStateError,
+        );
+        await database.read((db) {
+          final row = db.select(
+            'SELECT applied_intent_revision, active_operation_id FROM vm_runtime WHERE vm_id = ?',
+            [_vmId.value],
+          ).single;
+          expect(row['applied_intent_revision'], 0);
+          expect(row['active_operation_id'], isNull);
+        });
+        final missing = VmControllerState.initial(
+          vmId: VmId.generate(),
+          specGeneration: 1,
+          restartPolicy: RestartPolicy.onFailure,
+          appliedIntentRevision: 2,
+        );
+        await expectLater(
+          adapter.persistVm(missing),
+          throwsA(isA<VmNotFoundException>()),
+        );
+        await expectLater(
+          adapter.persistRuntime(missing),
+          throwsA(isA<VmNotFoundException>()),
+        );
+      });
+    },
+  );
   test(
     'persists desired/runtime state and participates in outer rollback',
     () async {
@@ -109,6 +299,34 @@ void main() {
       await directory.delete(recursive: true);
     },
   );
+}
+
+Future<void> _withPersistence(
+  Future<void> Function(
+    GaoVmDatabase database,
+    SqliteVmRepository repository,
+    SqliteVmStateEffectAdapter adapter,
+  )
+  action,
+) async {
+  final directory = await Directory.systemTemp.createTemp('vm-intent-adapter-');
+  final database = await GaoVmDatabase.open('${directory.path}/gaovm.db');
+  try {
+    final repository = SqliteVmRepository(
+      database,
+      newVmId: () => _vmId,
+      now: () => _now,
+    );
+    await repository.create(name: 'vm', spec: _spec);
+    await action(
+      database,
+      repository,
+      SqliteVmStateEffectAdapter(database, now: () => _now),
+    );
+  } finally {
+    database.close();
+    await directory.delete(recursive: true);
+  }
 }
 
 final _now = DateTime.utc(2026, 9, 5, 3);
