@@ -75,6 +75,14 @@ final class SqliteVmStateEffectAdapter implements VmStateEffectAdapter {
   @override
   Future<void> persistRuntime(VmControllerState state) =>
       _database.transaction((connection) {
+        final checkpoint = connection.select(
+          'SELECT applied_intent_revision FROM vm_runtime WHERE vm_id = ?',
+          [state.vmId.value],
+        );
+        if (checkpoint.isEmpty) throw VmNotFoundException(state.vmId);
+        if ((checkpoint.single['applied_intent_revision'] as int) >
+            state.appliedIntentRevision)
+          return;
         final phase = _phase(state.phase);
         final error = state.lastError;
         connection.execute(
@@ -86,6 +94,7 @@ final class SqliteVmStateEffectAdapter implements VmStateEffectAdapter {
                   THEN restart_required ELSE ? END,
                 last_error_json = ?,
                 applied_intent_revision = ?, active_operation_id = ?,
+                execution_desired_state = ?, execution_spec_generation = ?,
                 last_transition_at = CASE
                   WHEN phase <> ? THEN ? ELSE last_transition_at END
             WHERE vm_id = ?
@@ -99,6 +108,8 @@ final class SqliteVmStateEffectAdapter implements VmStateEffectAdapter {
             error == null ? null : jsonEncode(error.toJson()),
             state.appliedIntentRevision,
             state.currentOperation?.id.value,
+            state.desiredState.name,
+            state.specGeneration,
             phase,
             formatPersistenceTimestamp(_now().toUtc()),
             state.vmId.value,

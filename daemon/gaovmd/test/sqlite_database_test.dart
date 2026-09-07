@@ -26,8 +26,8 @@ void main() {
   test('bootstrap configures SQLite and applies the schema once', () async {
     var database = await GaoVmDatabase.open(databasePath);
 
-    expect(database.schemaVersion, 3);
-    expect(database.appliedMigrationVersions, [1, 2, 3]);
+    expect(database.schemaVersion, 4);
+    expect(database.appliedMigrationVersions, [1, 2, 3, 4]);
     expect(database.journalMode, 'wal');
     expect(database.foreignKeysEnabled, isTrue);
     expect(database.busyTimeout, const Duration(seconds: 5));
@@ -54,10 +54,38 @@ void main() {
     database.close();
 
     database = await GaoVmDatabase.open(databasePath);
-    expect(database.schemaVersion, 3);
-    expect(database.appliedMigrationVersions, [1, 2, 3]);
+    expect(database.schemaVersion, 4);
+    expect(database.appliedMigrationVersions, [1, 2, 3, 4]);
     database.close();
   });
+
+  test(
+    'v4 preserves an existing v3 checkpoint with nullable compatibility fields',
+    () async {
+      final legacy = sqlite3.open(databasePath);
+      legacy.execute('''
+        CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+        INSERT INTO schema_migrations VALUES(1, 'old'), (2, 'old'), (3, 'old');
+        CREATE TABLE vm_runtime(vm_id TEXT PRIMARY KEY, applied_intent_revision INTEGER, active_operation_id TEXT);
+        INSERT INTO vm_runtime VALUES('existing', 7, 'active');
+      ''');
+      legacy.userVersion = 3;
+      legacy.dispose();
+      final database = await GaoVmDatabase.open(databasePath);
+      try {
+        expect(database.schemaVersion, 4);
+        await database.read((db) {
+          final row = db.select('SELECT * FROM vm_runtime').single;
+          expect(row['applied_intent_revision'], 7);
+          expect(row['active_operation_id'], 'active');
+          expect(row['execution_desired_state'], isNull);
+          expect(row['execution_spec_generation'], isNull);
+        });
+      } finally {
+        database.close();
+      }
+    },
+  );
 
   test(
     'v3 adds acceptance checkpoints without changing existing VM state',
@@ -75,8 +103,8 @@ void main() {
       legacy.dispose();
       final database = await GaoVmDatabase.open(databasePath);
       try {
-        expect(database.schemaVersion, 3);
-        expect(database.appliedMigrationVersions, [1, 2, 3]);
+        expect(database.schemaVersion, 4);
+        expect(database.appliedMigrationVersions, [1, 2, 3, 4]);
         await database.read((db) {
           final vm = db.select('SELECT * FROM vms').single;
           expect(vm['revision'], 7);
@@ -87,6 +115,20 @@ void main() {
           expect(runtime['phase'], 'starting');
           expect(runtime['applied_intent_revision'], 0);
           expect(runtime['active_operation_id'], isNull);
+          expect(runtime['execution_desired_state'], isNull);
+          expect(runtime['execution_spec_generation'], isNull);
+          expect(
+            () => db.execute(
+              "UPDATE vm_runtime SET execution_desired_state = 'invalid'",
+            ),
+            throwsA(isA<SqliteException>()),
+          );
+          expect(
+            () => db.execute(
+              'UPDATE vm_runtime SET execution_spec_generation = 0',
+            ),
+            throwsA(isA<SqliteException>()),
+          );
           expect(
             () => db.execute('UPDATE vms SET intent_revision = -1'),
             throwsA(isA<SqliteException>()),
@@ -136,8 +178,8 @@ void main() {
 
       final database = await GaoVmDatabase.open(databasePath);
 
-      expect(database.schemaVersion, 3);
-      expect(database.appliedMigrationVersions, [1, 2, 3]);
+      expect(database.schemaVersion, 4);
+      expect(database.appliedMigrationVersions, [1, 2, 3, 4]);
       await database.read((connection) {
         expect(
           connection
@@ -371,8 +413,8 @@ void main() {
     ]);
 
     for (final database in databases) {
-      expect(database.schemaVersion, 3);
-      expect(database.appliedMigrationVersions, [1, 2, 3]);
+      expect(database.schemaVersion, 4);
+      expect(database.appliedMigrationVersions, [1, 2, 3, 4]);
       database.close();
     }
   });
@@ -392,8 +434,8 @@ void main() {
     ]);
 
     for (final result in results) {
-      expect(result.schemaVersion, 3);
-      expect(result.migrations, [1, 2, 3]);
+      expect(result.schemaVersion, 4);
+      expect(result.migrations, [1, 2, 3, 4]);
     }
   });
 }

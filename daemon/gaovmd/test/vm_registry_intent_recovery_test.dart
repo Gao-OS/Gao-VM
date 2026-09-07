@@ -46,6 +46,75 @@ void main() {
       )).operationId;
 
   test(
+    'skipped cancelled start restores exact stopped state and older spec',
+    () async {
+      await SqliteVmRepository(database).updateSpec(
+        vm.metadata.id,
+        expectedRevision: 1,
+        spec: VmSpec.fromJson({..._spec.toJson(), 'cpu': 4}),
+      );
+      final start = await accept(VmLifecycleAction.start);
+      final operations = SqliteOperationRepository(database);
+      await operations.setCancellable(start, cancellable: true);
+      await operations.cancel(start);
+      await accept(VmLifecycleAction.start);
+      await SqliteVmStateEffectAdapter(database).persistRuntime(
+        VmControllerState.initial(
+          vmId: vm.metadata.id,
+          specGeneration: 1,
+          restartPolicy: RestartPolicy.never,
+          appliedIntentRevision: 1,
+        ),
+      );
+      final restored = (await SqliteVmIntentRecoveryRepository(
+        database,
+      ).restore(vm.metadata.id))!;
+      expect(restored.executionState.desiredState, DesiredState.stopped);
+      expect(restored.executionState.specGeneration, 1);
+      expect(restored.executionState.appliedIntentRevision, 1);
+      expect(restored.acceptedIntentRevision, 2);
+    },
+  );
+
+  test(
+    'v3 checkpoints without exact fields retain pinned command compatibility',
+    () async {
+      await accept(VmLifecycleAction.start);
+      await accept(VmLifecycleAction.stop);
+      await database.transaction(
+        (db) => db.execute(
+          'UPDATE vm_runtime SET applied_intent_revision = 1 WHERE vm_id = ?',
+          [vm.metadata.id.value],
+        ),
+      );
+      final restored = (await SqliteVmIntentRecoveryRepository(
+        database,
+      ).restore(vm.metadata.id))!;
+      expect(restored.executionState.desiredState, DesiredState.running);
+      expect(restored.executionState.specGeneration, 1);
+    },
+  );
+
+  for (final fields in [
+    "execution_desired_state = 'stopped'",
+    'execution_spec_generation = 1',
+    "execution_desired_state = 'stopped', execution_spec_generation = 99",
+  ]) {
+    test('invalid exact checkpoint fails closed: $fields', () async {
+      await accept(VmLifecycleAction.start);
+      await database.transaction(
+        (db) => db.execute('UPDATE vm_runtime SET $fields WHERE vm_id = ?', [
+          vm.metadata.id.value,
+        ]),
+      );
+      await expectLater(
+        SqliteVmIntentRecoveryRepository(database).restore(vm.metadata.id),
+        throwsStateError,
+      );
+    });
+  }
+
+  test(
     'startup preserves accepted start then stop and leaves dispatch FIFO untouched',
     () async {
       final start = await accept(VmLifecycleAction.start);

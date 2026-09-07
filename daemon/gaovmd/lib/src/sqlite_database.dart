@@ -21,7 +21,7 @@ const coreTableNames = <String>{
   'outbox',
 };
 
-const _latestSchemaVersion = 3;
+const _latestSchemaVersion = 4;
 final _transactionContextKey = Object();
 final _savepointScopeKey = Object();
 final _transactionGates = <String, _AsyncGate>{};
@@ -414,6 +414,12 @@ const _migrations = <_Migration>[
     ALTER TABLE vm_runtime ADD COLUMN applied_intent_revision INTEGER NOT NULL DEFAULT 0
       CHECK (applied_intent_revision >= 0);
     ALTER TABLE vm_runtime ADD COLUMN active_operation_id TEXT;
+  '''),
+  _Migration(4, '''
+    ALTER TABLE vm_runtime ADD COLUMN execution_desired_state TEXT
+      CHECK (execution_desired_state IN ('stopped', 'running'));
+    ALTER TABLE vm_runtime ADD COLUMN execution_spec_generation INTEGER
+      CHECK (execution_spec_generation >= 1);
   '''),
 ];
 

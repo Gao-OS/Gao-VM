@@ -69,6 +69,11 @@ final class SqliteVmIntentRecoveryRepository
     final row = rows.single;
     final accepted = row['intent_revision'] as int;
     final applied = row['applied_intent_revision'] as int;
+    final executionDesired = row['execution_desired_state'];
+    final executionGeneration = row['execution_spec_generation'];
+    if ((executionDesired == null) != (executionGeneration == null))
+      throw StateError('execution checkpoint fields must be paired');
+    final hasExecutionSnapshot = executionDesired != null;
     final commands = [
       for (final command in db.select(
         'SELECT id, key, payload_json, published_at FROM outbox WHERE topic = ? AND key = ? ORDER BY id',
@@ -120,21 +125,28 @@ final class SqliteVmIntentRecoveryRepository
     final baseline = commands.first.payload;
     if (applied > 0 && activeCommand == null)
       throw StateError('applied command intent is missing');
-    if (applied == 0 && baseline['execution_intent_revision'] != 0)
+    if (!hasExecutionSnapshot &&
+        applied == 0 &&
+        baseline['execution_intent_revision'] != 0)
       throw StateError('initial execution snapshot is missing');
     final hasUnpublished = commands.any((command) => command.unpublished);
-    // With no newer accepted intent, catalog desired may include an autonomous
-    // terminal failure. Otherwise use the executing command's pinned target.
-    final desired = applied == accepted
+    // v3 compatibility: until the first v4 runtime write, retain the old
+    // command/baseline inference. Never substitute the latest accepted spec.
+    // Exact snapshots also cover cancelled/skipped commands and autonomous
+    // failure, whose execution state differs from the command's target.
+    final desired = hasExecutionSnapshot
+        ? _desired(executionDesired)
+        : applied == accepted
         ? vm.status.desiredState
         : activeCommand?.desired ??
               _desired(baseline['execution_desired_state']);
-    final generation =
-        activeCommand?.specGeneration ??
-        _positiveInt(
-          baseline['execution_spec_generation'],
-          'execution_spec_generation',
-        );
+    final generation = hasExecutionSnapshot
+        ? _positiveInt(executionGeneration, 'execution_spec_generation')
+        : activeCommand?.specGeneration ??
+              _positiveInt(
+                baseline['execution_spec_generation'],
+                'execution_spec_generation',
+              );
     final specs = db.select(
       'SELECT spec_json FROM vm_specs WHERE vm_id = ? AND generation = ?',
       [vmId.value, generation],
@@ -143,7 +155,8 @@ final class SqliteVmIntentRecoveryRepository
     final spec = VmSpec.fromJson(
       jsonDecode(specs.single['spec_json'] as String),
     );
-    if (applied == 0 &&
+    if (!hasExecutionSnapshot &&
+        applied == 0 &&
         baseline['execution_restart_policy'] != spec.restartPolicy.name)
       throw FormatException(
         'execution restart policy does not match pinned spec',

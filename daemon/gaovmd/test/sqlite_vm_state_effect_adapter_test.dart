@@ -10,6 +10,34 @@ import 'package:test/test.dart';
 
 void main() {
   test(
+    'older runtime snapshots cannot downgrade the durable checkpoint',
+    () async {
+      await _withPersistence((database, repository, adapter) async {
+        final current = VmControllerState.initial(
+          vmId: _vmId,
+          specGeneration: 1,
+          restartPolicy: RestartPolicy.never,
+          appliedIntentRevision: 2,
+        );
+        await adapter.persistRuntime(current);
+        await adapter.persistRuntime(
+          current.copyWith(
+            appliedIntentRevision: 1,
+            desiredState: DesiredState.running,
+            phase: VmPhase.running,
+          ),
+        );
+        await database.read((db) {
+          final row = db.select('SELECT * FROM vm_runtime').single;
+          expect(row['applied_intent_revision'], 2);
+          expect(row['execution_desired_state'], 'stopped');
+          expect(row['phase'], 'stopped');
+        });
+      });
+    },
+  );
+
+  test(
     'stale execution cannot overwrite accepted desired state or deletion',
     () async {
       await _withPersistence((database, repository, adapter) async {
@@ -89,6 +117,8 @@ void main() {
           expect(row['observed_generation'], 1);
           expect(row['applied_intent_revision'], 1);
           expect(row['active_operation_id'], operationId.value);
+          expect(row['execution_desired_state'], 'stopped');
+          expect(row['execution_spec_generation'], 1);
         });
         await adapter.persistRuntime(
           oldSpec.copyWith(
