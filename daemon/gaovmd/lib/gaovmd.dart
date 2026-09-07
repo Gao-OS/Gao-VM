@@ -11,6 +11,7 @@ export 'src/fake_runtime_driver.dart';
 export 'src/host_lease_repository.dart';
 export 'src/host_scheduler.dart';
 export 'src/host_scheduler_models.dart';
+export 'src/idempotency_repository.dart';
 export 'src/operation_repository.dart';
 export 'src/public_api_server.dart';
 export 'src/rotating_logger.dart';
