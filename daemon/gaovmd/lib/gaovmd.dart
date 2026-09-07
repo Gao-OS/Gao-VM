@@ -7,6 +7,7 @@ export 'src/driver_protocol_v2.dart';
 export 'src/driver_rpc_channel.dart';
 export 'src/driver_runtime_layout.dart';
 export 'src/durable_event_feed.dart';
+export 'src/event_api_handlers.dart';
 export 'src/event_repository.dart';
 export 'src/fake_runtime_driver.dart';
 export 'src/host_lease_repository.dart';

@@ -164,6 +164,17 @@ final class PublicApiResponse {
   }) : body = body,
        contentType = ContentType.json,
        problem = null,
+       streamBody = null,
+       headers = Map<String, String>.unmodifiable(headers);
+
+  PublicApiResponse.stream({
+    required Stream<List<int>> body,
+    required this.contentType,
+    Map<String, String> headers = const {},
+  }) : status = HttpStatus.ok,
+       body = const {},
+       problem = null,
+       streamBody = body,
        headers = Map<String, String>.unmodifiable(headers);
 
   PublicApiResponse.problem({
@@ -189,13 +200,87 @@ final class PublicApiResponse {
          operationId: operationId,
          details: details ?? JsonObjectValue.empty,
        ),
+       streamBody = null,
        headers = Map<String, String>.unmodifiable(headers);
 
   final int status;
   final Object body;
   final ContentType contentType;
   final PublicApiProblem? problem;
+  final Stream<List<int>>? streamBody;
   final Map<String, String> headers;
+}
+
+final class _PublicApiStreamSession {
+  _PublicApiStreamSession({
+    required this.socket,
+    required Stream<List<int>> stream,
+    required this.writeDeadline,
+  }) : _iterator = StreamIterator<List<int>>(stream) {
+    _disconnectSubscription = socket.listen(
+      (_) {},
+      onError: (Object _, StackTrace __) => _cancelAfterDisconnect(),
+      onDone: _cancelAfterDisconnect,
+      cancelOnError: true,
+    );
+  }
+
+  final Socket socket;
+  final Duration writeDeadline;
+  final StreamIterator<List<int>> _iterator;
+  late final StreamSubscription<List<int>> _disconnectSubscription;
+  Future<void>? _cancelFuture;
+  bool _finished = false;
+
+  Future<void> pump() async {
+    var completed = false;
+    try {
+      while (_cancelFuture == null && await _iterator.moveNext()) {
+        if (_cancelFuture != null) break;
+        socket.add(_iterator.current);
+        await socket.flush().timeout(writeDeadline);
+      }
+      completed = _cancelFuture == null;
+    } finally {
+      await cancel(abortResponse: !completed);
+      _finished = true;
+      if (completed) {
+        try {
+          await socket.close().timeout(writeDeadline);
+        } catch (_) {
+          socket.destroy();
+        }
+      }
+    }
+  }
+
+  Future<void> cancel({required bool abortResponse}) {
+    final existing = _cancelFuture;
+    if (existing != null) {
+      if (abortResponse) socket.destroy();
+      return existing;
+    }
+    final completer = Completer<void>();
+    _cancelFuture = completer.future;
+    if (abortResponse) socket.destroy();
+    unawaited(() async {
+      try {
+        await Future.wait([
+          _iterator.cancel(),
+          _disconnectSubscription.cancel(),
+        ]).timeout(writeDeadline);
+      } catch (_) {
+        // Cancellation was requested; a hostile source cannot block shutdown.
+      } finally {
+        if (!completer.isCompleted) completer.complete();
+      }
+    }());
+    return completer.future;
+  }
+
+  void _cancelAfterDisconnect() {
+    if (!_finished) unawaited(cancel(abortResponse: true));
+  }
 }
 
 final class PublicApiProblem {
@@ -351,6 +436,7 @@ final class PublicApiServer {
     PublicApiSocketQuarantineHook? beforeSocketQuarantineRename,
     this.maxJsonBodyBytes = 1024 * 1024,
     this.requestDeadline = const Duration(seconds: 15),
+    this.streamWriteDeadline = const Duration(seconds: 15),
     this.socketProbeDeadline = const Duration(milliseconds: 250),
   }) : _openApiDocument = _deepFreezeJsonObject(openApiDocument),
        _systemHealth = systemHealth,
@@ -379,6 +465,9 @@ final class PublicApiServer {
     if (requestDeadline <= Duration.zero) {
       throw ArgumentError.value(requestDeadline, 'requestDeadline');
     }
+    if (streamWriteDeadline <= Duration.zero) {
+      throw ArgumentError.value(streamWriteDeadline, 'streamWriteDeadline');
+    }
     if (socketProbeDeadline <= Duration.zero) {
       throw ArgumentError.value(socketProbeDeadline, 'socketProbeDeadline');
     }
@@ -387,6 +476,7 @@ final class PublicApiServer {
   final String socketPath;
   final int maxJsonBodyBytes;
   final Duration requestDeadline;
+  final Duration streamWriteDeadline;
   final Duration socketProbeDeadline;
   final Map<String, Object?> _openApiDocument;
   final SystemHealthService _systemHealth;
@@ -406,6 +496,7 @@ final class PublicApiServer {
   Completer<void>? _doneCompleter;
   Object? _fatalError;
   int _artifactSequence = 0;
+  final Set<_PublicApiStreamSession> _activeStreams = {};
 
   static final _pathGate = _PublicApiPathGate();
 
@@ -523,6 +614,11 @@ final class PublicApiServer {
     _closing = true;
     final server = _server;
     _server = null;
+    final activeStreams = _activeStreams.toList(growable: false);
+    await Future.wait(
+      activeStreams.map((stream) => stream.cancel(abortResponse: true)),
+    );
+    _activeStreams.removeAll(activeStreams);
     await server?.close(force: false);
     await _subscription?.cancel();
     _subscription = null;
@@ -704,6 +800,10 @@ final class PublicApiServer {
       final problem = result.problem;
       if (problem != null) {
         _writePublicProblem(request.response, requestId, problem);
+      } else if (result.streamBody case final stream?) {
+        request.response.statusCode = result.status;
+        request.response.headers.contentType = result.contentType;
+        await _writeStream(request.response, stream);
       } else {
         _writeJson(request.response, result.status, result.body);
       }
@@ -733,6 +833,30 @@ final class PublicApiServer {
           status.healthy ? HttpStatus.ok : HttpStatus.serviceUnavailable,
           {'ready': status.healthy, 'checks': status.checks},
         );
+    }
+  }
+
+  Future<void> _writeStream(
+    HttpResponse response,
+    Stream<List<int>> stream,
+  ) async {
+    response.persistentConnection = false;
+    response.headers.chunkedTransferEncoding = false;
+    final socket = await response.detachSocket();
+    final session = _PublicApiStreamSession(
+      socket: socket,
+      stream: stream,
+      writeDeadline: streamWriteDeadline,
+    );
+    _activeStreams.add(session);
+    try {
+      if (_closing) {
+        await session.cancel(abortResponse: true);
+        return;
+      }
+      await session.pump();
+    } finally {
+      _activeStreams.remove(session);
     }
   }
 

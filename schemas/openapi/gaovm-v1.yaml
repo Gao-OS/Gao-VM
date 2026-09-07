@@ -595,6 +595,13 @@ paths:
       tags: [Events]
       operationId: streamEvents
       summary: Resume a durable event stream from a sequence cursor
+      description: >-
+        Each SSE id is the durable event sequence. Last-Event-ID takes precedence
+        over query cursors. after is an alias for after_sequence; if both query
+        aliases are supplied they must agree. Cursors must be nonnegative decimal
+        integers. Unknown or repeated query parameters and repeated Last-Event-ID
+        headers are rejected. Filters are combined with AND. The stream starts
+        with a comment and emits idle heartbeat comments; comments have no cursor.
       parameters:
         - name: after_sequence
           in: query
@@ -603,6 +610,18 @@ paths:
             type: integer
             minimum: 0
             default: 0
+        - name: after
+          in: query
+          description: Alias for after_sequence; both values must agree if supplied together.
+          schema:
+            type: integer
+            minimum: 0
+        - name: Last-Event-ID
+          in: header
+          description: Exclusive durable sequence cursor; takes precedence over query cursors.
+          schema:
+            type: string
+            pattern: '^[0-9]+$'
         - name: vm_id
           in: query
           schema:
@@ -617,7 +636,7 @@ paths:
             $ref: '#/components/schemas/TestRunId'
       responses:
         '200':
-          description: Server-sent events. Each data field is one Event JSON object.
+          description: Server-sent events. Each id is a sequence and each data field is one Event JSON object. Event types are carried in the JSON, not an SSE event-name field.
           headers:
             X-Request-ID:
               $ref: '#/components/headers/RequestId'
@@ -638,6 +657,8 @@ paths:
                 payload:
                   phase: running
                 occurred_at: '2026-09-04T08:10:00Z'
+        '400':
+          $ref: '#/components/responses/Problem'
         default:
           $ref: '#/components/responses/Problem'
   /v1/test-runs:
