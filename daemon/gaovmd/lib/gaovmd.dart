@@ -73,3 +73,4 @@ export 'src/driver_runtime_discovery.dart';
 export 'src/daemon_ownership.dart';
 export 'src/driver_startup_teardown.dart';
 export 'src/driver_startup_recovery.dart';
+export 'src/sqlite_vm_managed_file_effect_adapter.dart';
