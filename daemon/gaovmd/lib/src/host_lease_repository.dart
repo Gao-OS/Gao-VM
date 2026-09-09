@@ -85,6 +85,7 @@ final class SqliteHostLeaseRepository implements HostLeaseRepository {
               : leases.where(
                   (lease) =>
                       lease.request.phase == HostLeasePhase.cleanup ||
+                      lease.request.driverGeneration != null ||
                       lease.expiresAt.isAfter(activeAt.toUtc()),
                 ),
         );
@@ -106,6 +107,10 @@ final class SqliteHostLeaseRepository implements HostLeaseRepository {
       final existing = _find(connection, request.vmId);
       if (existing != null) {
         if (existing.ownerId == ownerId) {
+          if (existing.request.driverGeneration != null &&
+              !existing.expiresAt.isAfter(timestamp)) {
+            return _rejected(request, 'cleanup_hold');
+          }
           if (existing.request.phase == HostLeasePhase.cleanup &&
               request.phase != HostLeasePhase.cleanup) {
             return _rejected(request, 'cleanup_hold');
@@ -212,7 +217,8 @@ final class SqliteHostLeaseRepository implements HostLeaseRepository {
         lease.request.operationId != operationId) {
       return false;
     }
-    if (!lease.expiresAt.isAfter(now.toUtc())) {
+    if (lease.request.phase == HostLeasePhase.cleanup ||
+        !lease.expiresAt.isAfter(now.toUtc())) {
       return false;
     }
     if (lease.request.phase == HostLeasePhase.running) return true;
@@ -300,6 +306,7 @@ final class SqliteHostLeaseRepository implements HostLeaseRepository {
       if (existing != null &&
           (existing.ownerId != ownerId ||
               existing.request.specGeneration != request.specGeneration ||
+              existing.request.driverGeneration != request.driverGeneration ||
               existing.request.operationId != request.operationId)) {
         return null;
       }
@@ -420,6 +427,7 @@ final class SqliteHostLeaseRepository implements HostLeaseRepository {
           .where(
             (lease) =>
                 lease.request.phase == HostLeasePhase.cleanup ||
+                lease.request.driverGeneration != null ||
                 lease.expiresAt.isAfter(activeAt),
           )
           .toList();
@@ -492,7 +500,11 @@ final class SqliteHostLeaseRepository implements HostLeaseRepository {
           [hostVmLeaseResourceType, formatPersistenceTimestamp(now)],
         )
         .map(_decodeLease)
-        .where((lease) => lease.request.phase != HostLeasePhase.cleanup);
+        .where(
+          (lease) =>
+              lease.request.phase != HostLeasePhase.cleanup &&
+              lease.request.driverGeneration == null,
+        );
     for (final lease in expired) {
       _delete(connection, lease.request.vmId, lease.ownerId);
     }
@@ -517,6 +529,9 @@ bool _isStaleRequest(
   HostCapacityRequest current,
   HostCapacityRequest candidate,
 ) {
+  if (current.driverGeneration != null &&
+      current.driverGeneration != candidate.driverGeneration)
+    return true;
   if (candidate.specGeneration != current.specGeneration) {
     return candidate.specGeneration < current.specGeneration;
   }

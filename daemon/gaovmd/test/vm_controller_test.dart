@@ -5,6 +5,28 @@ import 'package:gaovmd/gaovmd.dart';
 import 'package:test/test.dart';
 
 void main() {
+  test(
+    'lease loss still kills its driver when the durable batch fails',
+    () async {
+      final runner = _FailFirstTransactionalRunner();
+      final controller = VmController(
+        initialState: _startingOperationState(),
+        effectRunner: runner,
+      );
+      await controller.submit(
+        HostLeaseLost(
+          driverGeneration: 1,
+          specGeneration: 1,
+          error: _driverError,
+        ),
+      );
+      expect(runner.effects, contains('KillDriver'));
+      expect(runner.batches.last, contains('FailOperation'));
+      expect(controller.state.activeDriverGeneration, 1);
+      expect(controller.state.leaseState, VmLeaseState.held);
+      await controller.shutdown();
+    },
+  );
   group('VmController command queue', () {
     test(
       'same-VM concurrent submissions stay FIFO with one effect in flight',
@@ -953,10 +975,14 @@ final class _RecordingTransactionalRunner
 final class _FailFirstTransactionalRunner
     implements TransactionalVmEffectRunner {
   final batches = <List<String>>[];
+  final effects = <String>[];
 
   @override
   bool isDurable(VmEffect effect) =>
-      effect is PersistVm || effect is PersistRuntime || effect is EmitEvent;
+      effect is PersistVm ||
+      effect is PersistRuntime ||
+      effect is FailOperation ||
+      effect is EmitEvent;
 
   @override
   Future<List<VmCommand?>> runDurableBatch(
@@ -977,8 +1003,10 @@ final class _FailFirstTransactionalRunner
   }
 
   @override
-  Future<VmCommand?> run(VmEffect effect, VmControllerState state) async =>
-      null;
+  Future<VmCommand?> run(VmEffect effect, VmControllerState state) async {
+    effects.add(effect.runtimeType.toString());
+    return null;
+  }
 }
 
 final class _LateSpawnRunner

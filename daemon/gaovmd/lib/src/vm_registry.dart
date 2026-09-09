@@ -38,6 +38,8 @@ final class VmRegistry {
   final Map<VmId, VmController> _controllers = {};
   final Map<VmId, Future<VmController?>> _activations = {};
   final Map<VmId, Future<void>> _retirements = {};
+  final Map<VmId, Future<void>> _reconciliations = {};
+  Future<void>? _tickFuture;
   Future<List<VmController>>? _reconcileFuture;
   Future<void>? _shutdownFuture;
   bool _accepting = true;
@@ -76,6 +78,85 @@ final class VmRegistry {
     });
   }
 
+  /// Coalesces catalog scans, not VM execution. Per-VM failures are reported to
+  /// [onError], which must not throw; a failed catalog scan fails this future.
+  Future<void> reconcileTick({
+    required void Function(VmId, Object, StackTrace) onError,
+  }) {
+    _requireAccepting();
+    return _tickFuture ??= _scanForReconciliation(onError).whenComplete(() {
+      _tickFuture = null;
+    });
+  }
+
+  Future<void> _scanForReconciliation(
+    void Function(VmId, Object, StackTrace) onError,
+  ) async {
+    final catalog = await _repository.list();
+    _requireAccepting();
+    final targets = {
+      for (final vm in catalog)
+        if (vm.status.phase != VmPhase.provisioning) vm.metadata.id,
+      ..._controllers.keys,
+    };
+    for (final vmId in targets) {
+      if (_reconciliations.containsKey(vmId)) continue;
+      reconcileVm(vmId).then<void>(
+        (_) {},
+        onError: (Object error, StackTrace stack) {
+          if (!_accepting &&
+              (error is VmRegistryClosedException ||
+                  error is VmControllerClosedException))
+            return;
+          onError(vmId, error, stack);
+        },
+      );
+    }
+  }
+
+  /// One recovery check per VM at a time. Waiting for this VM's effect lane does
+  /// not block a catalog scan or another VM's reconciliation.
+  Future<void> reconcileVm(VmId vmId) {
+    _requireAccepting();
+    return _reconciliations.putIfAbsent(vmId, () {
+      return _reconcileVm(vmId).whenComplete(() {
+        _reconciliations.remove(vmId);
+      });
+    });
+  }
+
+  Future<void> _reconcileVm(VmId vmId) async {
+    final controller = await get(vmId);
+    if (controller == null) return;
+    await controller.waitUntilIdle();
+    _requireAccepting();
+    // Another command may have started before this continuation resumed.
+    if (!controller.isIdle) return;
+    if (_isDurablyDeleted(controller.state)) {
+      await _retire(vmId, controller);
+      return;
+    }
+    final checkpoint = controller.state;
+    final bool deferred;
+    try {
+      deferred =
+          await _recovery?.shouldDeferReconciliation(checkpoint) ?? false;
+    } catch (_) {
+      // A concurrently adopted intent can invalidate the sampled checkpoint.
+      // The next tick retries it; a stable mismatch remains an observable error.
+      if (!identical(checkpoint, controller.state)) return;
+      rethrow;
+    }
+    _requireAccepting();
+    if (deferred ||
+        !controller.isIdle ||
+        !identical(checkpoint, controller.state))
+      return;
+    await controller.submit(const ReconcileRequested());
+    await controller.waitUntilIdle();
+    if (_isDurablyDeleted(controller.state)) await _retire(vmId, controller);
+  }
+
   Future<List<VmController>> _reconcileOnStartup() async {
     await Future.wait([
       for (final controller in List<VmController>.of(_controllers.values))
@@ -92,16 +173,7 @@ final class VmRegistry {
     );
     _requireAccepting();
     await Future.wait(
-      controllers.map((controller) async {
-        if (await _recovery?.shouldDeferReconciliation(controller.state) ??
-            false)
-          return;
-        await controller.submit(const ReconcileRequested());
-        await controller.waitUntilIdle();
-        if (_isDurablyDeleted(controller.state)) {
-          await _retire(controller.state.vmId, controller);
-        }
-      }),
+      controllers.map((controller) => reconcileVm(controller.state.vmId)),
     );
     return List<VmController>.unmodifiable(controllers);
   }
@@ -116,6 +188,28 @@ final class VmRegistry {
       await _retire(vmId, controller);
     }
     return state;
+  }
+
+  /// Scheduler callback: never activates a cold VM for a stale notification.
+  /// Recovery/direct reservations without a runtime generation cannot authorize
+  /// stopping a driver. Runtime acquisitions supply their allocated generation.
+  Future<void> handleHostLeaseLost(
+    VmId vmId,
+    int specGeneration,
+    OperationId? operationId,
+    int? driverGeneration,
+    OperationError error,
+  ) async {
+    if (driverGeneration == null) return;
+    final controller = _controllers[vmId];
+    if (controller == null) return;
+    await controller.submit(
+      HostLeaseLost(
+        driverGeneration: driverGeneration,
+        specGeneration: specGeneration,
+        error: error,
+      ),
+    );
   }
 
   Future<void> shutdown() {
@@ -133,27 +227,31 @@ final class VmRegistry {
     if (!_accepting && _controllers.isEmpty && _activations.isEmpty) return;
     _accepting = false;
     final reconcile = _reconcileFuture;
-    if (reconcile != null) {
-      try {
-        await reconcile;
-      } on VmRegistryClosedException {
-        // Closing intentionally aborts startup activation.
-      }
-    }
     final activations = List<Future<VmController?>>.of(_activations.values);
-    if (activations.isNotEmpty) {
-      try {
-        await Future.wait(activations);
-      } on VmRegistryClosedException {
-        // Closing intentionally aborts lazy activation.
-      }
-    }
-    await Future.wait(
-      List<VmController>.of(
-        _controllers.values,
-      ).map((controller) => controller.shutdown()),
-    );
+    // Reconciliation can be waiting for an active controller's effect lane.
+    // Begin cancellation before draining it; fenced activations cannot install
+    // additional controllers after _accepting becomes false.
+    await Future.wait<void>([
+      for (final controller in List<VmController>.of(_controllers.values))
+        controller.shutdown(),
+      if (reconcile != null) _drainClosingActivation(reconcile),
+      if (_tickFuture != null) _drainClosingActivation(_tickFuture!),
+      for (final pending in _reconciliations.values.toList())
+        _drainClosingActivation(pending),
+      if (activations.isNotEmpty)
+        _drainClosingActivation(Future.wait(activations)),
+    ]);
     _controllers.clear();
+  }
+
+  Future<void> _drainClosingActivation(Future<Object?> pending) async {
+    try {
+      await pending;
+    } on VmRegistryClosedException {
+      // Closing intentionally aborts startup and lazy activation.
+    } on VmControllerClosedException {
+      // A reconcile already queued behind an effect is rejected by shutdown.
+    }
   }
 
   Future<VmController?> _loadAndActivate(VmId vmId) async {

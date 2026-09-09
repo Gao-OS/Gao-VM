@@ -55,6 +55,80 @@ void main() {
     },
   );
 
+  test(
+    'expired runtime binding retains capacity until confirmed release',
+    () async {
+      final request = _request(_vm1).copyWith(driverGeneration: 3);
+      await repository.acquire(
+        request: request,
+        limits: _limits(maxRunningVms: 1),
+        metrics: _metrics,
+        ownerId: 'daemon-a',
+        now: _now,
+        ttl: const Duration(seconds: 1),
+      );
+      final later = _now.add(const Duration(seconds: 2));
+      database.close();
+      database = await GaoVmDatabase.open(
+        '${temporaryDirectory.path}/gaovm.db',
+      );
+      repository = SqliteHostLeaseRepository(database);
+      expect(
+        (await repository.list(
+          activeAt: later,
+        )).single.request.driverGeneration,
+        3,
+      );
+      final rejected = await repository.acquire(
+        request: _request(_vm2),
+        limits: _limits(maxRunningVms: 1),
+        metrics: _metrics,
+        ownerId: 'daemon-a',
+        now: later,
+        ttl: const Duration(seconds: 10),
+      );
+      expect(rejected.constraint, 'max_running_vms');
+      final replay = await repository.acquire(
+        request: request,
+        limits: _limits(),
+        metrics: _metrics,
+        ownerId: 'daemon-a',
+        now: later,
+        ttl: const Duration(seconds: 10),
+      );
+      expect(replay.constraint, 'cleanup_hold');
+      await repository.release(_vm1, ownerId: 'daemon-a');
+      final admitted = await repository.acquire(
+        request: _request(_vm2),
+        limits: _limits(maxRunningVms: 1),
+        metrics: _metrics,
+        ownerId: 'daemon-a',
+        now: later,
+        ttl: const Duration(seconds: 10),
+      );
+      expect(admitted.admitted, isTrue);
+    },
+  );
+
+  test(
+    'lease payload preserves optional runtime binding and validates its range',
+    () {
+      final legacy = _request(_vm1);
+      expect(legacy.toJson().containsKey('driver_generation'), isFalse);
+      expect(HostCapacityRequest.fromJson(legacy.toJson()), legacy);
+      final bound = legacy.copyWith(driverGeneration: 3);
+      expect(HostCapacityRequest.fromJson(bound.toJson()), bound);
+      expect(bound, isNot(legacy));
+      expect(
+        () => HostCapacityRequest.fromJson({
+          ...bound.toJson(),
+          'driver_generation': 0,
+        }),
+        throwsArgumentError,
+      );
+    },
+  );
+
   test('all MVP capacity limits return stable retryable decisions', () async {
     final cases =
         <
@@ -134,6 +208,57 @@ void main() {
       );
     }
   });
+
+  test(
+    'runtime generation cannot be replaced or held by stale cleanup',
+    () async {
+      final current = _request(_vm1).copyWith(driverGeneration: 3);
+      await repository.acquire(
+        request: current,
+        limits: _limits(),
+        metrics: _metrics,
+        ownerId: 'daemon-a',
+        now: _now,
+        ttl: const Duration(seconds: 30),
+      );
+      final changed = await repository.acquire(
+        request: current.copyWith(driverGeneration: 4, specGeneration: 2),
+        limits: _limits(),
+        metrics: _metrics,
+        ownerId: 'daemon-a',
+        now: _now,
+        ttl: const Duration(seconds: 30),
+      );
+      expect(changed.constraint, 'lease_fence');
+      final stale = await repository.retainForCleanup(
+        request: current.copyWith(driverGeneration: 2),
+        ownerId: 'daemon-a',
+        now: _now,
+        ttl: const Duration(seconds: 30),
+      );
+      expect(stale, isNull);
+      expect((await repository.list()).single.request, current);
+      await repository.retainForCleanup(
+        request: current,
+        ownerId: 'daemon-a',
+        now: _now,
+        ttl: const Duration(seconds: 30),
+      );
+      expect(
+        await repository.markRunning(
+          _vm1,
+          ownerId: 'daemon-a',
+          operationId: current.operationId!,
+          now: _now,
+        ),
+        isFalse,
+      );
+      expect(
+        (await repository.list()).single.request.phase,
+        HostLeasePhase.cleanup,
+      );
+    },
+  );
 
   test(
     'acquire release renew and running transition are owner scoped and idempotent',

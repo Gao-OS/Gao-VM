@@ -8,8 +8,23 @@ import 'operation_repository.dart';
 import 'persistence_timestamp.dart';
 import 'sqlite_database.dart';
 import 'vm_provisioning_plan.dart';
+import 'vm_bundle_manifest.dart';
 
 const vmProvisioningOutboxTopic = 'vm.provisioning';
+
+enum VmProvisioningCompletionKind { succeeded, failed, cancelled }
+
+/// Durable publication/cleanup outcome, independent of mutable guest disks.
+final class VmProvisioningCompletion {
+  const VmProvisioningCompletion._({
+    required this.kind,
+    required this.manifestDigest,
+    required this.completedAt,
+  });
+  final VmProvisioningCompletionKind kind;
+  final String? manifestDigest;
+  final DateTime completedAt;
+}
 
 /// Durable provisioning input, independent of lifecycle command adoption.
 final class VmProvisioningJob {
@@ -17,11 +32,13 @@ final class VmProvisioningJob {
     required this.plan,
     required this.cancellationRequested,
     required this.createdAt,
+    required this.completion,
   });
 
   final VmProvisioningPlan plan;
   final bool cancellationRequested;
   final DateTime createdAt;
+  final VmProvisioningCompletion? completion;
 }
 
 final class SqliteVmProvisioningRepository {
@@ -56,10 +73,58 @@ final class SqliteVmProvisioningRepository {
         'provisioning plan disagrees with relational identity',
       );
     }
+    VmProvisioningCompletion? completion;
+    if (row['completion_kind'] == null) {
+      if (row['manifest_digest'] != null || row['completed_at'] != null) {
+        throw FormatException('incomplete provisioning completion proof');
+      }
+    } else {
+      final kind = VmProvisioningCompletionKind.values
+          .where((kind) => kind.name == row['completion_kind'])
+          .firstOrNull;
+      if (kind == null ||
+          row['completed_at'] is! String ||
+          (kind == VmProvisioningCompletionKind.succeeded
+              ? row['manifest_digest'] != VmBundleManifest.create(plan).digest
+              : row['manifest_digest'] != null)) {
+        throw FormatException('invalid provisioning completion proof');
+      }
+      final completedAt = DateTime.parse(row['completed_at'] as String).toUtc();
+      final operation = db.select('SELECT * FROM operations WHERE id = ?', [
+        plan.operationId.value,
+      ]).firstOrNull;
+      final request = operation == null
+          ? null
+          : jsonDecode(operation['request_json'] as String);
+      if (operation == null ||
+          operation['type'] != 'vm.create' ||
+          operation['resource_type'] != 'virtual_machine' ||
+          operation['resource_id'] != plan.vmId.value ||
+          operation['state'] != kind.name ||
+          operation['completed_at'] != row['completed_at'] ||
+          request is! Map<String, dynamic> ||
+          (request.containsKey('spec_generation') &&
+              (request['spec_generation'] is! int ||
+                  request['spec_generation'] != plan.specGeneration)) ||
+          (kind == VmProvisioningCompletionKind.succeeded &&
+              row['cancellation_requested'] != 0) ||
+          (kind == VmProvisioningCompletionKind.cancelled &&
+              row['cancellation_requested'] != 1)) {
+        throw FormatException(
+          'provisioning completion disagrees with operation',
+        );
+      }
+      completion = VmProvisioningCompletion._(
+        kind: kind,
+        manifestDigest: row['manifest_digest'] as String?,
+        completedAt: completedAt,
+      );
+    }
     return VmProvisioningJob._(
       plan: plan,
       cancellationRequested: row['cancellation_requested'] == 1,
       createdAt: DateTime.parse(row['created_at'] as String).toUtc(),
+      completion: completion,
     );
   });
 

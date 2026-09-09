@@ -26,6 +26,131 @@ void main() {
         );
       },
     );
+    test(
+      'startup lease loss fails start and kills only its active generation',
+      () {
+        final starting = _starting();
+        final transition = reduce(
+          starting,
+          HostLeaseLost(
+            driverGeneration: 1,
+            specGeneration: 1,
+            error: _driverError,
+          ),
+        );
+        expect(transition.state.desiredState, DesiredState.stopped);
+        expect(transition.state.phase, VmPhase.failed);
+        expect(transition.state.currentOperation?.state, OperationState.failed);
+        expect(transition.state.leaseState, VmLeaseState.held);
+        expect(transition.effects.whereType<ReleaseHostLease>(), isEmpty);
+        final kill = transition.effects.whereType<KillDriver>().single;
+        expect(kill.driverGeneration, 1);
+        expect(kill.operationId, _operation1);
+        expect(transition.effects.whereType<FailOperation>(), hasLength(1));
+        expect(
+          transition.effects.whereType<EmitEvent>().single.type,
+          'vm.host_lease_lost',
+        );
+      },
+    );
+
+    test(
+      'lease loss preserves stop and delete until driver exit and cleanup',
+      () {
+        for (final request in <VmCommand>[
+          StopRequested(_operation2),
+          KillRequested(_operation2),
+          DeleteRequested(_operation2),
+        ]) {
+          final stopping = reduce(_running(), request).state;
+          var transition = reduce(
+            stopping,
+            HostLeaseLost(
+              driverGeneration: 1,
+              specGeneration: 1,
+              error: _driverError,
+            ),
+          );
+          expect(
+            transition.state.currentOperation,
+            same(stopping.currentOperation),
+          );
+          expect(transition.effects.whereType<FailOperation>(), isEmpty);
+          expect(
+            transition.effects.whereType<KillDriver>().single.operationId,
+            _operation2,
+          );
+          transition = reduce(
+            transition.state,
+            DriverExited(
+              operationId: _operation2,
+              driverGeneration: 1,
+              cleanShutdown: false,
+            ),
+          );
+          expect(
+            transition.effects.whereType<ReleaseHostLease>(),
+            hasLength(1),
+          );
+          transition = reduce(transition.state, HostLeaseReleased(_operation2));
+          if (request is DeleteRequested) {
+            expect(
+              transition.effects.whereType<RemoveManagedFiles>(),
+              hasLength(1),
+            );
+          } else {
+            expect(
+              transition.state.currentOperation?.state,
+              OperationState.succeeded,
+            );
+          }
+        }
+      },
+    );
+
+    test('lease loss fences generation and preserves completed operations', () {
+      for (final state in [_spawning(), _starting(), _running()]) {
+        for (final loss in [
+          HostLeaseLost(
+            driverGeneration: 2,
+            specGeneration: 1,
+            error: _driverError,
+          ),
+          HostLeaseLost(
+            driverGeneration: 1,
+            specGeneration: 2,
+            error: _driverError,
+          ),
+        ]) {
+          final ignored = reduce(state, loss);
+          expect(ignored.state, same(state));
+          expect(ignored.effects, isEmpty);
+        }
+      }
+      final running = _running();
+      var transition = reduce(
+        running,
+        HostLeaseLost(
+          driverGeneration: 1,
+          specGeneration: 1,
+          error: _driverError,
+        ),
+      );
+      expect(transition.state.currentOperation, same(running.currentOperation));
+      expect(transition.effects.whereType<FailOperation>(), isEmpty);
+      transition = reduce(
+        transition.state,
+        DriverExited(
+          operationId: _operation1,
+          driverGeneration: 1,
+          cleanShutdown: false,
+        ),
+      );
+      expect(transition.state.desiredState, DesiredState.stopped);
+      expect(transition.effects.whereType<ReleaseHostLease>(), hasLength(1));
+      expect(transition.effects.whereType<CreateRecoveryOperation>(), isEmpty);
+    });
+
     test('start records the desired state and requests a host lease', () {
       final state = VmControllerState.initial(
         vmId: _vmId,
@@ -87,6 +212,40 @@ void main() {
       expect(transition.effects.whereType<SpawnDriver>(), isEmpty);
       expect(transition.effects.whereType<FailOperation>(), hasLength(1));
     });
+
+    test(
+      'late lease failure stops runtime without rewriting completed start',
+      () {
+        final running = _running();
+        expect(running.currentOperation?.state, OperationState.succeeded);
+        final transition = reduce(
+          running,
+          HostLeaseRunningMarkFailed(
+            operationId: _operation1,
+            driverGeneration: 1,
+            error: _driverError,
+          ),
+        );
+
+        expect(
+          transition.state.currentOperation,
+          same(running.currentOperation),
+        );
+        expect(transition.effects.whereType<FailOperation>(), isEmpty);
+        expect(transition.state.desiredState, DesiredState.stopped);
+        expect(transition.state.phase, VmPhase.failed);
+        expect(transition.state.activeDriverGeneration, 1);
+        expect(transition.state.leaseState, VmLeaseState.held);
+        expect(transition.effects.whereType<ReleaseHostLease>(), isEmpty);
+        final kill = transition.effects.whereType<KillDriver>().single;
+        expect(kill.operationId, _operation1);
+        expect(kill.driverGeneration, 1);
+        expect(
+          transition.effects.whereType<EmitEvent>().single.type,
+          'vm.host_lease_lost',
+        );
+      },
+    );
 
     test(
       'successful driver lifecycle applies the spec and completes start',

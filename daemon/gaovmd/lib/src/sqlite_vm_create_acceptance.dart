@@ -11,7 +11,7 @@ import 'vm_repository.dart';
 
 /// Commits create intent only. A provisioning worker owns all filesystem IO
 /// after this boundary; acceptance never implies a published or runnable VM.
-final class SqliteVmCreateAcceptance {
+final class SqliteVmCreateAcceptance implements VmCreateAcceptor {
   SqliteVmCreateAcceptance({
     required GaoVmDatabase database,
     required Duration idempotencyRetention,
@@ -27,6 +27,10 @@ final class SqliteVmCreateAcceptance {
   final GaoVmDatabase _database;
   final DateTime Function() _now;
   final SqliteIdempotencyRepository _idempotency;
+
+  @override
+  Future<OperationAcceptance> create(VmCreateCommand command) =>
+      accept(command);
 
   Future<OperationAcceptance> accept(VmCreateCommand command) async {
     if (_database.hasActiveCallerTransaction) {

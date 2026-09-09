@@ -414,6 +414,11 @@ final class VmController {
             if (durableEffect is CompleteOperation) {
               rolledBackCompletionOperationId = durableEffect.operationId;
             }
+            if (sourceCommand is HostLeaseLost &&
+                durableEffect is FailOperation) {
+              // The proposed terminal state did not commit with this batch.
+              rolledBackCompletionOperationId = durableEffect.operationId;
+            }
           }
           _handleEffectFailure(
             failedEffect,
@@ -424,6 +429,7 @@ final class VmController {
               sourceCommand is! ControllerShutdownRequested &&
               sourceCommand is! ControllerDriverShutdownFailed &&
               sourceCommand is! ControllerLeaseShutdownFailed &&
+              sourceCommand is! HostLeaseLost &&
               sourceCommand is! HostLeaseRunningMarkFailed) {
             break;
           }
@@ -447,11 +453,25 @@ final class VmController {
           index++;
           continue;
         }
-        _handleEffectFailure(effect, error);
+        OperationId? skippedCompletionOperationId;
+        if (effect is MarkHostLeaseRunning) {
+          for (final remaining in effects.skip(index + 1)) {
+            if (remaining is CompleteOperation &&
+                remaining.operationId == effect.operationId) {
+              skippedCompletionOperationId = remaining.operationId;
+            }
+          }
+        }
+        _handleEffectFailure(
+          effect,
+          error,
+          rolledBackCompletionOperationId: skippedCompletionOperationId,
+        );
         if (sourceCommand is! EffectExecutionFailed &&
             sourceCommand is! ControllerShutdownRequested &&
             sourceCommand is! ControllerDriverShutdownFailed &&
             sourceCommand is! ControllerLeaseShutdownFailed &&
+            sourceCommand is! HostLeaseLost &&
             sourceCommand is! HostLeaseRunningMarkFailed) {
           break;
         }
@@ -565,6 +585,7 @@ final class VmController {
         operationId: operationId,
         driverGeneration: driverGeneration,
         error: operationError,
+        rolledBackCompletionOperationId: effectiveRollbackOperationId,
       );
     }
     final underlying = error is VmEffectBatchException ? error.error : error;

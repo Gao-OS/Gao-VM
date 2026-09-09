@@ -10,6 +10,13 @@ import 'vm_repository.dart';
 
 enum VmProvisioningImageRole { kernel, initrd, rootDisk }
 
+final class VmProvisioningImageNotFoundException extends StateError {
+  VmProvisioningImageNotFoundException(this.imageId)
+    : super('provisioning image is missing: $imageId');
+
+  final ImageId imageId;
+}
+
 final class VmProvisioningImageObject {
   VmProvisioningImageObject._(
     this.role,
@@ -232,56 +239,15 @@ final class SqliteVmProvisioningPlanner {
                 request['spec_generation'] != specGeneration))) {
       throw StateError('operation does not authorize this provisioning plan');
     }
-    final images = ImageRepository(_database);
-    final manifests = <ImageId, ImageManifest>{};
     Future<VmProvisioningImageObject> pin(
       ImageId id,
       VmProvisioningImageRole role,
-    ) async {
-      var manifest = manifests[id];
-      if (manifest == null) {
-        final image = await images.get(id);
-        if (image == null)
-          throw StateError('provisioning image is missing: $id');
-        manifest = ImageManifest.fromJson(image.manifest.toJson());
-        if (image.digest != manifest.digest ||
-            image.type != manifest.type ||
-            image.architecture != spec.architecture ||
-            image.guestProfile != manifest.metadata('guest_profile') ||
-            image.version != manifest.metadata('version') ||
-            image.buildId != manifest.metadata('build_id') ||
-            image.channel != manifest.metadata('channel')) {
-          throw FormatException(
-            'image catalog disagrees with immutable manifest',
-          );
-        }
-        manifests[id] = manifest;
-      }
-      final expected = switch (role) {
-        VmProvisioningImageRole.kernel => ImageType.linuxKernel,
-        VmProvisioningImageRole.initrd => ImageType.initrd,
-        VmProvisioningImageRole.rootDisk => ImageType.rawDisk,
-      };
-      final String name;
-      if (manifest.type == ImageType.gaoosBundle) {
-        name = (manifest.toJson()['gaoos'] as Map)[_roleName(role)] as String;
-      } else {
-        if (manifest.type != expected)
-          throw FormatException(
-            'image type does not match ${_roleName(role)} role',
-          );
-        name = 'payload';
-      }
-      final object = manifest.objects[name]!;
-      return VmProvisioningImageObject.fromJson({
-        'role': _roleName(role),
-        'image_id': id.value,
-        'image_digest': manifest.digest,
-        'object_name': name,
-        'object_digest': object['digest'],
-        'size_bytes': object['size_bytes'],
-      });
-    }
+    ) => resolveVmImageObject(
+      _database,
+      id: id,
+      role: role,
+      architecture: spec.architecture,
+    );
 
     final boot = spec.boot;
     final kernel = boot is LinuxKernelBoot
@@ -314,6 +280,59 @@ final class SqliteVmProvisioningPlanner {
       'kernel': kernel?.toJson(),
       'initrd': initrd?.toJson(),
     });
+  });
+}
+
+/// Resolves a catalog reference without filesystem IO. Call inside the same
+/// transaction that commits the referencing spec so image deletion cannot race it.
+Future<VmProvisioningImageObject> resolveVmImageObject(
+  GaoVmDatabase database, {
+  required ImageId id,
+  required VmProvisioningImageRole role,
+  required Architecture architecture,
+}) async {
+  final image = await ImageRepository(database).get(id);
+  if (image == null) throw VmProvisioningImageNotFoundException(id);
+  final manifest = ImageManifest.fromJson(image.manifest.toJson());
+  if (image.digest != manifest.digest ||
+      image.type != manifest.type ||
+      image.architecture != architecture ||
+      image.guestProfile != manifest.metadata('guest_profile') ||
+      image.version != manifest.metadata('version') ||
+      image.buildId != manifest.metadata('build_id') ||
+      image.channel != manifest.metadata('channel')) {
+    throw const FormatException(
+      'image catalog disagrees with immutable manifest',
+    );
+  }
+  final expected = switch (role) {
+    VmProvisioningImageRole.kernel => ImageType.linuxKernel,
+    VmProvisioningImageRole.initrd => ImageType.initrd,
+    VmProvisioningImageRole.rootDisk => ImageType.rawDisk,
+  };
+  final String name;
+  if (manifest.type == ImageType.gaoosBundle) {
+    final selected = (manifest.toJson()['gaoos'] as Map)[_roleName(role)];
+    if (selected is! String || !manifest.objects.containsKey(selected)) {
+      throw FormatException('bundle lacks ${_roleName(role)} object');
+    }
+    name = selected;
+  } else {
+    if (manifest.type != expected) {
+      throw FormatException(
+        'image type does not match ${_roleName(role)} role',
+      );
+    }
+    name = 'payload';
+  }
+  final object = manifest.objects[name]!;
+  return VmProvisioningImageObject.fromJson({
+    'role': _roleName(role),
+    'image_id': id.value,
+    'image_digest': manifest.digest,
+    'object_name': name,
+    'object_digest': object['digest'],
+    'size_bytes': object['size_bytes'],
   });
 }
 

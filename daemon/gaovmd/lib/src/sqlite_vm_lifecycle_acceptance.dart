@@ -29,6 +29,31 @@ final class SqliteVmLifecycleAcceptance
   final Duration idempotencyRetention;
   final DateTime Function() _now;
 
+  static String scopeFor(VmLifecycleCommand command) =>
+      command.action == VmLifecycleAction.delete
+      ? 'DELETE /v1/vms/${command.vmId.value}'
+      : 'POST /v1/vms/${command.vmId.value}/actions/${command.action.name}';
+
+  static VmAcceptedIntent<OperationAcceptance> decodeResponse(
+    VmLifecycleCommand command,
+    JsonObjectValue response,
+  ) {
+    final json = response.toJson();
+    final revision = json['intent_revision'];
+    final value = json['acceptance'];
+    if (json.length != 2 || revision is! int || revision < 1 || value is! Map) {
+      throw const FormatException('invalid lifecycle acceptance response');
+    }
+    final acceptance = OperationAcceptance.fromJson(
+      Map<String, Object?>.from(value),
+    );
+    if (acceptance.resourceType != ResourceType.virtualMachine ||
+        acceptance.resourceId != command.vmId) {
+      throw const FormatException('lifecycle acceptance target mismatch');
+    }
+    return VmAcceptedIntent(intentRevision: revision, result: acceptance);
+  }
+
   @override
   Future<VmAcceptedIntent<OperationAcceptance>> commit(
     VmControllerState executionState,
@@ -159,21 +184,13 @@ final class SqliteVmLifecycleAcceptance
         response = (await accept()).response;
       } else {
         response = (await idempotency.execute(
-          scope: command.action == VmLifecycleAction.delete
-              ? 'DELETE /v1/vms/${command.vmId.value}'
-              : 'POST /v1/vms/${command.vmId.value}/actions/${command.action.name}',
+          scope: scopeFor(command),
           key: key,
           requestBody: command.requestBody,
           action: accept,
         )).response;
       }
-      final json = response.toJson();
-      return VmAcceptedIntent(
-        intentRevision: json['intent_revision'] as int,
-        result: OperationAcceptance.fromJson(
-          Map<String, Object?>.from(json['acceptance'] as Map),
-        ),
-      );
+      return decodeResponse(command, response);
     });
   }
 }

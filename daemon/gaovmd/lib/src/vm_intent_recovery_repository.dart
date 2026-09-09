@@ -88,7 +88,8 @@ final class SqliteVmIntentRecoveryRepository
     // current operation. A later stop does not bypass an earlier FIFO start.
     return !(terminal ||
         head.action == VmCommandAction.start ||
-        head.action == VmCommandAction.restart);
+        head.action == VmCommandAction.restart ||
+        head.action == VmCommandAction.patch);
   });
 
   @override
@@ -220,6 +221,15 @@ final class SqliteVmIntentRecoveryRepository
         'execution restart policy does not match pinned spec',
       );
     VmControllerOperation? currentOperation;
+    // A patch consumes an intent revision without replacing the lifecycle
+    // operation. Validate that operation against the last applied lifecycle.
+    final lifecycleCommand = commands
+        .where(
+          (command) =>
+              command.revision <= applied &&
+              command.action != VmCommandAction.patch,
+        )
+        .lastOrNull;
     final activeId = row['active_operation_id'];
     if (activeId != null) {
       final operation = await SqliteOperationRepository(
@@ -234,15 +244,15 @@ final class SqliteVmIntentRecoveryRepository
       final kind = _operationKind(operation.type);
       if (kind == null)
         throw StateError('active operation is not a VM lifecycle operation');
-      if (activeCommand != null &&
-          operation.id != activeCommand.operationId &&
+      if (lifecycleCommand != null &&
+          operation.id != lifecycleCommand.operationId &&
           !(kind == VmOperationKind.recovery &&
-              (activeCommand.action == VmCommandAction.start ||
-                  activeCommand.action == VmCommandAction.restart)) &&
+              (lifecycleCommand.action == VmCommandAction.start ||
+                  lifecycleCommand.action == VmCommandAction.restart)) &&
           !(operation.type == 'vm.delete.recovery' &&
-              activeCommand.action == VmCommandAction.delete))
+              lifecycleCommand.action == VmCommandAction.delete))
         throw StateError('active operation disagrees with the applied intent');
-      if (activeCommand == null &&
+      if (lifecycleCommand == null &&
           commands.any((command) => command.operationId == operation.id))
         throw StateError(
           'unapplied queued operation cannot be an active checkpoint',

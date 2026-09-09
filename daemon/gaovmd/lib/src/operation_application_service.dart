@@ -140,8 +140,9 @@ final class OperationWaitCommand {
 }
 
 abstract interface class OperationMutationAcceptor {
-  /// Atomically cancels the target operation and creates an `operation.cancel`
-  /// action operation targeting it. Runtime cleanup dispatches after commit.
+  /// Atomically records cancellation intent and creates an `operation.cancel`
+  /// action targeting it. Target cancellation and action success occur only
+  /// after the responsible worker has completed required cleanup.
   Future<OperationAcceptance> cancel(OperationCancelCommand command);
 }
 

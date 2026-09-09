@@ -11,6 +11,7 @@ const coreTableNames = <String>{
   'vm_specs',
   'vm_runtime',
   'vm_provisioning',
+  'vm_provisioning_cancellations',
   'images',
   'operations',
   'events',
@@ -22,7 +23,7 @@ const coreTableNames = <String>{
   'outbox',
 };
 
-const _latestSchemaVersion = 5;
+const _latestSchemaVersion = 7;
 final _transactionContextKey = Object();
 final _savepointScopeKey = Object();
 final _transactionGates = <String, _AsyncGate>{};
@@ -439,6 +440,36 @@ const _migrations = <_Migration>[
       ON vm_provisioning
       BEGIN
         SELECT RAISE(ABORT, 'provisioning input is immutable');
+      END;
+  '''),
+  _Migration(6, '''
+    ALTER TABLE vm_provisioning ADD COLUMN completion_kind TEXT
+      CHECK (completion_kind IN ('succeeded', 'failed', 'cancelled'));
+    ALTER TABLE vm_provisioning ADD COLUMN manifest_digest TEXT;
+    ALTER TABLE vm_provisioning ADD COLUMN completed_at TEXT CHECK (
+      (completion_kind IS NULL AND manifest_digest IS NULL AND completed_at IS NULL)
+      OR (completion_kind IS NOT NULL AND completed_at IS NOT NULL AND (
+        (completion_kind = 'succeeded' AND manifest_digest IS NOT NULL)
+        OR (completion_kind IN ('failed', 'cancelled') AND manifest_digest IS NULL)
+      ))
+    );
+    CREATE TRIGGER vm_provisioning_immutable_completion
+      BEFORE UPDATE ON vm_provisioning WHEN OLD.completion_kind IS NOT NULL
+      BEGIN
+        SELECT RAISE(ABORT, 'provisioning completion is immutable');
+      END;
+  '''),
+  _Migration(7, '''
+    CREATE TABLE vm_provisioning_cancellations (
+      action_id TEXT NOT NULL PRIMARY KEY REFERENCES operations(id),
+      target_id TEXT NOT NULL REFERENCES vm_provisioning(operation_id)
+    );
+    CREATE INDEX vm_provisioning_cancellations_target
+      ON vm_provisioning_cancellations(target_id);
+    CREATE TRIGGER vm_provisioning_cancellations_immutable
+      BEFORE UPDATE ON vm_provisioning_cancellations
+      BEGIN
+        SELECT RAISE(ABORT, 'provisioning cancellation identity is immutable');
       END;
   '''),
 ];

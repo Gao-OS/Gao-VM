@@ -3,76 +3,27 @@ import 'dart:convert';
 import 'package:gaovm_models/gaovm_models.dart';
 
 import 'runtime_driver.dart';
-import 'sqlite_database.dart';
+import 'runtime_assets.dart';
 import 'vm_controller_reducer.dart';
-import 'vm_repository.dart';
-
-abstract interface class VmSpecGenerationReader {
-  Future<VmSpec> read(VmId vmId, int generation);
-}
-
-final class SqliteVmSpecGenerationReader implements VmSpecGenerationReader {
-  const SqliteVmSpecGenerationReader(this._database);
-
-  final GaoVmDatabase _database;
-
-  @override
-  Future<VmSpec> read(VmId vmId, int generation) =>
-      _database.read((connection) {
-        final rows = connection.select(
-          'SELECT spec_json FROM vm_specs WHERE vm_id = ? AND generation = ?',
-          [vmId.value, generation],
-        );
-        if (rows.isEmpty) throw VmNotFoundException(vmId);
-        return VmSpec.fromJson(jsonDecode(rows.single['spec_json']! as String));
-      });
-}
-
-abstract interface class RuntimeAssetPathResolver {
-  Future<String> resolveImage(ImageId imageId);
-
-  Future<String> resolveManagedDisk(VmId vmId, VmDisk disk);
-}
-
-typedef RuntimeBundlePathResolver = Future<String> Function(VmId vmId);
 
 final class VmRuntimeConfigurationResolver {
-  const VmRuntimeConfigurationResolver({
-    required VmSpecGenerationReader specs,
-    required RuntimeAssetPathResolver assets,
-    required RuntimeBundlePathResolver resolveBundlePath,
-  }) : _specs = specs,
-       _assets = assets,
-       _resolveBundlePath = resolveBundlePath;
+  const VmRuntimeConfigurationResolver({required RuntimeAssetResolver assets})
+    : _assets = assets;
 
-  final VmSpecGenerationReader _specs;
-  final RuntimeAssetPathResolver _assets;
-  final RuntimeBundlePathResolver _resolveBundlePath;
+  final RuntimeAssetResolver _assets;
 
-  Future<RuntimeDriverConfiguration> resolve(VmControllerState state) async {
+  Future<void> withConfiguration(
+    VmControllerState state,
+    Future<void> Function(RuntimeDriverConfiguration configuration) use,
+  ) => _assets.withAssets(state, (assets) async {
     final generation = state.activeSpecGeneration ?? state.specGeneration;
-    final spec = await _specs.read(state.vmId, generation);
-    final bundlePath = await _resolveBundlePath(state.vmId);
-    _requireAbsolute(bundlePath, 'bundlePath');
-    final boot = await _resolveBoot(spec.boot, bundlePath);
-    final disks = <RuntimeDiskConfiguration>[];
-    for (final disk in spec.disks) {
-      final path = switch (disk.source) {
-        ExternalDiskSource(:final path) => path,
-        ManagedImageDiskSource() => await _assets.resolveManagedDisk(
-          state.vmId,
-          disk,
-        ),
-      };
-      _requireAbsolute(path, 'disk ${disk.id}');
-      disks.add(
-        RuntimeDiskConfiguration(
-          id: disk.id,
-          path: path,
-          writable: disk.writable,
-        ),
+    if (assets.vmId != state.vmId || assets.specGeneration != generation) {
+      throw StateError(
+        'runtime assets do not match the requested VM generation',
       );
     }
+    final spec = assets.spec;
+    final bundlePath = assets.bundlePath;
     final networks = <RuntimeNetworkConfiguration>[
       for (final network in spec.networks)
         switch (network) {
@@ -88,75 +39,36 @@ final class VmRuntimeConfigurationResolver {
           ),
         },
     ];
-    return RuntimeDriverConfiguration(
-      architecture: spec.architecture,
-      cpu: spec.cpu,
-      memoryBytes: spec.memoryBytes,
-      boot: boot,
-      disks: disks,
-      networks: networks,
-      graphics: RuntimeGraphicsConfiguration(
-        enabled: spec.graphics.enabled,
-        width: spec.graphics.width,
-        height: spec.graphics.height,
-        pixelsPerInch: spec.graphics.enabled
-            ? spec.graphics.pixelsPerInch
-            : null,
-      ),
-      serial: RuntimeSerialConfiguration(
-        enabled: spec.serial.enabled,
-        capture: spec.serial.capture,
-        logPath: '$bundlePath/logs/serial.log',
-      ),
-      guestAgent: RuntimeGuestAgentConfiguration(
-        enabled: spec.guestAgent.enabled,
-        vsockPort: spec.guestAgent.vsockPort,
-      ),
-      bundlePath: bundlePath,
-      driverLogPath: '$bundlePath/logs/driver.log',
-    );
-  }
-
-  Future<RuntimeBootConfiguration> _resolveBoot(
-    BootConfig boot,
-    String bundlePath,
-  ) async => switch (boot) {
-    LinuxKernelBoot(
-      :final kernelImageId,
-      :final initrdImageId,
-      :final commandLine,
-    ) =>
-      RuntimeLinuxBootConfiguration(
-        kernelPath: _absolute(
-          await _assets.resolveImage(kernelImageId),
-          'kernel image',
+    await use(
+      RuntimeDriverConfiguration(
+        architecture: spec.architecture,
+        cpu: spec.cpu,
+        memoryBytes: spec.memoryBytes,
+        boot: assets.boot,
+        disks: assets.disks,
+        networks: networks,
+        graphics: RuntimeGraphicsConfiguration(
+          enabled: spec.graphics.enabled,
+          width: spec.graphics.width,
+          height: spec.graphics.height,
+          pixelsPerInch: spec.graphics.enabled
+              ? spec.graphics.pixelsPerInch
+              : null,
         ),
-        initrdPath: initrdImageId == null
-            ? null
-            : _absolute(
-                await _assets.resolveImage(initrdImageId),
-                'initrd image',
-              ),
-        commandLine: commandLine,
+        serial: RuntimeSerialConfiguration(
+          enabled: spec.serial.enabled,
+          capture: spec.serial.capture,
+          logPath: '$bundlePath/logs/serial.log',
+        ),
+        guestAgent: RuntimeGuestAgentConfiguration(
+          enabled: spec.guestAgent.enabled,
+          vsockPort: spec.guestAgent.vsockPort,
+        ),
+        bundlePath: bundlePath,
+        driverLogPath: '$bundlePath/logs/driver.log',
       ),
-    EfiBoot(:final variableStore, :final variableStorePath) =>
-      RuntimeEfiBootConfiguration(
-        variableStorePath: variableStore == EfiVariableStore.external
-            ? _absolute(variableStorePath!, 'EFI variable store')
-            : '$bundlePath/nvram/efi-variable-store',
-      ),
-  };
-}
-
-String _absolute(String path, String name) {
-  _requireAbsolute(path, name);
-  return path;
-}
-
-void _requireAbsolute(String path, String name) {
-  if (!path.startsWith('/')) {
-    throw ArgumentError.value(path, name, 'runtime path must be absolute');
-  }
+    );
+  });
 }
 
 String _deterministicMac(String vmId, String networkId) {

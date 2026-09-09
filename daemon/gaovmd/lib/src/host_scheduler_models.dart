@@ -74,12 +74,14 @@ final class HostCapacityRequest {
     required this.specGeneration,
     required this.operationId,
     this.driverProcesses = 1,
+    this.driverGeneration,
   }) {
     if (cpuCount <= 0 ||
         memoryBytes <= 0 ||
         diskBytes < 0 ||
         driverProcesses <= 0 ||
-        specGeneration < 1) {
+        specGeneration < 1 ||
+        driverGeneration != null && driverGeneration! < 1) {
       throw ArgumentError('host capacity request is outside valid ranges');
     }
   }
@@ -98,6 +100,7 @@ final class HostCapacityRequest {
       diskBytes: json['disk_bytes']! as int,
       driverProcesses: json['driver_processes']! as int,
       specGeneration: json['spec_generation']! as int,
+      driverGeneration: json['driver_generation'] as int?,
       operationId: json['operation_id'] == null
           ? null
           : OperationId(json['operation_id']! as String),
@@ -119,11 +122,16 @@ final class HostCapacityRequest {
   final int specGeneration;
   final OperationId? operationId;
 
+  /// A runtime allocation remains reserved after TTL expiry until explicit
+  /// release or startup recovery confirms teardown of the previous owner.
+  final int? driverGeneration;
+
   HostCapacityRequest copyWith({
     HostLeasePhase? phase,
     int? specGeneration,
     OperationId? operationId,
     bool clearOperationId = false,
+    int? driverGeneration,
   }) => HostCapacityRequest(
     vmId: vmId,
     cpuCount: cpuCount,
@@ -133,6 +141,7 @@ final class HostCapacityRequest {
     phase: phase ?? this.phase,
     specGeneration: specGeneration ?? this.specGeneration,
     operationId: clearOperationId ? null : operationId ?? this.operationId,
+    driverGeneration: driverGeneration ?? this.driverGeneration,
   );
 
   Map<String, Object?> toJson() => {
@@ -145,6 +154,7 @@ final class HostCapacityRequest {
     'phase': phase.name,
     'spec_generation': specGeneration,
     'operation_id': operationId?.value,
+    if (driverGeneration != null) 'driver_generation': driverGeneration,
   };
 
   @override
@@ -157,7 +167,8 @@ final class HostCapacityRequest {
       other.driverProcesses == driverProcesses &&
       other.phase == phase &&
       other.specGeneration == specGeneration &&
-      other.operationId == operationId;
+      other.operationId == operationId &&
+      other.driverGeneration == driverGeneration;
 
   @override
   int get hashCode => Object.hash(
@@ -169,6 +180,7 @@ final class HostCapacityRequest {
     phase,
     specGeneration,
     operationId,
+    driverGeneration,
   );
 }
 

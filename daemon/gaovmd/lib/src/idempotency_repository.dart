@@ -67,6 +67,58 @@ final class SqliteIdempotencyRepository {
     return sha256.convert(requestBody).toString();
   }
 
+  /// Reads an existing replay without reserving, deleting, or extending a key.
+  /// A miss is not acceptance: callers must still use [execute] at commit.
+  Future<IdempotencyResult?> lookup({
+    required String scope,
+    required String key,
+    required List<int> requestBody,
+  }) {
+    final hash = _validatedHash(scope, key, requestBody);
+    return _database.read((connection) {
+      final rows = connection.select(
+        'SELECT * FROM idempotency_keys WHERE scope = ? AND key = ?',
+        [scope, key],
+      );
+      return rows.isEmpty
+          ? null
+          : _replay(rows.single, scope, key, hash, _now().toUtc());
+    });
+  }
+
+  static String _validatedHash(String scope, String key, List<int> body) {
+    if (scope.isEmpty) throw ArgumentError.value(scope, 'scope');
+    if (key.isEmpty || key.length > 255) {
+      throw ArgumentError.value(key, 'key', 'must contain 1 to 255 characters');
+    }
+    return requestHash(body);
+  }
+
+  static IdempotencyResult? _replay(
+    Map<String, Object?> row,
+    String scope,
+    String key,
+    String hash,
+    DateTime now,
+  ) {
+    final response = row['response_json'] as String?;
+    final expired = !DateTime.parse(row['expires_at'] as String).isAfter(now);
+    // An unfinished action does not become safe to repeat with age.
+    if (response != null && expired) return null;
+    if (row['request_hash'] != hash) {
+      throw IdempotencyConflictException(scope, key);
+    }
+    if (response == null) {
+      throw IdempotencyInProgressException(scope, key);
+    }
+    return IdempotencyResult(
+      response: JsonObjectValue.fromJson(
+        jsonDecode(response) as Map<String, dynamic>,
+      ),
+      replayed: true,
+    );
+  }
+
   /// [scope] must identify the method and target resource, not merely its route
   /// template. The caller supplies the same exact body bytes on retries.
   ///
@@ -80,11 +132,7 @@ final class SqliteIdempotencyRepository {
     required List<int> requestBody,
     required Future<IdempotencyResponse> Function() action,
   }) {
-    if (scope.isEmpty) throw ArgumentError.value(scope, 'scope');
-    if (key.isEmpty || key.length > 255) {
-      throw ArgumentError.value(key, 'key', 'must contain 1 to 255 characters');
-    }
-    final hash = requestHash(requestBody);
+    final hash = _validatedHash(scope, key, requestBody);
     return _database.transaction((connection) async {
       final now = _now().toUtc();
       final rows = connection.select(
@@ -92,26 +140,8 @@ final class SqliteIdempotencyRepository {
         [scope, key],
       );
       if (rows.isNotEmpty) {
-        final row = rows.single;
-        final response = row['response_json'] as String?;
-        final expired = !DateTime.parse(
-          row['expires_at'] as String,
-        ).isAfter(now);
-        // An unfinished action does not become safe to repeat with age.
-        if (response == null || !expired) {
-          if (row['request_hash'] != hash) {
-            throw IdempotencyConflictException(scope, key);
-          }
-          if (response == null) {
-            throw IdempotencyInProgressException(scope, key);
-          }
-          return IdempotencyResult(
-            response: JsonObjectValue.fromJson(
-              jsonDecode(response) as Map<String, dynamic>,
-            ),
-            replayed: true,
-          );
-        }
+        final replay = _replay(rows.single, scope, key, hash, now);
+        if (replay != null) return replay;
         connection.execute(
           'DELETE FROM idempotency_keys WHERE scope = ? AND key = ?',
           [scope, key],

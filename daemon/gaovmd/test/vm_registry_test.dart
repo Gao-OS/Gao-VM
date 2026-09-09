@@ -5,6 +5,211 @@ import 'package:gaovmd/gaovmd.dart';
 import 'package:test/test.dart';
 
 void main() {
+  test('lease-loss notification never activates a cold catalog VM', () async {
+    final repository = _MemoryVmRepository([_vm(_vm1)]);
+    final registry = VmRegistry(
+      repository: repository,
+      operations: _MemoryOperationRepository(),
+      effectRunner: _RegistryRunner(),
+    );
+    final error = OperationError(
+      code: ErrorCode.hostResourceExhausted,
+      message: 'lease lost',
+      retryable: true,
+      details: JsonObjectValue.empty,
+    );
+    await registry.handleHostLeaseLost(_vm1, 1, _operation1, 1, error);
+    await registry.handleHostLeaseLost(_vm1, 1, null, null, error);
+    expect(registry.activeCount, 0);
+    await registry.shutdown();
+  });
+  test(
+    'a moved checkpoint is retried but a stable recovery error is surfaced',
+    () async {
+      final repository = _MemoryVmRepository([_vm(_vm1)])
+        ..releaseGets.complete();
+      final entered = Completer<void>();
+      final release = Completer<bool>();
+      final failure = StateError('checkpoint mismatch');
+      final recovery = _ObservedRecovery()
+        ..check = (_) {
+          if (!entered.isCompleted) {
+            entered.complete();
+            return release.future;
+          }
+          return Future.error(failure);
+        };
+      final registry = VmRegistry(
+        repository: repository,
+        operations: _MemoryOperationRepository(),
+        effectRunner: _RegistryRunner(),
+        recovery: recovery,
+      );
+      try {
+        final controller = (await registry.get(_vm1))!;
+        final pending = registry.reconcileVm(_vm1);
+        await entered.future;
+        await controller.submit(
+          const SpecUpdated(
+            specGeneration: 2,
+            restartPolicy: RestartPolicy.never,
+            restartRequired: false,
+          ),
+        );
+        release.completeError(failure);
+        await pending;
+        await expectLater(registry.reconcileVm(_vm1), throwsA(same(failure)));
+        expect(recovery.checks, 2);
+      } finally {
+        if (!release.isCompleted) release.complete(false);
+        await registry.shutdown();
+      }
+    },
+  );
+
+  test('tick retires a completed deletion omitted from the catalog', () async {
+    final repository = _MemoryVmRepository([_vm(_vm1)])..releaseGets.complete();
+    final registry = VmRegistry(
+      repository: repository,
+      operations: _MemoryOperationRepository(),
+      effectRunner: _RegistryRunner(),
+    );
+    final controller = (await registry.get(_vm1))!;
+    await controller.submit(DeleteRequested(_operation1));
+    expect(controller.state.phase, VmPhase.deleted);
+    expect(registry.activeCount, 1);
+    repository._virtualMachines.remove(_vm1);
+    try {
+      await registry.reconcileTick(onError: (_, error, _) => fail('$error'));
+      await registry.reconcileVm(_vm1);
+      expect(registry.activeCount, 0);
+      expect(controller.isAccepting, isFalse);
+    } finally {
+      await registry.shutdown();
+    }
+  });
+
+  test('recovery guard waits for the existing effect lane to settle', () async {
+    final repository = _MemoryVmRepository([_vm(_vm1)])..releaseGets.complete();
+    final recovery = _ObservedRecovery();
+    final runner = _PausedAcquisitionRunner();
+    final registry = VmRegistry(
+      repository: repository,
+      operations: _MemoryOperationRepository(),
+      effectRunner: runner,
+      recovery: recovery,
+    );
+    final controller = (await registry.get(_vm1))!;
+    final start = controller.submit(StartRequested(_operation1));
+    await runner.entered.future;
+    try {
+      await registry.reconcileTick(onError: (_, error, _) => fail('$error'));
+      expect(recovery.checks, 0);
+      await registry.shutdown().timeout(const Duration(seconds: 1));
+      await start;
+      expect(recovery.checks, 0);
+    } finally {
+      if (!runner.release.isCompleted) runner.release.complete();
+      await registry.shutdown();
+    }
+  });
+
+  test(
+    'ticks skip provisioning and isolate per-VM activation failures',
+    () async {
+      final repository = _MemoryVmRepository([
+        _vm(_vm1),
+        _vm(_vm2),
+        _vm(VmId.generate(), phase: VmPhase.provisioning),
+      ])..releaseGets.complete();
+      final failure = StateError('damaged operation history');
+      final operations = _FailingOperationRepository(_vm1, failure);
+      final registry = VmRegistry(
+        repository: repository,
+        operations: operations,
+        effectRunner: _RegistryRunner(),
+      );
+      final reported = Completer<VmId>();
+      try {
+        await registry.reconcileTick(
+          onError: (id, error, _) {
+            expect(error, same(failure));
+            reported.complete(id);
+          },
+        );
+        expect(await reported.future, _vm1);
+        await registry.reconcileVm(_vm2);
+        expect(registry.activeCount, 1);
+        expect(registry.activeControllers.single.state.vmId, _vm2);
+      } finally {
+        await registry.shutdown();
+      }
+    },
+  );
+
+  test(
+    'a catalog tick completing after shutdown cannot activate controllers',
+    () async {
+      final release = Completer<void>();
+      final repository = _MemoryVmRepository([
+        _vm(_vm1),
+      ], listGate: release.future)..releaseGets.complete();
+      final registry = VmRegistry(
+        repository: repository,
+        operations: _MemoryOperationRepository(),
+        effectRunner: _RegistryRunner(),
+      );
+      final tick = registry.reconcileTick(
+        onError: (_, error, _) => fail('$error'),
+      );
+      final rejected = expectLater(
+        tick,
+        throwsA(isA<VmRegistryClosedException>()),
+      );
+      await repository.listStarted.future;
+      final closing = registry.shutdown();
+      release.complete();
+      await closing;
+      await rejected;
+      expect(registry.activeCount, 0);
+    },
+  );
+
+  test('safety ticks coalesce a slow VM without blocking another VM', () async {
+    final repository = _MemoryVmRepository([
+      _vm(_vm1, desiredState: DesiredState.running),
+      _vm(_vm2),
+    ])..releaseGets.complete();
+    final operations = _MemoryOperationRepository();
+    await operations.createVmOperation(_vm1, 'vm.start');
+    final runner = _PausedAcquisitionRunner();
+    final registry = VmRegistry(
+      repository: repository,
+      operations: operations,
+      effectRunner: runner,
+    );
+    final errors = <Object>[];
+    try {
+      await registry.reconcileTick(onError: (_, error, _) => errors.add(error));
+      await runner.entered.future;
+      final slow = registry.reconcileVm(_vm1);
+      await registry.reconcileVm(_vm2).timeout(const Duration(seconds: 1));
+      await registry.reconcileTick(onError: (_, error, _) => errors.add(error));
+      expect(registry.reconcileVm(_vm1), same(slow));
+      await registry.reconcileVm(_vm2).timeout(const Duration(seconds: 1));
+      expect(registry.activeCount, 2);
+      expect(errors, isEmpty);
+      final closing = registry.shutdown();
+      await closing.timeout(const Duration(seconds: 1));
+      await slow;
+      expect(runner.cancelled, isTrue);
+      expect(registry.activeCount, 0);
+    } finally {
+      if (!runner.release.isCompleted) runner.release.complete();
+      await registry.shutdown();
+    }
+  });
+
   test(
     'lazy activation is singleton-safe under concurrent get races',
     () async {
@@ -113,6 +318,90 @@ void main() {
       await expectLater(activation, throwsA(isA<VmRegistryClosedException>()));
       await shutdown;
       expect(registry.activeCount, 0);
+    },
+  );
+
+  test(
+    'shutdown cancels effects while startup reconciliation waits for idle',
+    () async {
+      final repository = _MemoryVmRepository([
+        _vm(_vm1, desiredState: DesiredState.running),
+      ])..releaseGets.complete();
+      final operations = _MemoryOperationRepository();
+      await operations.createVmOperation(_vm1, 'vm.start');
+      final runner = _PausedAcquisitionRunner();
+      final registry = VmRegistry(
+        repository: repository,
+        operations: operations,
+        effectRunner: runner,
+      );
+      final reconcile = registry.reconcileOnStartup();
+      await runner.entered.future;
+      try {
+        await registry.shutdown().timeout(const Duration(seconds: 1));
+        await reconcile;
+        expect(runner.cancelled, isTrue);
+        expect(registry.activeCount, 0);
+      } finally {
+        if (!runner.release.isCompleted) runner.release.complete();
+        await registry.shutdown();
+        await reconcile;
+      }
+    },
+  );
+
+  test(
+    'shutdown drains a rejected reconcile waiting for an active effect',
+    () async {
+      final repository = _MemoryVmRepository([_vm(_vm1)])
+        ..releaseGets.complete();
+      final runner = _PausedAcquisitionRunner();
+      final registry = VmRegistry(
+        repository: repository,
+        operations: _MemoryOperationRepository(),
+        effectRunner: runner,
+      );
+      final controller = (await registry.get(_vm1))!;
+      final start = controller.submit(StartRequested(_operation1));
+      await runner.entered.future;
+      final reconcile = registry.reconcileOnStartup();
+      await Future<void>.delayed(Duration.zero);
+      final rejection = expectLater(
+        reconcile,
+        throwsA(isA<VmRegistryClosedException>()),
+      );
+      await registry.shutdown().timeout(const Duration(seconds: 1));
+      await rejection;
+      await start;
+      expect(registry.activeCount, 0);
+    },
+  );
+
+  test(
+    'failed shutdown keeps its controller for a successful cleanup retry',
+    () async {
+      final repository = _MemoryVmRepository([_vm(_vm1)])
+        ..releaseGets.complete();
+      final runner = _PausedAcquisitionRunner()..failCleanup = true;
+      final registry = VmRegistry(
+        repository: repository,
+        operations: _MemoryOperationRepository(),
+        effectRunner: runner,
+      );
+      final controller = (await registry.get(_vm1))!;
+      final start = controller.submit(StartRequested(_operation1));
+      await runner.entered.future;
+      await expectLater(
+        registry.shutdown(),
+        throwsA(isA<VmControllerShutdownException>()),
+      );
+      await start;
+      expect(registry.activeCount, 1);
+      expect(controller.isAccepting, isFalse);
+      runner.failCleanup = false;
+      await registry.shutdown();
+      expect(registry.activeCount, 0);
+      expect(controller.state.leaseState, VmLeaseState.none);
     },
   );
 
@@ -246,6 +535,35 @@ final class _RegistryRunner implements VmEffectRunner {
   }
 }
 
+final class _PausedAcquisitionRunner
+    implements VmEffectRunner, CancellableVmEffectRunner {
+  final entered = Completer<void>();
+  final release = Completer<void>();
+  bool cancelled = false;
+  bool failCleanup = false;
+
+  @override
+  Future<VmCommand?> run(VmEffect effect, VmControllerState state) async {
+    if (effect is AcquireHostLease) {
+      entered.complete();
+      await release.future;
+    }
+    if (effect is ShutdownLease) {
+      if (failCleanup) throw StateError('lease cleanup failed');
+      return const ControllerLeaseShutdownSucceeded();
+    }
+    return null;
+  }
+
+  @override
+  Future<void> cancel(VmEffect effect, VmControllerState state) async {
+    if (effect is AcquireHostLease) {
+      cancelled = true;
+      if (!release.isCompleted) release.complete();
+    }
+  }
+}
+
 final class _RollbackDeleteRunner implements TransactionalVmEffectRunner {
   final batches = <List<String>>[];
 
@@ -348,7 +666,40 @@ final class _MemoryVmRepository implements VmRepository {
   }) => throw UnimplementedError();
 }
 
-final class _MemoryOperationRepository implements OperationRepository {
+final class _ObservedRecovery implements VmIntentRecoveryRepository {
+  int checks = 0;
+  Future<bool> Function(VmControllerState)? check;
+  @override
+  Future<VmIntentRecoverySnapshot?> restore(VmId id) async => null;
+  @override
+  Future<bool> hasUnpublishedCommands(VmId id) async => false;
+  @override
+  Future<bool> shouldDeferReconciliation(VmControllerState state) async {
+    checks++;
+    return check == null ? false : await check!(state);
+  }
+}
+
+final class _FailingOperationRepository extends _MemoryOperationRepository {
+  _FailingOperationRepository(this.vmId, this.error);
+  final VmId vmId;
+  final Object error;
+  @override
+  Future<List<Operation>> list({
+    ResourceType? resourceType,
+    ResourceId? resourceId,
+    OperationState? state,
+  }) {
+    if (resourceId == vmId) return Future.error(error);
+    return super.list(
+      resourceType: resourceType,
+      resourceId: resourceId,
+      state: state,
+    );
+  }
+}
+
+class _MemoryOperationRepository implements OperationRepository {
   final operations = <OperationId, Operation>{};
   var _sequence = 0;
 

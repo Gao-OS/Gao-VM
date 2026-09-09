@@ -9,6 +9,14 @@ import 'vm_effect_runner.dart';
 
 typedef RuntimeDriverConfigurationResolver =
     Future<RuntimeDriverConfiguration> Function(VmControllerState state);
+
+/// Owns configuration asset lifetimes through the driver's configure response.
+/// The provider must await [use] before releasing its locks or file handles.
+typedef RuntimeDriverConfigurationScope =
+    Future<void> Function(
+      VmControllerState state,
+      Future<void> Function(RuntimeDriverConfiguration configuration) use,
+    );
 typedef RuntimeDriverCommandDispatcher =
     Future<void> Function(VmId vmId, VmCommand command);
 typedef RuntimeDriverEventObserver = void Function(RuntimeEvent event);
@@ -45,8 +53,27 @@ final class RuntimeDriverEffectAdapter
     RuntimeDriverEventObserver? observeEvent,
     RuntimeDriverLogObserver? observeLog,
     DateTime Function()? now,
+  }) : this.scopedConfiguration(
+         factory: factory,
+         withConfiguration: (state, use) async =>
+             use(await resolveConfiguration(state)),
+         dispatch: dispatch,
+         requiredCapabilities: requiredCapabilities,
+         observeEvent: observeEvent,
+         observeLog: observeLog,
+         now: now,
+       );
+
+  RuntimeDriverEffectAdapter.scopedConfiguration({
+    required RuntimeDriverFactory factory,
+    required RuntimeDriverConfigurationScope withConfiguration,
+    required RuntimeDriverCommandDispatcher dispatch,
+    DriverCapabilities? requiredCapabilities,
+    RuntimeDriverEventObserver? observeEvent,
+    RuntimeDriverLogObserver? observeLog,
+    DateTime Function()? now,
   }) : _factory = factory,
-       _resolveConfiguration = resolveConfiguration,
+       _withConfiguration = withConfiguration,
        _dispatch = dispatch,
        _requiredCapabilities =
            requiredCapabilities ?? DriverCapabilities.runtimeCore,
@@ -55,7 +82,7 @@ final class RuntimeDriverEffectAdapter
        _now = now ?? DateTime.now;
 
   final RuntimeDriverFactory _factory;
-  final RuntimeDriverConfigurationResolver _resolveConfiguration;
+  final RuntimeDriverConfigurationScope _withConfiguration;
   final RuntimeDriverCommandDispatcher _dispatch;
   final DriverCapabilities _requiredCapabilities;
   final RuntimeDriverEventObserver? _observeEvent;
@@ -165,14 +192,15 @@ final class RuntimeDriverEffectAdapter
     int driverGeneration,
   ) => _translateErrors(() async {
     final record = _requireRecord(state.vmId, driverGeneration);
-    final configuration = await _resolveConfiguration(state);
-    record.latestOperationId = operationId;
-    await record.session.execute(
-      RuntimeConfigureCommand(
-        correlation: _correlation(state.vmId, driverGeneration, operationId),
-        configuration: configuration,
-      ),
-    );
+    await _withConfiguration(state, (configuration) async {
+      record.latestOperationId = operationId;
+      await record.session.execute(
+        RuntimeConfigureCommand(
+          correlation: _correlation(state.vmId, driverGeneration, operationId),
+          configuration: configuration,
+        ),
+      );
+    });
   });
 
   @override
@@ -250,6 +278,8 @@ final class RuntimeDriverEffectAdapter
         final adapterFailure = _dispatchFailure;
         if (adapterFailure != null) throw adapterFailure;
         for (final record in _records.values) {
+          final cleanupFailure = record.cleanupFailure;
+          if (cleanupFailure != null) throw cleanupFailure;
           final failure = record.dispatchFailure;
           if (failure != null) throw failure;
         }
@@ -258,7 +288,16 @@ final class RuntimeDriverEffectAdapter
     }
   }
 
-  Future<void> close() => _closeFuture ??= _close();
+  Future<void> close() {
+    final pending = _closeFuture;
+    if (pending != null) return pending;
+    late Future<void> attempt;
+    attempt = _close().whenComplete(() {
+      if (identical(_closeFuture, attempt)) _closeFuture = null;
+    });
+    _closeFuture = attempt;
+    return attempt;
+  }
 
   Future<void> _close() async {
     _closed = true;
@@ -274,13 +313,9 @@ final class RuntimeDriverEffectAdapter
       }
     }
     final records = List<_RuntimeDriverRecord>.of(_records.values);
-    _records.clear();
-    _activeByVm.clear();
     for (final record in records) {
       record.terminalReported = true;
-      await record.eventSubscription?.cancel();
-      await record.logSubscription?.cancel();
-      await _factory.release(record.session.correlation);
+      await _cleanupRecord(record);
     }
   }
 
@@ -296,6 +331,10 @@ final class RuntimeDriverEffectAdapter
       // A stop may exit before its superseding kill reaches the socket. Process
       // termination still satisfies the kill for this exact owned generation.
       record.terminalOperationId = operationId;
+      if (record.terminalReported) {
+        _scheduleCleanup(record);
+        return;
+      }
     }
     await record.session.execute(command);
   });
@@ -340,6 +379,7 @@ final class RuntimeDriverEffectAdapter
   );
 
   void _routeEvent(_RuntimeDriverRecord record, RuntimeEvent event) {
+    if (record.terminalReported) return;
     if (!_matchesCorrelation(record, event.correlation)) {
       _routeChannelError(record, _foreignCorrelationError());
       return;
@@ -398,9 +438,9 @@ final class RuntimeDriverEffectAdapter
   void _routeChannelError(_RuntimeDriverRecord record, Object error) {
     if (record.terminalReported) return;
     record.terminalReported = true;
-    _enqueue(
+    _scheduleCleanup(
       record,
-      DriverChannelClosed(
+      terminalCommand: DriverChannelClosed(
         operationId: record.latestOperationId,
         driverGeneration: record.session.correlation.driverGeneration,
         error: OperationError(
@@ -412,7 +452,6 @@ final class RuntimeDriverEffectAdapter
         occurredAt: _now().toUtc(),
       ),
     );
-    _scheduleCleanup(record);
   }
 
   void _routeLog(_RuntimeDriverRecord record, RuntimeDriverLogChunk chunk) {
@@ -446,9 +485,9 @@ final class RuntimeDriverEffectAdapter
   }) {
     if (record.terminalReported) return;
     record.terminalReported = true;
-    _enqueue(
+    _scheduleCleanup(
       record,
-      DriverExited(
+      terminalCommand: DriverExited(
         operationId:
             record.terminalOperationId ??
             _eventOperationId(record, correlation),
@@ -458,18 +497,47 @@ final class RuntimeDriverEffectAdapter
         occurredAt: occurredAt,
       ),
     );
-    _scheduleCleanup(record);
   }
 
-  void _scheduleCleanup(_RuntimeDriverRecord record) {
+  void _scheduleCleanup(
+    _RuntimeDriverRecord record, {
+    VmCommand? terminalCommand,
+  }) {
+    if (terminalCommand != null) record.terminalCommand = terminalCommand;
     if (record.cleanupScheduled) return;
     record.cleanupScheduled = true;
     record.dispatchTail = record.dispatchTail.then((_) async {
-      await _cleanupRecord(record);
+      try {
+        await _cleanupRecord(record, terminalCommand: record.terminalCommand);
+        record.cleanupFailure = null;
+      } catch (error) {
+        final failure = error is RuntimeDriverError
+            ? error
+            : RuntimeDriverError(
+                code: RuntimeDriverErrorCode.driverUnhealthy,
+                message: 'driver process release failed: $error',
+                retryable: true,
+              );
+        record.cleanupFailure = failure;
+        await _dispatchCommand(
+          record,
+          EffectExecutionFailed(
+            effectType: 'DriverProcessRelease',
+            operationId: record.terminalOperationId ?? record.latestOperationId,
+            driverGeneration: record.session.correlation.driverGeneration,
+            error: _operationError(failure),
+          ),
+        );
+      } finally {
+        record.cleanupScheduled = false;
+      }
     });
   }
 
-  Future<void> _cleanupRecord(_RuntimeDriverRecord record) async {
+  Future<void> _cleanupRecord(
+    _RuntimeDriverRecord record, {
+    VmCommand? terminalCommand,
+  }) async {
     final key = _RuntimeDriverKey(
       record.session.correlation.vmId,
       record.session.correlation.driverGeneration,
@@ -477,32 +545,72 @@ final class RuntimeDriverEffectAdapter
     await record.eventSubscription?.cancel();
     await record.logSubscription?.cancel();
     await _factory.release(record.session.correlation);
-    if (identical(_records[key], record)) _records.remove(key);
     if (_activeByVm[record.session.correlation.vmId] == key) {
       _activeByVm.remove(record.session.correlation.vmId);
     }
+    if (terminalCommand != null && !_closed) {
+      // A newer stop/kill can own this generation while process release waits.
+      // Report completion to that accepted operation, never to a replacement
+      // generation or the superseded operation captured before cleanup.
+      final completion = switch (terminalCommand) {
+        DriverExited(
+          :final driverGeneration,
+          :final cleanShutdown,
+          :final error,
+          :final occurredAt,
+        ) =>
+          DriverExited(
+            operationId: record.latestOperationId,
+            driverGeneration: driverGeneration,
+            cleanShutdown: cleanShutdown,
+            error: error,
+            occurredAt: occurredAt,
+          ),
+        DriverChannelClosed(
+          :final driverGeneration,
+          :final error,
+          :final occurredAt,
+        ) =>
+          DriverChannelClosed(
+            operationId: record.latestOperationId,
+            driverGeneration: driverGeneration,
+            error: error,
+            occurredAt: occurredAt,
+          ),
+        _ => terminalCommand,
+      };
+      await _dispatchCommand(record, completion);
+    }
+    if (identical(_records[key], record)) _records.remove(key);
   }
 
   void _enqueue(_RuntimeDriverRecord record, VmCommand command) {
     if (record.dispatchFailure != null) return;
     record.dispatchTail = record.dispatchTail.then((_) async {
-      if (record.dispatchFailure != null) return;
-      try {
-        await _dispatch(record.session.correlation.vmId, command);
-      } catch (error, stackTrace) {
-        final failure = RuntimeDriverDispatchException(
-          vmId: record.session.correlation.vmId,
-          driverGeneration: record.session.correlation.driverGeneration,
-          command: command,
-          error: error,
-          stackTrace: stackTrace,
-        );
-        record.dispatchFailure = failure;
-        _dispatchFailure ??= failure;
-        record.terminalReported = true;
-        _scheduleCleanup(record);
-      }
+      await _dispatchCommand(record, command);
     });
+  }
+
+  Future<void> _dispatchCommand(
+    _RuntimeDriverRecord record,
+    VmCommand command,
+  ) async {
+    if (record.dispatchFailure != null) return;
+    try {
+      await _dispatch(record.session.correlation.vmId, command);
+    } catch (error, stackTrace) {
+      final failure = RuntimeDriverDispatchException(
+        vmId: record.session.correlation.vmId,
+        driverGeneration: record.session.correlation.driverGeneration,
+        command: command,
+        error: error,
+        stackTrace: stackTrace,
+      );
+      record.dispatchFailure = failure;
+      _dispatchFailure ??= failure;
+      record.terminalReported = true;
+      _scheduleCleanup(record);
+    }
   }
 
   OperationId _eventOperationId(
@@ -550,6 +658,8 @@ final class _RuntimeDriverRecord {
   Future<void> dispatchTail = Future<void>.value();
   bool terminalReported = false;
   bool cleanupScheduled = false;
+  VmCommand? terminalCommand;
+  RuntimeDriverError? cleanupFailure;
   bool cleanShutdownObserved = false;
   RuntimeDriverError? runtimeError;
   RuntimeDriverDispatchException? dispatchFailure;

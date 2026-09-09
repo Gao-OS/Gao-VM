@@ -13,11 +13,15 @@ abstract interface class HostMetricsSource {
   Future<HostMetrics> sample();
 }
 
+/// Completes when the receiver has accepted the correlated loss notification.
+/// Failures are retried. Receivers must fence stale work against current state;
+/// a newer acquisition cannot cancel a callback that is already executing.
 typedef HostLeaseLostHandler =
-    void Function(
+    FutureOr<void> Function(
       VmId vmId,
       int specGeneration,
       OperationId? operationId,
+      int? driverGeneration,
       OperationError error,
     );
 
@@ -25,6 +29,7 @@ abstract interface class HostCapacityCatalog {
   Future<HostCapacityRequest> requestFor(
     VmId vmId, {
     required HostLeasePhase phase,
+    int? specGeneration,
   });
 
   Future<List<HostCapacityRequest>> recoveryRequests();
@@ -43,9 +48,14 @@ final class VmRepositoryHostCapacityCatalog implements HostCapacityCatalog {
   Future<HostCapacityRequest> requestFor(
     VmId vmId, {
     required HostLeasePhase phase,
+    int? specGeneration,
   }) async {
     final virtualMachine = await _repository.get(vmId);
     if (virtualMachine == null) throw VmNotFoundException(vmId);
+    if (specGeneration != null &&
+        virtualMachine.status.specGeneration != specGeneration) {
+      throw StateError('requested capacity spec generation is unavailable');
+    }
     return _request(virtualMachine, phase);
   }
 
@@ -155,6 +165,7 @@ final class HostScheduler
   final DateTime Function() _now;
   final Map<VmId, _RenewalRegistration> _renewals = {};
   final Map<VmId, _LeaseLossDelivery> _leaseLosses = {};
+  final Set<Completer<void>> _leaseLossCompletions = {};
   final Set<_AcquisitionKey> _inFlightAcquisitions = {};
   final Set<_AcquisitionKey> _cancelledAcquisitions = {};
   final Map<VmId, _AcquisitionKey> _latestAcquisitions = {};
@@ -182,11 +193,13 @@ final class HostScheduler
       final catalogRequest = await _catalog.requestFor(
         state.vmId,
         phase: HostLeasePhase.booting,
+        specGeneration: state.specGeneration,
       );
       _throwIfCancelled(key);
       final request = catalogRequest.copyWith(
         specGeneration: state.specGeneration,
         operationId: operationId,
+        driverGeneration: state.driverGeneration + 1,
       );
       final metrics = await _metrics.sample();
       _throwIfCancelled(key);
@@ -226,7 +239,11 @@ final class HostScheduler
     final completion = Completer<void>();
     _directAdmissionCompletions.add(completion);
     try {
-      final catalogRequest = await _catalog.requestFor(vmId, phase: phase);
+      final catalogRequest = await _catalog.requestFor(
+        vmId,
+        phase: phase,
+        specGeneration: specGeneration,
+      );
       _ensureOpen();
       final request = catalogRequest.copyWith(
         specGeneration: specGeneration,
@@ -264,6 +281,11 @@ final class HostScheduler
     OperationId? operationId,
   ) async {
     _stopRenewal(state.vmId);
+    final loss = _leaseLosses[state.vmId];
+    _stopLeaseLoss(state.vmId);
+    // A retention already in flight may still insert its cleanup hold. Drain
+    // only that write, not the receiver (which can itself request this release).
+    await loss?.retentionCompletion?.future;
     final released = await _leases.release(state.vmId, ownerId: _ownerId);
     if (!released) throw VmEffectException(_leaseOwnerError(state.vmId));
   }
@@ -278,18 +300,21 @@ final class HostScheduler
       final catalogRequest = await _catalog.requestFor(
         state.vmId,
         phase: HostLeasePhase.cleanup,
+        specGeneration: state.activeSpecGeneration ?? state.specGeneration,
       );
       final cleanup = await _leases.retainForCleanup(
         request: catalogRequest.copyWith(
           phase: HostLeasePhase.cleanup,
-          specGeneration: state.specGeneration,
           operationId: operationId,
+          driverGeneration: state.activeDriverGeneration,
         ),
         ownerId: _ownerId,
         now: _now(),
         ttl: _leaseTtl,
       );
-      if (cleanup != null) _startRenewal(cleanup);
+      if (cleanup != null) {
+        _startRenewal(cleanup);
+      }
       throw VmEffectException(_leaseLostError(state.vmId));
     }
   }
@@ -389,6 +414,9 @@ final class HostScheduler
         .followedBy(
           _directAdmissionCompletions.map((completion) => completion.future),
         )
+        .followedBy(
+          _leaseLossCompletions.map((completion) => completion.future),
+        )
         .toList();
     try {
       await Future.wait(waiters).timeout(_shutdownTimeout);
@@ -435,9 +463,7 @@ final class HostScheduler
       unawaited(_renew(current));
     });
     _renewals[lease.request.vmId] = _RenewalRegistration(
-      vmId: lease.request.vmId,
-      specGeneration: lease.request.specGeneration,
-      operationId: lease.request.operationId,
+      request: lease.request,
       handle: handle,
     );
   }
@@ -478,24 +504,41 @@ final class HostScheduler
     if (_closed) return;
     _stopLeaseLoss(registration.vmId);
     final delivery = _LeaseLossDelivery(
-      vmId: registration.vmId,
-      specGeneration: registration.specGeneration,
-      operationId: registration.operationId,
+      request: registration.request,
       error: _leaseLostError(registration.vmId),
     );
     _leaseLosses[registration.vmId] = delivery;
     _deliverLeaseLoss(delivery);
   }
 
-  void _deliverLeaseLoss(_LeaseLossDelivery delivery) {
+  Future<void> _deliverLeaseLoss(_LeaseLossDelivery delivery) async {
     if (_closed || !identical(_leaseLosses[delivery.vmId], delivery)) {
       return;
     }
+    final completion = Completer<void>();
+    _leaseLossCompletions.add(completion);
     try {
-      _onLeaseLost(
+      if (delivery.driverGeneration != null) {
+        final retained = Completer<void>();
+        delivery.retentionCompletion = retained;
+        try {
+          await _leases.retainForCleanup(
+            request: delivery.request,
+            ownerId: _ownerId,
+            now: _now(),
+            ttl: _leaseTtl,
+          );
+        } finally {
+          retained.complete();
+        }
+        if (_closed || !identical(_leaseLosses[delivery.vmId], delivery))
+          return;
+      }
+      await _onLeaseLost(
         delivery.vmId,
         delivery.specGeneration,
         delivery.operationId,
+        delivery.driverGeneration,
         delivery.error,
       );
       if (identical(_leaseLosses[delivery.vmId], delivery)) {
@@ -506,6 +549,9 @@ final class HostScheduler
       if (!_closed && identical(_leaseLosses[delivery.vmId], delivery)) {
         _scheduleLeaseLossRetry(delivery);
       }
+    } finally {
+      _leaseLossCompletions.remove(completion);
+      completion.complete();
     }
   }
 
@@ -626,30 +672,25 @@ final class _AcquisitionKey {
 }
 
 final class _RenewalRegistration {
-  const _RenewalRegistration({
-    required this.vmId,
-    required this.specGeneration,
-    required this.operationId,
-    required this.handle,
-  });
+  const _RenewalRegistration({required this.request, required this.handle});
 
-  final VmId vmId;
-  final int specGeneration;
-  final OperationId? operationId;
+  final HostCapacityRequest request;
+  VmId get vmId => request.vmId;
+  int get specGeneration => request.specGeneration;
+  OperationId? get operationId => request.operationId;
+  int? get driverGeneration => request.driverGeneration;
   final VmTimerHandle handle;
 }
 
 final class _LeaseLossDelivery {
-  _LeaseLossDelivery({
-    required this.vmId,
-    required this.specGeneration,
-    required this.operationId,
-    required this.error,
-  });
+  _LeaseLossDelivery({required this.request, required this.error});
 
-  final VmId vmId;
-  final int specGeneration;
-  final OperationId? operationId;
+  final HostCapacityRequest request;
+  VmId get vmId => request.vmId;
+  int get specGeneration => request.specGeneration;
+  OperationId? get operationId => request.operationId;
+  int? get driverGeneration => request.driverGeneration;
   final OperationError error;
   VmTimerHandle? retryHandle;
+  Completer<void>? retentionCompletion;
 }

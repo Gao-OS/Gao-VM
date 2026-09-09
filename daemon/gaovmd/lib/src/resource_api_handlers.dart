@@ -8,6 +8,7 @@ import 'operation_application_service.dart';
 import 'operation_repository.dart';
 import 'public_api_server.dart';
 import 'vm_application_service.dart';
+import 'vm_provisioning_plan.dart';
 import 'vm_repository.dart';
 
 final class ResourceApiHandlers {
@@ -306,6 +307,15 @@ PublicApiHandler _guard(
     return await handler(request);
   } on PublicApiException {
     rethrow;
+  } on VmProvisioningImageNotFoundException catch (error) {
+    throw _problem(
+      status: HttpStatus.unprocessableEntity,
+      code: ErrorCode.vmSpecInvalid,
+      type: 'vm-spec-invalid',
+      title: 'VM spec invalid',
+      detail: 'The VM spec references an image that does not exist.',
+      details: JsonObjectValue.fromJson({'image_id': error.imageId.value}),
+    );
   } on VmNotFoundException catch (error) {
     throw _problem(
       status: HttpStatus.notFound,

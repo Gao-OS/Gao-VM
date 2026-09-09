@@ -26,8 +26,8 @@ void main() {
   test('bootstrap configures SQLite and applies the schema once', () async {
     var database = await GaoVmDatabase.open(databasePath);
 
-    expect(database.schemaVersion, 5);
-    expect(database.appliedMigrationVersions, [1, 2, 3, 4, 5]);
+    expect(database.schemaVersion, 7);
+    expect(database.appliedMigrationVersions, [1, 2, 3, 4, 5, 6, 7]);
     expect(database.journalMode, 'wal');
     expect(database.foreignKeysEnabled, isTrue);
     expect(database.busyTimeout, const Duration(seconds: 5));
@@ -54,8 +54,8 @@ void main() {
     database.close();
 
     database = await GaoVmDatabase.open(databasePath);
-    expect(database.schemaVersion, 5);
-    expect(database.appliedMigrationVersions, [1, 2, 3, 4, 5]);
+    expect(database.schemaVersion, 7);
+    expect(database.appliedMigrationVersions, [1, 2, 3, 4, 5, 6, 7]);
     database.close();
   });
 
@@ -77,8 +77,8 @@ void main() {
       legacy.dispose();
       final database = await GaoVmDatabase.open(databasePath);
       try {
-        expect(database.schemaVersion, 5);
-        expect(database.appliedMigrationVersions, [1, 2, 3, 4, 5]);
+        expect(database.schemaVersion, 7);
+        expect(database.appliedMigrationVersions, [1, 2, 3, 4, 5, 6, 7]);
         await database.read((db) {
           expect(db.select('SELECT * FROM vm_provisioning'), isEmpty);
           expect(db.select('SELECT * FROM vm_specs').single['generation'], 7);
@@ -111,6 +111,167 @@ void main() {
   );
 
   test(
+    'v6 retains v5 pinned jobs and enforces complete immutable outcome fields',
+    () async {
+      final legacy = sqlite3.open(databasePath);
+      legacy.execute('''
+      CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+      INSERT INTO schema_migrations VALUES(1, 'old'), (2, 'old'), (3, 'old'), (4, 'old'), (5, 'old');
+      CREATE TABLE vm_provisioning (
+        vm_id TEXT PRIMARY KEY, operation_id TEXT NOT NULL UNIQUE,
+        spec_generation INTEGER NOT NULL, plan_json TEXT NOT NULL,
+        cancellation_requested INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL
+      );
+      INSERT INTO vm_provisioning VALUES('vm', 'op', 7, '{"pinned":true}', 0, 'old');
+    ''');
+      legacy.userVersion = 5;
+      legacy.dispose();
+      final database = await GaoVmDatabase.open(databasePath);
+      try {
+        expect(database.schemaVersion, 7);
+        await database.read((db) {
+          final job = db.select('SELECT * FROM vm_provisioning').single;
+          expect(job['plan_json'], '{"pinned":true}');
+          expect(job['spec_generation'], 7);
+          expect(job['completion_kind'], isNull);
+          expect(job['manifest_digest'], isNull);
+          expect(job['completed_at'], isNull);
+          for (final assignment in [
+            "completion_kind = 'succeeded'",
+            "completed_at = 'now'",
+            "manifest_digest = 'digest'",
+            "completion_kind = 'failed', manifest_digest = 'digest', completed_at = 'now'",
+            "completion_kind = 'unknown', completed_at = 'now'",
+          ]) {
+            expect(
+              () => db.execute('UPDATE vm_provisioning SET $assignment'),
+              throwsA(isA<SqliteException>()),
+            );
+          }
+          db.execute(
+            "UPDATE vm_provisioning SET completion_kind = 'failed', completed_at = 'now'",
+          );
+          expect(
+            () =>
+                db.execute("UPDATE vm_provisioning SET completed_at = 'later'"),
+            throwsA(isA<SqliteException>()),
+          );
+          expect(
+            () => db.execute(
+              'UPDATE vm_provisioning SET cancellation_requested = 1',
+            ),
+            throwsA(isA<SqliteException>()),
+          );
+        });
+      } finally {
+        database.close();
+      }
+    },
+  );
+
+  test('v7 retains v6 jobs and enforces immutable cancellation linkage', () async {
+    final legacy = sqlite3.open(databasePath);
+    legacy.execute('''
+        CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+        INSERT INTO schema_migrations VALUES(1, 'old'), (2, 'old'), (3, 'old'), (4, 'old'), (5, 'old'), (6, 'old');
+        CREATE TABLE operations(id TEXT PRIMARY KEY);
+        INSERT INTO operations VALUES('target'), ('completed'), ('action'), ('second-action'), ('other-action');
+        CREATE TABLE vm_provisioning (
+          vm_id TEXT PRIMARY KEY, operation_id TEXT NOT NULL UNIQUE,
+          spec_generation INTEGER NOT NULL, plan_json TEXT NOT NULL,
+          cancellation_requested INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL, completion_kind TEXT,
+          manifest_digest TEXT, completed_at TEXT
+        );
+        INSERT INTO vm_provisioning VALUES
+          ('pending-vm', 'target', 7, '{"pinned":true}', 1, 'old', NULL, NULL, NULL),
+          ('completed-vm', 'completed', 8, '{"completed":true}', 0, 'old', 'succeeded', 'digest', 'done');
+      ''');
+    final retainedJobs = [
+      for (final row in legacy.select(
+        'SELECT * FROM vm_provisioning ORDER BY vm_id',
+      ))
+        Map<String, Object?>.from(row),
+    ];
+    legacy.userVersion = 6;
+    legacy.dispose();
+
+    var database = await GaoVmDatabase.open(databasePath);
+    try {
+      expect(database.schemaVersion, 7);
+      expect(database.appliedMigrationVersions, [1, 2, 3, 4, 5, 6, 7]);
+      await database.read((db) {
+        expect(
+          db.select('SELECT * FROM vm_provisioning ORDER BY vm_id'),
+          retainedJobs,
+        );
+        expect(
+          db.select('SELECT * FROM vm_provisioning_cancellations'),
+          isEmpty,
+        );
+        for (final values in [
+          [null, 'target'],
+          ['missing-action', 'target'],
+          ['action', 'missing-target'],
+          ['action', 'other-action'],
+        ]) {
+          expect(
+            () => db.execute(
+              'INSERT INTO vm_provisioning_cancellations(action_id, target_id) VALUES (?, ?)',
+              values,
+            ),
+            throwsA(isA<SqliteException>()),
+          );
+        }
+        db.execute('''
+            INSERT INTO vm_provisioning_cancellations(action_id, target_id)
+            VALUES ('action', 'target'), ('second-action', 'target')
+          ''');
+        expect(
+          () => db.execute('''
+              INSERT INTO vm_provisioning_cancellations(action_id, target_id)
+              VALUES ('action', 'completed')
+            '''),
+          throwsA(isA<SqliteException>()),
+        );
+        for (final statement in [
+          "UPDATE vm_provisioning_cancellations SET action_id = 'other-action' WHERE action_id = 'action'",
+          "UPDATE vm_provisioning_cancellations SET target_id = 'completed' WHERE action_id = 'action'",
+          "DELETE FROM operations WHERE id = 'action'",
+          "DELETE FROM vm_provisioning WHERE operation_id = 'target'",
+        ]) {
+          expect(() => db.execute(statement), throwsA(isA<SqliteException>()));
+        }
+        expect(db.select('PRAGMA foreign_key_check'), isEmpty);
+      });
+    } finally {
+      database.close();
+    }
+
+    database = await GaoVmDatabase.open(databasePath);
+    try {
+      expect(database.appliedMigrationVersions, [1, 2, 3, 4, 5, 6, 7]);
+      await database.read((db) {
+        expect(
+          db.select('SELECT * FROM vm_provisioning ORDER BY vm_id'),
+          retainedJobs,
+        );
+        expect(
+          db.select(
+            'SELECT * FROM vm_provisioning_cancellations ORDER BY action_id',
+          ),
+          [
+            {'action_id': 'action', 'target_id': 'target'},
+            {'action_id': 'second-action', 'target_id': 'target'},
+          ],
+        );
+      });
+    } finally {
+      database.close();
+    }
+  });
+
+  test(
     'v4 preserves an existing v3 checkpoint with nullable compatibility fields',
     () async {
       final legacy = sqlite3.open(databasePath);
@@ -124,7 +285,7 @@ void main() {
       legacy.dispose();
       final database = await GaoVmDatabase.open(databasePath);
       try {
-        expect(database.schemaVersion, 5);
+        expect(database.schemaVersion, 7);
         await database.read((db) {
           final row = db.select('SELECT * FROM vm_runtime').single;
           expect(row['applied_intent_revision'], 7);
@@ -154,8 +315,8 @@ void main() {
       legacy.dispose();
       final database = await GaoVmDatabase.open(databasePath);
       try {
-        expect(database.schemaVersion, 5);
-        expect(database.appliedMigrationVersions, [1, 2, 3, 4, 5]);
+        expect(database.schemaVersion, 7);
+        expect(database.appliedMigrationVersions, [1, 2, 3, 4, 5, 6, 7]);
         await database.read((db) {
           final vm = db.select('SELECT * FROM vms').single;
           expect(vm['revision'], 7);
@@ -229,8 +390,8 @@ void main() {
 
       final database = await GaoVmDatabase.open(databasePath);
 
-      expect(database.schemaVersion, 5);
-      expect(database.appliedMigrationVersions, [1, 2, 3, 4, 5]);
+      expect(database.schemaVersion, 7);
+      expect(database.appliedMigrationVersions, [1, 2, 3, 4, 5, 6, 7]);
       await database.read((connection) {
         expect(
           connection
@@ -464,8 +625,8 @@ void main() {
     ]);
 
     for (final database in databases) {
-      expect(database.schemaVersion, 5);
-      expect(database.appliedMigrationVersions, [1, 2, 3, 4, 5]);
+      expect(database.schemaVersion, 7);
+      expect(database.appliedMigrationVersions, [1, 2, 3, 4, 5, 6, 7]);
       database.close();
     }
   });
@@ -485,8 +646,8 @@ void main() {
     ]);
 
     for (final result in results) {
-      expect(result.schemaVersion, 5);
-      expect(result.migrations, [1, 2, 3, 4, 5]);
+      expect(result.schemaVersion, 7);
+      expect(result.migrations, [1, 2, 3, 4, 5, 6, 7]);
     }
   });
 }

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:gaovm_models/gaovm_models.dart';
@@ -9,6 +10,241 @@ import 'package:gaovmd/src/vm_controller_reducer.dart';
 import 'package:test/test.dart';
 
 void main() {
+  test('failed adapter close retains ownership and can be retried', () async {
+    final factory = _DelayedReleaseFactory()..failRelease = true;
+    factory.allowRelease.complete();
+    final adapter = RuntimeDriverEffectAdapter(
+      factory: factory,
+      resolveConfiguration: (_) async => _configuration,
+      dispatch: (_, _) async {},
+    );
+    await adapter.spawn(_state(_vm1), _operation1, 1);
+    await expectLater(adapter.close(), throwsA(isA<RuntimeDriverError>()));
+    expect(adapter.activeSessionCount, 1);
+    expect(factory.inner.activeSessionCount, 1);
+    factory.failRelease = false;
+    await adapter.close();
+    expect(adapter.activeSessionCount, 0);
+    expect(factory.inner.activeSessionCount, 0);
+  });
+  test(
+    'failed release retains ownership and kill retries terminal cleanup',
+    () async {
+      final factory = _DelayedReleaseFactory()..failRelease = true;
+      factory.allowRelease.complete();
+      final commands = <VmCommand>[];
+      final adapter = RuntimeDriverEffectAdapter(
+        factory: factory,
+        resolveConfiguration: (_) async => _configuration,
+        dispatch: (_, command) async => commands.add(command),
+      );
+      final correlation = DriverCorrelation(
+        vmId: _vm1,
+        driverGeneration: 1,
+        operationId: _operation1,
+      );
+      await adapter.spawn(_state(_vm1), _operation1, 1);
+      await factory.inner.controlFor(correlation).closeEventStreamForTest();
+      await expectLater(
+        adapter.waitUntilEventsDispatched(),
+        throwsA(isA<RuntimeDriverError>()),
+      );
+      expect(commands.whereType<DriverChannelClosed>(), isEmpty);
+      expect(commands.whereType<EffectExecutionFailed>(), hasLength(1));
+      expect(adapter.activeSessionCount, 1);
+      expect(factory.inner.activeSessionCount, 1);
+      factory.failRelease = false;
+      await adapter.kill(_state(_vm1), _operation2, 1);
+      await adapter.waitUntilEventsDispatched();
+      expect(commands.whereType<DriverChannelClosed>(), hasLength(1));
+      expect(
+        commands.whereType<DriverChannelClosed>().single.operationId,
+        _operation2,
+      );
+      expect(adapter.activeSessionCount, 0);
+      expect(factory.inner.activeSessionCount, 0);
+      await adapter.close();
+    },
+  );
+  test(
+    'channel loss is reported only after owned process release completes',
+    () async {
+      final factory = _DelayedReleaseFactory();
+      final commands = <VmCommand>[];
+      final peerProgress = Completer<void>();
+      final adapter = RuntimeDriverEffectAdapter(
+        factory: factory,
+        resolveConfiguration: (_) async => _configuration,
+        dispatch: (vmId, command) async {
+          commands.add(command);
+          if (vmId == _vm2 && !peerProgress.isCompleted)
+            peerProgress.complete();
+        },
+      );
+      final correlation = DriverCorrelation(
+        vmId: _vm1,
+        driverGeneration: 1,
+        operationId: _operation1,
+      );
+      await adapter.spawn(_state(_vm1), _operation1, 1);
+      await factory.inner.controlFor(correlation).closeEventStreamForTest();
+      await factory.releaseEntered.future;
+      expect(commands.whereType<DriverChannelClosed>(), isEmpty);
+      expect(factory.inner.activeSessionCount, 1);
+      await adapter.spawn(_state(_vm2), _operation2, 1);
+      factory.inner
+          .controlFor(
+            DriverCorrelation(
+              vmId: _vm2,
+              driverGeneration: 1,
+              operationId: _operation2,
+            ),
+          )
+          .emitState(RuntimeDriverState.starting);
+      await peerProgress.future;
+      expect(commands.whereType<DriverChannelClosed>(), isEmpty);
+      factory.allowRelease.complete();
+      await adapter.waitUntilEventsDispatched();
+      expect(commands.whereType<DriverChannelClosed>(), hasLength(1));
+      expect(factory.inner.activeSessionCount, 1);
+      await adapter.close();
+      expect(factory.inner.activeSessionCount, 0);
+    },
+  );
+  test(
+    'configuration scope remains held until driver configure completes',
+    () async {
+      final factory = _DelayedConfigureFactory();
+      var held = false;
+      var finished = false;
+      final adapter = RuntimeDriverEffectAdapter.scopedConfiguration(
+        factory: factory,
+        withConfiguration: (state, use) async {
+          expect(state.vmId, _vm1);
+          held = true;
+          try {
+            await use(_configuration);
+          } finally {
+            held = false;
+          }
+        },
+        dispatch: (_, _) async {},
+      );
+      addTearDown(adapter.close);
+      final state = _state(_vm1);
+      await adapter.spawn(state, _operation1, 1);
+      await adapter.connect(state, _operation1, 1);
+      final pending = adapter.configure(state, _operation1, 1).then((_) {
+        finished = true;
+      });
+      await factory.configureEntered.future;
+      expect(held, isTrue);
+      expect(finished, isFalse);
+      factory.allowConfigure.complete();
+      await pending;
+      expect(held, isFalse);
+      expect(finished, isTrue);
+    },
+  );
+
+  test('rejected configuration scope never sends a driver command', () async {
+    final factory = FakeRuntimeDriverFactory(
+      scheduler: ManualRuntimeScheduler(),
+    );
+    final adapter = RuntimeDriverEffectAdapter.scopedConfiguration(
+      factory: factory,
+      withConfiguration: (_, _) async => throw RuntimeDriverError(
+        code: RuntimeDriverErrorCode.invalidRuntimeConfig,
+        message: 'bundle proof rejected',
+        retryable: false,
+      ),
+      dispatch: (_, _) async {},
+    );
+    addTearDown(adapter.close);
+    final state = _state(_vm1);
+    await adapter.spawn(state, _operation1, 1);
+    await adapter.connect(state, _operation1, 1);
+    await expectLater(
+      adapter.configure(state, _operation1, 1),
+      throwsA(
+        isA<VmEffectException>().having(
+          (error) => error.operationError.code,
+          'code',
+          ErrorCode.vmSpecInvalid,
+        ),
+      ),
+    );
+    expect(
+      factory
+          .controlFor(
+            DriverCorrelation(
+              vmId: _vm1,
+              driverGeneration: 1,
+              operationId: _operation1,
+            ),
+          )
+          .commandHistory,
+      isEmpty,
+    );
+    expect(adapter.activeSessionCount, 1);
+  });
+
+  test('driver configure failure releases the configuration scope', () async {
+    final factory = FakeRuntimeDriverFactory(
+      scheduler: ManualRuntimeScheduler(),
+    );
+    var held = false;
+    var releases = 0;
+    final adapter = RuntimeDriverEffectAdapter.scopedConfiguration(
+      factory: factory,
+      withConfiguration: (_, use) async {
+        held = true;
+        try {
+          await use(_configuration);
+        } finally {
+          held = false;
+          releases++;
+        }
+      },
+      dispatch: (_, _) async {},
+    );
+    addTearDown(adapter.close);
+    final state = _state(_vm1);
+    await adapter.spawn(state, _operation1, 1);
+    await adapter.connect(state, _operation1, 1);
+    final control = factory.controlFor(
+      DriverCorrelation(
+        vmId: _vm1,
+        driverGeneration: 1,
+        operationId: _operation1,
+      ),
+    );
+    control.failNextConfigure(
+      RuntimeDriverError(
+        code: RuntimeDriverErrorCode.invalidRuntimeConfig,
+        message: 'runtime rejected configuration',
+        retryable: false,
+      ),
+    );
+    await expectLater(
+      adapter.configure(state, _operation1, 1),
+      throwsA(isA<VmEffectException>()),
+    );
+    expect(held, isFalse);
+    expect(releases, 1);
+    expect(
+      control.commandHistory.whereType<RuntimeConfigureCommand>(),
+      hasLength(1),
+    );
+    await adapter.configure(state, _operation1, 1);
+    expect(held, isFalse);
+    expect(releases, 2);
+    expect(
+      control.commandHistory.whereType<RuntimeConfigureCommand>(),
+      hasLength(2),
+    );
+  });
+
   test(
     'exit before kill dispatch completes the superseding kill generation',
     () async {
@@ -602,6 +838,86 @@ void main() {
       await adapter.close();
     },
   );
+}
+
+final class _DelayedReleaseFactory implements RuntimeDriverFactory {
+  final inner = FakeRuntimeDriverFactory(scheduler: ManualRuntimeScheduler());
+  final releaseEntered = Completer<void>();
+  final allowRelease = Completer<void>();
+  bool failRelease = false;
+  @override
+  Future<RuntimeDriverSession> spawn(RuntimeDriverLaunch launch) =>
+      inner.spawn(launch);
+  @override
+  Future<void> cancelSpawn(DriverCorrelation correlation) =>
+      inner.cancelSpawn(correlation);
+  @override
+  Future<void> release(DriverCorrelation correlation) async {
+    if (!releaseEntered.isCompleted) releaseEntered.complete();
+    await allowRelease.future;
+    if (failRelease)
+      throw RuntimeDriverError(
+        code: RuntimeDriverErrorCode.driverUnhealthy,
+        message: 'process exit not confirmed',
+        retryable: true,
+      );
+    await inner.release(correlation);
+  }
+}
+
+final class _DelayedConfigureFactory implements RuntimeDriverFactory {
+  final inner = FakeRuntimeDriverFactory(scheduler: ManualRuntimeScheduler());
+  final configureEntered = Completer<void>();
+  final allowConfigure = Completer<void>();
+
+  @override
+  Future<RuntimeDriverSession> spawn(RuntimeDriverLaunch launch) async =>
+      _DelayedConfigureSession(
+        await inner.spawn(launch),
+        configureEntered,
+        allowConfigure,
+      );
+  @override
+  Future<void> cancelSpawn(DriverCorrelation correlation) =>
+      inner.cancelSpawn(correlation);
+  @override
+  Future<void> release(DriverCorrelation correlation) =>
+      inner.release(correlation);
+}
+
+final class _DelayedConfigureSession implements RuntimeDriverSession {
+  _DelayedConfigureSession(this.inner, this.entered, this.allow);
+  final RuntimeDriverSession inner;
+  final Completer<void> entered;
+  final Completer<void> allow;
+  @override
+  DriverCorrelation get correlation => inner.correlation;
+  @override
+  DriverCapabilities get capabilities => inner.capabilities;
+  @override
+  Stream<RuntimeEvent> get events => inner.events;
+  @override
+  Stream<RuntimeDriverLogChunk> get logs => inner.logs;
+  @override
+  Future<RuntimeDriverExit> get exited => inner.exited;
+  @override
+  Future<DriverCapabilities> connect(DriverCapabilities required) =>
+      inner.connect(required);
+  @override
+  Future<RuntimeCommandResult> execute(RuntimeCommand command) async {
+    if (command is RuntimeConfigureCommand) {
+      entered.complete();
+      await allow.future;
+    }
+    return inner.execute(command);
+  }
+
+  @override
+  Future<RuntimeCommandResult> ping() => inner.ping();
+  @override
+  Future<void> cancel(OperationId operationId) => inner.cancel(operationId);
+  @override
+  Future<void> close() => inner.close();
 }
 
 final class _DriverOnlyRunner implements VmEffectRunner {

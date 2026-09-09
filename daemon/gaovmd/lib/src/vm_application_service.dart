@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:crypto/crypto.dart';
@@ -215,19 +216,26 @@ final class VmWaitResult {
   };
 }
 
-abstract interface class VmMutationAcceptor {
+abstract interface class VmCreateAcceptor {
   /// Atomically persists the resource, operation, idempotency response, and a
   /// recoverable post-commit provisioning command.
   Future<OperationAcceptance> create(VmCreateCommand command);
+}
 
+abstract interface class VmPatchAcceptor {
   /// Atomically persists OCC changes, the operation/idempotency response, and
   /// any controller notification required after commit.
   Future<OperationAcceptance> patch(VmPatchCommand command);
+}
 
+abstract interface class VmLifecycleAcceptor {
   /// Atomically persists desired state, the operation/idempotency response,
   /// and a recoverable serialized controller command.
   Future<OperationAcceptance> lifecycle(VmLifecycleCommand command);
 }
+
+abstract interface class VmMutationAcceptor
+    implements VmCreateAcceptor, VmPatchAcceptor, VmLifecycleAcceptor {}
 
 abstract interface class VmProvisioningService {
   Future<void> provision(VirtualMachine virtualMachine, Operation operation);
@@ -243,11 +251,29 @@ final class VmApplicationService {
     required VmMutationAcceptor mutations,
     required VmConditionWaiter waiter,
   }) : _repository = repository,
-       _mutations = mutations,
+       _creates = mutations,
+       _patches = mutations,
+       _lifecycle = mutations,
+       _waiter = waiter;
+
+  /// Compose independently durable acceptance paths without requiring one
+  /// adapter to own provisioning, spec changes, and controller commands.
+  const VmApplicationService.composed({
+    required VmRepository repository,
+    required VmCreateAcceptor creates,
+    required VmPatchAcceptor patches,
+    required VmLifecycleAcceptor lifecycle,
+    required VmConditionWaiter waiter,
+  }) : _repository = repository,
+       _creates = creates,
+       _patches = patches,
+       _lifecycle = lifecycle,
        _waiter = waiter;
 
   final VmRepository _repository;
-  final VmMutationAcceptor _mutations;
+  final VmCreateAcceptor _creates;
+  final VmPatchAcceptor _patches;
+  final VmLifecycleAcceptor _lifecycle;
   final VmConditionWaiter _waiter;
 
   Future<VmPage> list([VmListQuery? query]) async {
@@ -293,22 +319,45 @@ final class VmApplicationService {
   }
 
   Future<OperationAcceptance> create(VmCreateCommand command) =>
-      _mutations.create(command);
+      _creates.create(command);
 
   Future<OperationAcceptance> patch(VmPatchCommand command) =>
-      _mutations.patch(command);
+      _patches.patch(command);
 
   Future<OperationAcceptance> lifecycle(VmLifecycleCommand command) =>
-      _mutations.lifecycle(command);
+      _lifecycle.lifecycle(command);
 
   Future<VmWaitResult> wait(VmWaitCommand command) async {
-    await get(command.vmId);
-    final observedAt = await _waiter.wait(command);
-    return VmWaitResult(
-      vmId: command.vmId,
-      condition: command.condition,
-      observedAt: observedAt,
-    );
+    final elapsed = Stopwatch()..start();
+    Duration remaining() {
+      final budget = command.timeout - elapsed.elapsed;
+      if (budget <= Duration.zero) {
+        throw TimeoutException('VM condition wait timed out', command.timeout);
+      }
+      return budget;
+    }
+
+    try {
+      await get(command.vmId).timeout(remaining());
+      final observedAt = await _waiter
+          .wait(
+            VmWaitCommand(
+              vmId: command.vmId,
+              condition: command.condition,
+              timeout: remaining(),
+              serviceName: command.serviceName,
+            ),
+          )
+          .timeout(remaining());
+      remaining();
+      return VmWaitResult(
+        vmId: command.vmId,
+        condition: command.condition,
+        observedAt: observedAt,
+      );
+    } finally {
+      elapsed.stop();
+    }
   }
 }
 

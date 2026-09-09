@@ -292,16 +292,33 @@ final class HostLeaseFailed extends VmCommand {
   final OperationError error;
 }
 
+/// Loss of admission for one specific runtime, not a new lifecycle request.
+final class HostLeaseLost extends VmCommand {
+  const HostLeaseLost({
+    required this.driverGeneration,
+    required this.specGeneration,
+    required this.error,
+  });
+
+  final int driverGeneration;
+  final int specGeneration;
+  final OperationError error;
+}
+
 final class HostLeaseRunningMarkFailed extends VmCommand {
   const HostLeaseRunningMarkFailed({
     required this.operationId,
     required this.driverGeneration,
     required this.error,
+    this.rolledBackCompletionOperationId,
   });
 
   final OperationId operationId;
   final int driverGeneration;
   final OperationError error;
+
+  /// Completion skipped because lease promotion failed before durable effects.
+  final OperationId? rolledBackCompletionOperationId;
 }
 
 final class DriverSpawned extends VmCommand {
@@ -747,12 +764,25 @@ VmTransition reduce(VmControllerState state, VmCommand command) {
       operationId,
       error,
     ),
+    HostLeaseLost(
+      :final driverGeneration,
+      :final specGeneration,
+      :final error,
+    ) =>
+      _hostLeaseLost(state, driverGeneration, specGeneration, error),
     HostLeaseRunningMarkFailed(
       :final operationId,
       :final driverGeneration,
       :final error,
+      :final rolledBackCompletionOperationId,
     ) =>
-      _leaseRunningMarkFailed(state, operationId, driverGeneration, error),
+      _leaseRunningMarkFailed(
+        state,
+        operationId,
+        driverGeneration,
+        error,
+        rolledBackCompletionOperationId,
+      ),
     DriverSpawned(:final operationId, :final driverGeneration) =>
       _driverSpawned(state, operationId, driverGeneration),
     DriverSpawnFailed(
@@ -1747,24 +1777,92 @@ VmTransition _leaseFailed(
   );
 }
 
+VmTransition _hostLeaseLost(
+  VmControllerState state,
+  int driverGeneration,
+  int specGeneration,
+  OperationError error,
+) {
+  if (state.activeDriverGeneration != driverGeneration ||
+      state.activeSpecGeneration != specGeneration ||
+      state.leaseState != VmLeaseState.held ||
+      state.driverOperationId == null) {
+    return VmTransition(state: state);
+  }
+  final operation = state.currentOperation;
+  final completingCleanup =
+      operation != null &&
+      !operation.isTerminal &&
+      const {
+        VmOperationKind.stop,
+        VmOperationKind.kill,
+        VmOperationKind.delete,
+      }.contains(operation.kind);
+  final shouldFailOperation =
+      operation != null && !operation.isTerminal && !completingCleanup;
+  final operationId = state.driverOperationId!;
+  return VmTransition(
+    state: state.copyWith(
+      desiredState: DesiredState.stopped,
+      phase: completingCleanup ? state.phase : VmPhase.failed,
+      currentOperation: shouldFailOperation
+          ? operation.copyWith(state: OperationState.failed)
+          : operation,
+      retryState: VmRetryState(maxAttempts: state.retryState.maxAttempts),
+      clearPendingRecoveryGeneration: true,
+      clearPendingRecoveryError: true,
+      lastError: error,
+    ),
+    effects: [
+      PersistVm(vmId: state.vmId, operationId: operationId),
+      PersistRuntime(
+        vmId: state.vmId,
+        operationId: operationId,
+        driverGeneration: driverGeneration,
+      ),
+      if (shouldFailOperation)
+        FailOperation(
+          vmId: state.vmId,
+          operationId: operation.id,
+          error: error,
+        ),
+      EmitEvent(
+        vmId: state.vmId,
+        operationId: operationId,
+        driverGeneration: driverGeneration,
+        type: 'vm.host_lease_lost',
+      ),
+      KillDriver(
+        vmId: state.vmId,
+        operationId: operationId,
+        driverGeneration: driverGeneration,
+      ),
+    ],
+  );
+}
+
 VmTransition _leaseRunningMarkFailed(
   VmControllerState state,
   OperationId operationId,
   int driverGeneration,
   OperationError error,
+  OperationId? rolledBackCompletionOperationId,
 ) {
   if (!_matchesRuntimeCallback(state, operationId, driverGeneration) ||
       state.phase != VmPhase.running) {
     return VmTransition(state: state);
   }
   final operation = state.currentOperation;
-  final shouldFailOperation = operation?.id == operationId;
+  final shouldFailOperation =
+      operation?.id == operationId &&
+      (!operation!.isTerminal ||
+          rolledBackCompletionOperationId == operationId);
   return VmTransition(
     state: state.copyWith(
       desiredState: DesiredState.stopped,
       phase: VmPhase.failed,
       currentOperation: shouldFailOperation
-          ? operation!.copyWith(state: OperationState.failed)
+          ? operation.copyWith(state: OperationState.failed)
           : operation,
       lastError: error,
     ),

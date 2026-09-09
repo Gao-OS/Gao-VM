@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:gaovm_models/gaovm_models.dart';
@@ -8,6 +9,97 @@ import 'package:gaovmd/src/vm_repository.dart';
 import 'package:test/test.dart';
 
 void main() {
+  test('wait deadline includes a blocked initial repository read', () async {
+    final read = Completer<VirtualMachine?>();
+    var waited = false;
+    final service = VmApplicationService(
+      repository: _ReadRepository(() => read.future),
+      mutations: _Mutations(),
+      waiter: _CallbackWaiter((_) async {
+        waited = true;
+        return _observedAt;
+      }),
+    );
+    try {
+      await expectLater(
+        service
+            .wait(
+              VmWaitCommand(
+                vmId: _vm(1),
+                condition: VmWaitCondition.runtimeRunning,
+                timeout: const Duration(milliseconds: 20),
+              ),
+            )
+            .timeout(
+              const Duration(milliseconds: 500),
+              onTimeout: () =>
+                  throw StateError('service deadline was not enforced'),
+            ),
+        throwsA(isA<TimeoutException>()),
+      );
+      expect(waited, isFalse);
+    } finally {
+      read.complete(null);
+    }
+  });
+
+  test(
+    'initial read consumes the condition waiter budget and retains its target',
+    () async {
+      VmWaitCommand? received;
+      final service = VmApplicationService(
+        repository: _ReadRepository(
+          () => Future<VirtualMachine>.delayed(
+            const Duration(milliseconds: 30),
+            () => _waitingVm,
+          ),
+        ),
+        mutations: _Mutations(),
+        waiter: _CallbackWaiter((command) async {
+          received = command;
+          return _observedAt;
+        }),
+      );
+      final result = await service.wait(
+        VmWaitCommand(
+          vmId: _vm(1),
+          condition: VmWaitCondition.guestServiceReady,
+          serviceName: 'ssh',
+          timeout: const Duration(seconds: 1),
+        ),
+      );
+      expect(result.observedAt, _observedAt);
+      expect(received!.timeout, lessThan(const Duration(milliseconds: 980)));
+      expect(received!.timeout, greaterThan(Duration.zero));
+      expect(received!.vmId, _vm(1));
+      expect(received!.condition, VmWaitCondition.guestServiceReady);
+      expect(received!.serviceName, 'ssh');
+    },
+  );
+
+  test('bounds a stalled condition waiter within the same deadline', () async {
+    final blocked = Completer<DateTime>();
+    final service = VmApplicationService(
+      repository: _ReadRepository(() async => _waitingVm),
+      mutations: _Mutations(),
+      waiter: _CallbackWaiter((_) => blocked.future),
+    );
+    try {
+      await expectLater(
+        service.wait(
+          VmWaitCommand(
+            vmId: _vm(1),
+            condition: VmWaitCondition.runtimeRunning,
+            timeout: const Duration(milliseconds: 20),
+          ),
+        ),
+        throwsA(isA<TimeoutException>()),
+      );
+    } finally {
+      blocked.complete(_observedAt);
+    }
+  });
+
   test('maximal Unicode sort keys produce resumable bounded cursors', () async {
     final directory = await Directory.systemTemp.createTemp(
       'vm-cursor-unicode-',
@@ -243,6 +335,23 @@ final class _VmWaiter implements VmConditionWaiter {
   Future<DateTime> wait(VmWaitCommand command) async => _observedAt;
 }
 
+final class _ReadRepository implements VmRepository {
+  _ReadRepository(this.read);
+  final Future<VirtualMachine?> Function() read;
+  @override
+  Future<VirtualMachine?> get(VmId id, {bool includeDeleted = false}) => read();
+  @override
+  dynamic noSuchMethod(Invocation invocation) =>
+      throw StateError('unexpected repository write');
+}
+
+final class _CallbackWaiter implements VmConditionWaiter {
+  _CallbackWaiter(this.callback);
+  final Future<DateTime> Function(VmWaitCommand) callback;
+  @override
+  Future<DateTime> wait(VmWaitCommand command) => callback(command);
+}
+
 VmId _vm(int value) => VmId('vm_01J0000000000000000000000${value.toString()}');
 
 final _spec = VmSpec(
@@ -261,6 +370,26 @@ final _spec = VmSpec(
   serial: const SerialConfig(enabled: true, capture: true),
   guestAgent: GuestAgentConfig(enabled: false, requiredForReady: false),
   restartPolicy: RestartPolicy.onFailure,
+);
+
+final _waitingVm = VirtualMachine(
+  metadata: VmMetadata(
+    id: _vm(1),
+    name: 'waiting',
+    revision: 1,
+    createdAt: _observedAt,
+    updatedAt: _observedAt,
+  ),
+  spec: _spec,
+  status: VmStatus(
+    desiredState: DesiredState.stopped,
+    phase: VmPhase.defined,
+    specGeneration: 1,
+    observedGeneration: 0,
+    driverGeneration: 0,
+    guestAgent: GuestAgentState.disabled,
+    lastTransitionAt: _observedAt,
+  ),
 );
 
 final _request = RequestId('req_01J00000000000000000000000');

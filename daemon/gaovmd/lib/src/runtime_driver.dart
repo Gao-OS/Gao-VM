@@ -645,6 +645,8 @@ abstract interface class RuntimeDriverFactory {
 
   Future<void> cancelSpawn(DriverCorrelation correlation);
 
+  /// Completes only after the owned process has exited and its runtime resources
+  /// have been cleaned. On failure, ownership must remain available for retry.
   Future<void> release(DriverCorrelation correlation);
 }
 

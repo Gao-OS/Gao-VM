@@ -79,14 +79,32 @@ final class SqliteVmIntentAdoption implements VmIntentAdoptionAction {
           !current.isTerminal &&
           (terminal ||
               record.action == VmCommandAction.start ||
-              record.action == VmCommandAction.restart)) {
+              record.action == VmCommandAction.restart ||
+              record.action == VmCommandAction.patch)) {
         return _unchanged(executionState, VmIntentAdoptionDisposition.deferred);
       }
       final persistence = SqliteVmStateEffectAdapter(_database);
       VmControllerState next;
       final remaining = <VmEffect>[];
       final prefix = <VmEffect>[];
-      if (terminal) {
+      if (record.action == VmCommandAction.patch) {
+        // Patches do not replace the lifecycle operation. The accepted spec is
+        // adopted after any in-progress lifecycle settles, without driver IO.
+        final patch = source as SpecUpdated;
+        next = executionState.copyWith(appliedIntentRevision: revision);
+        if (!terminal) {
+          next = next.copyWith(
+            specGeneration: patch.specGeneration,
+            restartPolicy: patch.restartPolicy,
+            restartRequired:
+                next.restartRequired ||
+                next.activeDriverGeneration != null && patch.restartRequired,
+          );
+          if (operation.state == OperationState.pending)
+            await operations.start(operation.id);
+          await operations.succeed(operation.id);
+        }
+      } else if (terminal) {
         // A cancelled/failed queued command consumes its revision without
         // applying its desired state or spec. Preserve the actual execution.
         next = executionState.copyWith(
@@ -230,9 +248,11 @@ _readDurableIntent(
   final source = _sourceCommand(record);
   final desired = switch (record.action) {
     VmCommandAction.start || VmCommandAction.restart => 'running',
+    VmCommandAction.patch => payload['desired_state'],
     _ => 'stopped',
   };
-  if (payload['desired_state'] != desired) {
+  if (payload['desired_state'] != desired ||
+      !const ['running', 'stopped'].contains(desired)) {
     throw StateError('durable command desired state contradicts its action');
   }
   final vmRows = db.select(
@@ -258,13 +278,21 @@ _readDurableIntent(
       operation.request.toJson()['spec_generation'] != generation) {
     throw StateError('durable command operation correlation is invalid');
   }
+  if (record.action == VmCommandAction.patch &&
+      operation.request != record.payload) {
+    throw StateError('patch command differs from its durable operation');
+  }
 
   final specs = db.select(
     'SELECT spec_json FROM vm_specs WHERE vm_id = ? AND generation = ?',
     [record.vmId.value, generation],
   );
   if (specs.isEmpty) throw StateError('pinned intent spec is missing');
-  VmSpec.fromJson(jsonDecode(specs.single['spec_json'] as String));
+  final spec = VmSpec.fromJson(jsonDecode(specs.single['spec_json'] as String));
+  if (record.action == VmCommandAction.patch &&
+      payload['restart_policy'] != spec.restartPolicy.name) {
+    throw StateError('patch restart policy contradicts pinned spec');
+  }
   return (
     revision: revision,
     generation: generation,
@@ -300,5 +328,12 @@ VmCommand _sourceCommand(VmCommandRecord record) => switch (record.action) {
   VmCommandAction.restart => RestartRequested(record.operationId),
   VmCommandAction.kill => KillRequested(record.operationId),
   VmCommandAction.delete => DeleteRequested(record.operationId),
+  VmCommandAction.patch => SpecUpdated(
+    specGeneration: _positiveInt(record.payload.toJson()['spec_generation']),
+    restartPolicy: RestartPolicy.values.byName(
+      record.payload.toJson()['restart_policy'] as String,
+    ),
+    restartRequired: record.payload.toJson()['restart_required'] as bool,
+  ),
   _ => throw ArgumentError('not a lifecycle intent'),
 };

@@ -619,47 +619,70 @@ void main() {
       }
     },
   );
-  test(
-    'same registry resumes reconciliation after its backlog is acknowledged',
-    () async {
-      await accept(VmLifecycleAction.start);
-      await accept(VmLifecycleAction.stop);
-      // Simulate durable adoption preceding transport acknowledgement. The
-      // restored actor and database already agree on the executed revision.
-      await SqliteVmStateEffectAdapter(database).persistRuntime(
-        VmControllerState.initial(
-          vmId: vm.metadata.id,
-          specGeneration: 1,
-          restartPolicy: RestartPolicy.never,
-          appliedIntentRevision: 2,
-        ).copyWith(phase: VmPhase.starting),
-      );
-      final runner = _NoEffects();
-      final registry = VmRegistry(
-        repository: SqliteVmRepository(database),
-        operations: SqliteOperationRepository(database),
-        effectRunner: runner,
-        recovery: SqliteVmIntentRecoveryRepository(database),
-      );
-      try {
-        final controller = (await registry.reconcileOnStartup()).single;
-        expect(runner.effects, isEmpty);
-        final commands = SqliteVmCommandRepository(database);
-        for (var i = 0; i < 2; i++) {
-          final claim = (await commands.claim(
-            owner: 'dispatcher',
-            lease: const Duration(seconds: 10),
-          )).single;
-          expect(await commands.acknowledge(claim), isTrue);
+  for (final periodic in [false, true]) {
+    test(
+      '${periodic ? 'periodic tick' : 'same registry'} resumes reconciliation after its backlog is acknowledged',
+      () async {
+        await accept(VmLifecycleAction.start);
+        await accept(VmLifecycleAction.stop);
+        // Simulate durable adoption preceding transport acknowledgement. The
+        // restored actor and database already agree on the executed revision.
+        await SqliteVmStateEffectAdapter(database).persistRuntime(
+          VmControllerState.initial(
+            vmId: vm.metadata.id,
+            specGeneration: 1,
+            restartPolicy: RestartPolicy.never,
+            appliedIntentRevision: 2,
+          ).copyWith(phase: VmPhase.starting),
+        );
+        final runner = _NoEffects();
+        final registry = VmRegistry(
+          repository: SqliteVmRepository(database),
+          operations: SqliteOperationRepository(database),
+          effectRunner: runner,
+          recovery: SqliteVmIntentRecoveryRepository(database),
+        );
+        try {
+          final controller = (await registry.reconcileOnStartup()).single;
+          expect(runner.effects, isEmpty);
+          final errors = <Object>[];
+          if (periodic) {
+            await registry.reconcileTick(
+              onError: (vmId, error, stackTrace) => errors.add(error),
+            );
+            await registry.reconcileVm(vm.metadata.id);
+            expect(runner.effects, isEmpty);
+            expect(controller.state.phase, VmPhase.starting);
+          }
+          final commands = SqliteVmCommandRepository(database);
+          for (var i = 0; i < 2; i++) {
+            final claim = (await commands.claim(
+              owner: 'dispatcher',
+              lease: const Duration(seconds: 10),
+            )).single;
+            expect(await commands.acknowledge(claim), isTrue);
+          }
+          if (periodic) {
+            await registry.reconcileTick(
+              onError: (vmId, error, stackTrace) => errors.add(error),
+            );
+            await registry.reconcileVm(vm.metadata.id);
+            expect(await registry.get(vm.metadata.id), same(controller));
+            expect(errors, isEmpty);
+          } else {
+            expect(
+              (await registry.reconcileOnStartup()).single,
+              same(controller),
+            );
+          }
+          expect(runner.effects.whereType<PersistRuntime>(), isNotEmpty);
+          expect(controller.state.phase, VmPhase.stopped);
+        } finally {
+          await registry.shutdown();
         }
-        expect((await registry.reconcileOnStartup()).single, same(controller));
-        expect(runner.effects.whereType<PersistRuntime>(), isNotEmpty);
-        expect(controller.state.phase, VmPhase.stopped);
-      } finally {
-        await registry.shutdown();
-      }
-    },
-  );
+      },
+    );
+  }
 
   test(
     'independent delete recovery is accepted only for an applied delete intent',

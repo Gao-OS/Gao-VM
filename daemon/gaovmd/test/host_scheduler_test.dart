@@ -5,8 +5,14 @@ import 'package:gaovm_models/gaovm_models.dart';
 import 'package:gaovmd/src/host_lease_repository.dart';
 import 'package:gaovmd/src/host_scheduler.dart';
 import 'package:gaovmd/src/host_scheduler_models.dart';
+import 'package:gaovmd/src/image_filesystem.dart';
+import 'package:gaovmd/src/macos_host_metrics.dart';
 import 'package:gaovmd/src/operation_repository.dart';
 import 'package:gaovmd/src/sqlite_database.dart';
+import 'package:gaovmd/src/sqlite_host_capacity_catalog.dart';
+import 'package:gaovmd/src/sqlite_vm_lifecycle_acceptance.dart';
+import 'package:gaovmd/src/sqlite_vm_state_effect_adapter.dart';
+import 'package:gaovmd/src/vm_application_service.dart';
 import 'package:gaovmd/src/vm_controller.dart';
 import 'package:gaovmd/src/vm_controller_reducer.dart';
 import 'package:gaovmd/src/vm_registry.dart';
@@ -30,6 +36,288 @@ void main() {
     database.close();
     await temporaryDirectory.delete(recursive: true);
   });
+
+  test('native host sampling feeds real SQLite admission', () async {
+    final storage = await OwnedImageDirectory.open(temporaryDirectory);
+    final scheduler = _scheduler(
+      leases: sqliteLeases,
+      catalog: _Catalog([_request(_vm1)]),
+      metrics: MacOsHostMetricsSource(
+        storage: storage,
+        countUnmanagedDrivers: () => 0,
+      ),
+      limits: _limits(),
+    );
+    try {
+      await scheduler.acquire(_state(_vm1), _operation1);
+      final lease = (await sqliteLeases.list()).single;
+      expect(lease.request.vmId, _vm1);
+      expect(lease.request.driverGeneration, 1);
+      await scheduler.release(_state(_vm1), _operation1);
+    } finally {
+      await scheduler.shutdown();
+      storage.close();
+    }
+  }, skip: !Platform.isMacOS);
+
+  test(
+    'runtime expiry reserves capacity before and after loss delivery',
+    () async {
+      var clock = _now;
+      final timers = _ManualRenewalScheduler();
+      final observed = <HostLeasePhase>[];
+      final scheduler = _scheduler(
+        leases: sqliteLeases,
+        catalog: _Catalog([_request(_vm1), _request(_vm2)]),
+        metrics: _MetricsSource(),
+        limits: _limits(maxRunningVms: 1),
+        leaseTtl: const Duration(seconds: 10),
+        renewalInterval: const Duration(seconds: 4),
+        renewalScheduler: timers,
+        now: () => clock,
+        onLeaseLost: (_, _, _, _, _) async {
+          observed.add(
+            (await sqliteLeases.list(activeAt: clock)).single.request.phase,
+          );
+        },
+      );
+      await scheduler.acquire(_state(_vm1), _operation1);
+      clock = clock.add(const Duration(seconds: 11));
+      await expectLater(
+        scheduler.acquire(_state(_vm2), _operation2),
+        throwsA(isA<VmEffectException>()),
+      );
+      timers.fireNext();
+      await _settleAsyncWork();
+      expect(observed, [HostLeasePhase.cleanup]);
+      clock = clock.add(const Duration(hours: 1));
+      await expectLater(
+        scheduler.acquire(_state(_vm2), _operation2),
+        throwsA(isA<VmEffectException>()),
+      );
+      await scheduler.release(_state(_vm1), _operation1);
+      await scheduler.acquire(_state(_vm2), _operation2);
+      await scheduler.release(_state(_vm2), _operation2);
+      await scheduler.shutdown();
+    },
+  );
+
+  test(
+    'failed cleanup retention retries while expired runtime capacity stays reserved',
+    () async {
+      var clock = _now;
+      final timers = _ManualRenewalScheduler();
+      var attempts = 0;
+      var delivered = false;
+      final leases = _TracingLeaseRepository(
+        sqliteLeases,
+        [],
+        beforeRetention: () async {
+          if (++attempts == 1) throw StateError('injected retention failure');
+        },
+      );
+      final scheduler = _scheduler(
+        leases: leases,
+        catalog: _Catalog([_request(_vm1), _request(_vm2)]),
+        metrics: _MetricsSource(),
+        limits: _limits(maxRunningVms: 1),
+        leaseTtl: const Duration(seconds: 10),
+        renewalInterval: const Duration(seconds: 4),
+        renewalScheduler: timers,
+        now: () => clock,
+        onLeaseLost: (_, _, _, _, _) {
+          delivered = true;
+        },
+      );
+      await scheduler.acquire(_state(_vm1), _operation1);
+      clock = clock.add(const Duration(seconds: 11));
+      timers.fireNext();
+      await _settleAsyncWork();
+      expect(delivered, isFalse);
+      expect(attempts, 1);
+      await expectLater(
+        scheduler.acquire(_state(_vm2), _operation2),
+        throwsA(isA<VmEffectException>()),
+      );
+      timers.fireNext();
+      await _settleAsyncWork();
+      expect(attempts, 2);
+      expect(delivered, isTrue);
+      expect(
+        (await sqliteLeases.list()).single.request.phase,
+        HostLeasePhase.cleanup,
+      );
+      await scheduler.release(_state(_vm1), _operation1);
+      await scheduler.shutdown();
+    },
+  );
+
+  test(
+    'release drains an in-flight cleanup reservation without resurrection',
+    () async {
+      var clock = _now;
+      final entered = Completer<void>();
+      final allow = Completer<void>();
+      final timers = _ManualRenewalScheduler();
+      final leases = _TracingLeaseRepository(
+        sqliteLeases,
+        [],
+        beforeRetention: () async {
+          entered.complete();
+          await allow.future;
+        },
+      );
+      var deliveries = 0;
+      final scheduler = _scheduler(
+        leases: leases,
+        catalog: _Catalog([_request(_vm1)]),
+        metrics: _MetricsSource(),
+        limits: _limits(),
+        leaseTtl: const Duration(seconds: 10),
+        renewalInterval: const Duration(seconds: 4),
+        renewalScheduler: timers,
+        now: () => clock,
+        onLeaseLost: (_, _, _, _, _) => deliveries++,
+      );
+      await scheduler.acquire(_state(_vm1), _operation1);
+      clock = clock.add(const Duration(seconds: 11));
+      timers.fireNext();
+      await entered.future;
+      var released = false;
+      final releasing = scheduler
+          .release(_state(_vm1), _operation1)
+          .then((_) => released = true);
+      await _settleAsyncWork();
+      expect(released, isFalse);
+      allow.complete();
+      await releasing;
+      await _settleAsyncWork();
+      expect(await sqliteLeases.list(), isEmpty);
+      expect(deliveries, 0);
+      expect(scheduler.pendingLeaseLossCount, 0);
+      await scheduler.shutdown();
+    },
+  );
+
+  test(
+    'admission reserves the execution spec after a newer spec is accepted',
+    () async {
+      final repository = SqliteVmRepository(database);
+      final vm = await repository.create(
+        name: 'pinned-capacity',
+        spec: _vmSpec,
+      );
+      await repository.patch(
+        vm.metadata.id,
+        expectedRevision: vm.metadata.revision,
+        spec: VmSpecPatch.fromJson({'cpu': 8, 'memory_bytes': 536870912}),
+      );
+      final scheduler = _scheduler(
+        leases: sqliteLeases,
+        catalog: SqliteHostCapacityCatalog(database, diskBytes: (_) => 0),
+        metrics: _MetricsSource(),
+        limits: _limits(),
+      );
+      addTearDown(scheduler.shutdown);
+      await scheduler.acquire(_state(vm.metadata.id), _operation1);
+      final lease = (await sqliteLeases.list(activeAt: _now)).single;
+      expect(lease.request.specGeneration, 1);
+      expect(lease.request.cpuCount, 2);
+      expect(lease.request.memoryBytes, 268435456);
+    },
+  );
+
+  test('explicit admission and cleanup preserve the requested spec', () async {
+    final repository = SqliteVmRepository(database);
+    final vm = await repository.create(name: 'pinned-cleanup', spec: _vmSpec);
+    await repository.patch(
+      vm.metadata.id,
+      expectedRevision: vm.metadata.revision,
+      spec: VmSpecPatch.fromJson({'cpu': 8, 'memory_bytes': 536870912}),
+    );
+    var clock = _now;
+    final scheduler = _scheduler(
+      leases: sqliteLeases,
+      catalog: SqliteHostCapacityCatalog(
+        database,
+        diskBytes: (spec) => spec.cpu,
+      ),
+      metrics: _MetricsSource(),
+      limits: _limits(),
+      renewalScheduler: _ManualRenewalScheduler(),
+      now: () => clock,
+    );
+    addTearDown(scheduler.shutdown);
+    final decision = await scheduler.admit(
+      vm.metadata.id,
+      specGeneration: 1,
+      operationId: _operation1,
+    );
+    expect(decision.request.cpuCount, 2);
+    expect(decision.request.diskBytes, 2);
+    clock = clock.add(const Duration(minutes: 1));
+    await expectLater(
+      scheduler.markRunning(
+        _state(
+          vm.metadata.id,
+        ).copyWith(specGeneration: 2, activeSpecGeneration: 1),
+        _operation1,
+      ),
+      throwsA(isA<VmEffectException>()),
+    );
+    final cleanup = (await sqliteLeases.list(activeAt: clock)).single;
+    expect(cleanup.request.phase, HostLeasePhase.cleanup);
+    expect(cleanup.request.specGeneration, 1);
+    expect(cleanup.request.cpuCount, 2);
+    expect(cleanup.request.memoryBytes, 268435456);
+  });
+
+  test(
+    'recovery reserves applied capacity before newer catalog specs',
+    () async {
+      final repository = SqliteVmRepository(database);
+      final vm = await repository.create(
+        name: 'pinned-recovery',
+        spec: _vmSpec,
+      );
+      final state = _state(vm.metadata.id);
+      final accepted = await SqliteVmLifecycleAcceptance(
+        database: database,
+        idempotencyRetention: const Duration(days: 1),
+        command: VmLifecycleCommand(
+          requestId: RequestId.generate(),
+          idempotencyKey: null,
+          requestBody: const [],
+          vmId: vm.metadata.id,
+          action: VmLifecycleAction.start,
+        ),
+      ).commit(state);
+      final catalog = SqliteHostCapacityCatalog(database, diskBytes: (_) => 0);
+      expect(await catalog.recoveryRequests(), isEmpty);
+      await SqliteVmStateEffectAdapter(database).persistRuntime(
+        state.copyWith(
+          appliedIntentRevision: 1,
+          desiredState: DesiredState.running,
+          phase: VmPhase.starting,
+          currentOperation: VmControllerOperation(
+            id: accepted.result.operationId,
+            kind: VmOperationKind.start,
+            state: OperationState.pending,
+          ),
+        ),
+      );
+      final current = (await repository.get(vm.metadata.id))!;
+      await repository.patch(
+        vm.metadata.id,
+        expectedRevision: current.metadata.revision,
+        spec: VmSpecPatch.fromJson({'cpu': 8, 'memory_bytes': 536870912}),
+      );
+      final request = (await catalog.recoveryRequests()).single;
+      expect(request.specGeneration, 1);
+      expect(request.cpuCount, 2);
+      expect(request.memoryBytes, 268435456);
+    },
+  );
 
   test(
     'metrics are sampled before atomic admission and errors stay typed',
@@ -170,7 +458,7 @@ void main() {
         renewalInterval: const Duration(seconds: 4),
         renewalScheduler: timers,
         now: () => clock,
-        onLeaseLost: (vmId, _, _, error) {
+        onLeaseLost: (vmId, _, _, _, error) {
           losses.add((vmId: vmId, error: error));
         },
       );
@@ -225,7 +513,7 @@ void main() {
         renewalInterval: const Duration(seconds: 4),
         renewalScheduler: timers,
         now: () => clock,
-        onLeaseLost: (_, _, _, error) => losses.add(error),
+        onLeaseLost: (_, _, _, _, error) => losses.add(error),
       );
       await scheduler.acquire(_state(_vm1), _operation1);
       clock = clock.add(const Duration(seconds: 4));
@@ -288,13 +576,21 @@ void main() {
       lossRetryInterval: const Duration(seconds: 2),
       renewalScheduler: timers,
       now: () => clock,
-      onLeaseLost: (vmId, spec, operation, _) {
+      onLeaseLost: (vmId, spec, operation, generation, _) {
+        expect(generation, 5);
         attempts++;
         deliveries.add((vmId: vmId, spec: spec, operation: operation));
         if (attempts == 1) throw StateError('receiver unavailable');
       },
     );
-    await scheduler.acquire(_state(_vm1), _operation1);
+    await scheduler.acquire(
+      _state(_vm1).copyWith(driverGeneration: 4),
+      _operation1,
+    );
+    clock = clock.add(const Duration(seconds: 4));
+    timers.fireNext();
+    await _settleAsyncWork();
+    expect(attempts, 0);
     clock = clock.add(const Duration(seconds: 11));
     timers.fireNext();
     await _settleAsyncWork();
@@ -312,6 +608,128 @@ void main() {
     await scheduler.shutdown();
   });
 
+  test(
+    'asynchronous lease-loss delivery waits and retries rejection',
+    () async {
+      var clock = _now;
+      final timers = _ManualRenewalScheduler();
+      final firstDelivery = Completer<void>();
+      var attempts = 0;
+      final scheduler = _scheduler(
+        leases: sqliteLeases,
+        catalog: _Catalog([_request(_vm1)]),
+        metrics: _MetricsSource(),
+        limits: _limits(),
+        leaseTtl: const Duration(seconds: 10),
+        renewalInterval: const Duration(seconds: 4),
+        renewalScheduler: timers,
+        now: () => clock,
+        onLeaseLost: (_, _, _, _, _) async {
+          attempts++;
+          if (attempts == 1) await firstDelivery.future;
+        },
+      );
+      await scheduler.acquire(_state(_vm1), _operation1);
+      clock = clock.add(const Duration(seconds: 11));
+      timers.fireNext();
+      await _settleAsyncWork();
+      expect(attempts, 1);
+      expect(scheduler.pendingLeaseLossCount, 1);
+
+      firstDelivery.completeError(StateError('receiver unavailable'));
+      await _settleAsyncWork();
+      expect(scheduler.pendingLeaseLossCount, 1);
+      timers.fireNext();
+      await _settleAsyncWork();
+      expect(attempts, 2);
+      expect(scheduler.pendingLeaseLossCount, 0);
+      await scheduler.shutdown();
+    },
+  );
+
+  test('shutdown drains an asynchronous lease-loss receiver', () async {
+    var clock = _now;
+    final timers = _ManualRenewalScheduler();
+    final delivery = Completer<void>();
+    final entered = Completer<void>();
+    final scheduler = _scheduler(
+      leases: sqliteLeases,
+      catalog: _Catalog([_request(_vm1)]),
+      metrics: _MetricsSource(),
+      limits: _limits(),
+      leaseTtl: const Duration(seconds: 10),
+      renewalInterval: const Duration(seconds: 4),
+      renewalScheduler: timers,
+      now: () => clock,
+      onLeaseLost: (_, _, _, _, _) async {
+        entered.complete();
+        await delivery.future;
+      },
+    );
+    await scheduler.acquire(_state(_vm1), _operation1);
+    clock = clock.add(const Duration(seconds: 11));
+    timers.fireNext();
+    await entered.future;
+    var closed = false;
+    final closing = scheduler.shutdown().then((_) => closed = true);
+    await _settleAsyncWork();
+    expect(closed, isFalse);
+    delivery.completeError(StateError('receiver closed'));
+    await closing;
+    expect(scheduler.pendingLeaseLossCount, 0);
+    expect(timers.activeCount, 0);
+  });
+
+  for (final fails in [false, true]) {
+    test(
+      'stale async loss completion preserves new lease (fails=$fails)',
+      () async {
+        var clock = _now;
+        final timers = _ManualRenewalScheduler();
+        final delivery = Completer<void>();
+        final entered = Completer<void>();
+        var attempts = 0;
+        final scheduler = _scheduler(
+          leases: sqliteLeases,
+          catalog: _Catalog([_request(_vm1)]),
+          metrics: _MetricsSource(),
+          limits: _limits(),
+          leaseTtl: const Duration(seconds: 10),
+          renewalInterval: const Duration(seconds: 4),
+          renewalScheduler: timers,
+          now: () => clock,
+          onLeaseLost: (_, _, _, _, _) async {
+            attempts++;
+            entered.complete();
+            await delivery.future;
+          },
+        );
+        await scheduler.acquire(_state(_vm1), _operation1);
+        clock = clock.add(const Duration(seconds: 11));
+        timers.fireNext();
+        await entered.future;
+        expect(timers.activeCount, 0);
+        await scheduler.release(_state(_vm1), _operation1);
+        await scheduler.acquire(_state(_vm1), _operation2);
+        if (fails) {
+          delivery.completeError(StateError('old receiver rejected'));
+        } else {
+          delivery.complete();
+        }
+        await _settleAsyncWork();
+        expect(attempts, 1);
+        expect(scheduler.pendingLeaseLossCount, 0);
+        expect(scheduler.pendingRenewalCount, 1);
+        expect(timers.activeCount, 1);
+        expect(
+          (await sqliteLeases.list(activeAt: clock)).single.request.operationId,
+          _operation2,
+        );
+        await scheduler.shutdown();
+      },
+    );
+  }
+
   test('new acquisition cancels stale fenced loss retry', () async {
     var clock = _now;
     final timers = _ManualRenewalScheduler();
@@ -325,7 +743,7 @@ void main() {
       renewalInterval: const Duration(seconds: 4),
       renewalScheduler: timers,
       now: () => clock,
-      onLeaseLost: (_, _, _, _) {
+      onLeaseLost: (_, _, _, _, _) {
         attempts++;
         throw StateError('enqueue unavailable');
       },
@@ -337,6 +755,7 @@ void main() {
     expect(attempts, 1);
     expect(scheduler.pendingLeaseLossCount, 1);
 
+    await scheduler.release(_state(_vm1), _operation1);
     await scheduler.acquire(_state(_vm1), _operation2);
 
     expect(scheduler.pendingLeaseLossCount, 0);
@@ -537,7 +956,7 @@ void main() {
         renewalInterval: const Duration(seconds: 4),
         renewalScheduler: timers,
         now: () => clock,
-        onLeaseLost: (_, _, _, _) {
+        onLeaseLost: (_, _, _, _, _) {
           throw StateError('enqueue unavailable');
         },
       );
@@ -732,6 +1151,7 @@ final class _Catalog implements HostCapacityCatalog {
   Future<HostCapacityRequest> requestFor(
     VmId vmId, {
     required HostLeasePhase phase,
+    int? specGeneration,
   }) async => requests[vmId]!.copyWith(phase: phase);
 
   @override
@@ -763,13 +1183,18 @@ final class _DelayedCatalog implements HostCapacityCatalog {
   Future<HostCapacityRequest> requestFor(
     VmId vmId, {
     required HostLeasePhase phase,
+    int? specGeneration,
   }) async {
     if (_delayNext) {
       _delayNext = false;
       entered.complete();
       await release.future;
     }
-    return delegate.requestFor(vmId, phase: phase);
+    return delegate.requestFor(
+      vmId,
+      phase: phase,
+      specGeneration: specGeneration,
+    );
   }
 
   @override
@@ -794,10 +1219,15 @@ final class _DelayedMetricsSource implements HostMetricsSource {
 }
 
 final class _TracingLeaseRepository implements HostLeaseRepository {
-  const _TracingLeaseRepository(this.delegate, this.trace);
+  const _TracingLeaseRepository(
+    this.delegate,
+    this.trace, {
+    this.beforeRetention,
+  });
 
   final HostLeaseRepository delegate;
   final List<String> trace;
+  final Future<void> Function()? beforeRetention;
 
   @override
   Future<HostLeaseDecision> acquire({
@@ -842,12 +1272,15 @@ final class _TracingLeaseRepository implements HostLeaseRepository {
     required String ownerId,
     required DateTime now,
     required Duration ttl,
-  }) => delegate.retainForCleanup(
-    request: request,
-    ownerId: ownerId,
-    now: now,
-    ttl: ttl,
-  );
+  }) async {
+    await beforeRetention?.call();
+    return delegate.retainForCleanup(
+      request: request,
+      ownerId: ownerId,
+      now: now,
+      ttl: ttl,
+    );
+  }
 
   @override
   Future<List<HostLeaseDecision>> recover({
@@ -1109,7 +1542,7 @@ HostScheduler _scheduler({
   metrics: metrics,
   limits: limits,
   ownerId: ownerId,
-  onLeaseLost: onLeaseLost ?? ((_, _, _, _) {}),
+  onLeaseLost: onLeaseLost ?? ((_, _, _, _, _) {}),
   leaseTtl: leaseTtl,
   renewalInterval: renewalInterval,
   lossRetryInterval: lossRetryInterval,

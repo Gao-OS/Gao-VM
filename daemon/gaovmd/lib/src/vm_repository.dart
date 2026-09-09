@@ -383,7 +383,7 @@ final class SqliteVmRepository implements VmRepository {
           formatPersistenceTimestamp(now),
         ],
       );
-      if (_restartFieldsDiffer(current.spec, nextSpec) &&
+      if (vmSpecRequiresRestart(current.spec, nextSpec) &&
           current.status.phase == VmPhase.running &&
           nextGeneration > current.status.observedGeneration) {
         connection.execute(
@@ -487,7 +487,7 @@ final class SqliteVmRepository implements VmRepository {
 VmSpec _applyPatch(VmSpec current, VmSpecPatch patch) =>
     VmSpec.fromJson({...current.toJson(), ...patch.toJson()});
 
-bool _restartFieldsDiffer(VmSpec current, VmSpec next) =>
+bool vmSpecRequiresRestart(VmSpec current, VmSpec next) =>
     current.backend != next.backend ||
     current.architecture != next.architecture ||
     current.cpu != next.cpu ||
