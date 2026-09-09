@@ -77,3 +77,17 @@ Managed file publication and legacy migration must be crash-consistent: stage, f
 - Do not make P1 VM clone, Flutter UI, MCP, or optional Guest Agent extensions prerequisites for the MVP.
 
 This file and the accepted documents under `docs/` define the frozen M0 contract.
+
+## Agent Note
+
+Agent Note project: gao-vm
+
+Use the shared `agent-note` skill for project knowledge.
+Before substantial design or debugging, recall relevant project notes.
+At accepted decisions, validated work boundaries, or reproducible blocker handoffs,
+evaluate durable findings and create/update notes only when the skill's quality gate
+passes. This authorizes scoped capture, not whole-project curation or deletion.
+No note is required for an ordinary completed task.
+Contributors return candidates; the coordinating agent writes shared notes.
+Apply recalled guidance only after checking its sources and target-version scope.
+If the skill or MCP is unavailable, report the limitation without claiming a write.
