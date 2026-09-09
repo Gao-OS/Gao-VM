@@ -6,6 +6,10 @@ import 'dart:io';
 import 'package:gaovm_models/gaovm_models.dart';
 import 'package:gaovmd/src/driver_process_manager.dart';
 import 'package:gaovmd/src/driver_runtime_layout.dart';
+import 'package:gaovmd/src/driver_runtime_metadata.dart';
+import 'package:gaovmd/src/driver_runtime_discovery.dart';
+import 'package:gaovmd/src/image_filesystem.dart';
+import 'package:gaovmd/src/macos_driver_inventory.dart';
 import 'package:gaovmd/src/runtime_driver.dart';
 import 'package:gaovmd/src/runtime_driver_effect_adapter.dart';
 import 'package:gaovmd/src/vm_controller_reducer.dart';
@@ -26,6 +30,79 @@ void main() {
       await temporaryDirectory.delete(recursive: true);
     }
   });
+
+  test(
+    'metadata sync failure compensates spawn before a retry can own the VM',
+    () async {
+      var failSync = true;
+      final syncingManager = _manager(
+        temporaryDirectory,
+        metadataDirectorySync: (_) {
+          if (failSync)
+            throw FileSystemException('injected metadata sync failure');
+        },
+      );
+      addTearDown(syncingManager.close);
+      final first = _correlation(_vm1, 1, _operation1);
+      await expectLater(
+        syncingManager.spawn(RuntimeDriverLaunch(correlation: first)),
+        throwsA(
+          isA<RuntimeDriverError>().having(
+            (error) => error.code,
+            'code',
+            RuntimeDriverErrorCode.runtimeStartFailed,
+          ),
+        ),
+      );
+      expect(syncingManager.activeProcessCount, 0);
+      expect(syncingManager.activeGenerationCount, 0);
+      expect(syncingManager.managedProcessIdentities, isEmpty);
+      final layout = DriverRuntimeLayout('${temporaryDirectory.path}/run');
+      expect(await Directory(layout.paths(first).directory).exists(), isFalse);
+      failSync = false;
+      final second = _correlation(_vm1, 2, _operation2);
+      await syncingManager.spawn(RuntimeDriverLaunch(correlation: second));
+      expect(syncingManager.activeProcessCount, 1);
+      await syncingManager.release(second);
+    },
+  );
+
+  test(
+    'unverified executable identity fails spawn and cleans the owned child',
+    () async {
+      final wrapper = File('${temporaryDirectory.path}/driver-wrapper');
+      await wrapper.writeAsString('#!/bin/sh\nexec /bin/cat\n');
+      final chmod = await Process.run('/bin/chmod', ['700', wrapper.path]);
+      expect(chmod.exitCode, 0);
+      final layout = DriverRuntimeLayout('${temporaryDirectory.path}/run');
+      final identityManager = DriverProcessManager(
+        layout: layout,
+        resolveExecutable: (_) => DriverExecutable(path: wrapper.path),
+        resolveBundlePath: (_) => temporaryDirectory.path,
+      );
+      addTearDown(identityManager.close);
+      final correlation = _correlation(_vm1, 1, _operation1);
+      await expectLater(
+        identityManager.spawn(RuntimeDriverLaunch(correlation: correlation)),
+        throwsA(
+          isA<RuntimeDriverError>().having(
+            (error) => error.code,
+            'code',
+            RuntimeDriverErrorCode.runtimeStartFailed,
+          ),
+        ),
+      );
+      expect(identityManager.activeProcessCount, 0);
+      expect(identityManager.pendingSpawnCount, 0);
+      expect(identityManager.activeGenerationCount, 0);
+      expect(identityManager.managedProcessIdentities, isEmpty);
+      expect(
+        await Directory(layout.paths(correlation).directory).exists(),
+        isFalse,
+      );
+    },
+    skip: !Platform.isMacOS,
+  );
 
   test(
     'runs two correlated driver processes independently and cleans them',
@@ -69,6 +146,55 @@ void main() {
               as Map<String, Object?>;
       expect(metadata['vm_id'], _vm1.value);
       expect(metadata['driver_generation'], 1);
+      if (Platform.isMacOS) {
+        final identity = (await MacOsDriverInventory(
+          executablePath: File(
+            Platform.resolvedExecutable,
+          ).resolveSymbolicLinksSync(),
+        ).inspect(first.pid))!;
+        expect(metadata['process_identity'], {
+          'pid': identity.pid,
+          'uid': identity.uid,
+          'executable_path': identity.executablePath,
+          'started_at_microseconds': identity.startedAtMicroseconds,
+          'pid_version': identity.pidVersion,
+        });
+        expect(manager.managedProcessIdentities, contains(identity));
+        final runRoot = await OwnedImageDirectory.open(
+          Directory('${temporaryDirectory.path}/run'),
+        );
+        try {
+          final discovered = await DriverRuntimeDiscovery(
+            root: runRoot,
+            resolveBinding: (vmId) async => DriverRecoveryBinding(
+              driverGeneration: 1,
+              executable: identity.executablePath,
+              bundlePath: '${temporaryDirectory.path}/vms/${vmId.value}.gaovm',
+            ),
+          ).scan();
+          expect(
+            discovered.records.map((record) => record.correlation.vmId).toSet(),
+            {_vm1, _vm2},
+          );
+          expect(discovered.issues, isEmpty);
+        } finally {
+          runRoot.close();
+        }
+        final directory = await OwnedImageDirectory.open(
+          Directory(first.paths.directory),
+        );
+        try {
+          final record = await DriverRuntimeMetadata.readFrom(
+            directory,
+            correlation: firstCorrelation,
+            executable: identity.executablePath,
+            bundlePath: '${temporaryDirectory.path}/vms/${_vm1.value}.gaovm',
+          );
+          expect(record!.processIdentity, identity);
+        } finally {
+          directory.close();
+        }
+      }
       expect(metadata.toString(), isNot(contains('GAOVM_AUTH_TOKEN')));
 
       await Future.wait([
@@ -76,6 +202,7 @@ void main() {
         second.execute(RuntimeStopCommand(correlation: secondCorrelation)),
       ]);
       await Future.wait([first.exited, second.exited]);
+      expect(manager.managedProcessIdentities, isEmpty);
       await Future.wait([
         manager.release(firstCorrelation),
         manager.release(secondCorrelation),
@@ -254,6 +381,9 @@ void main() {
       expect(cleanupFailure, isA<FileSystemException>());
       expect(cleanupManager.activeProcessCount, 1);
 
+      // Unknown content requires explicit resolution, not merely permission
+      // changes that would let a recursive cleanup delete it.
+      await Directory('$quarantine/blocked').delete();
       await cleanupManager.release(correlation);
 
       expect(cleanupManager.activeProcessCount, 0);
@@ -629,11 +759,15 @@ void main() {
 
 DriverProcessManager _manager(
   Directory root, {
+  FutureOr<void> Function(String)? metadataDirectorySync,
   String scenario = 'normal',
   Duration heartbeatInterval = const Duration(seconds: 30),
   Duration heartbeatTimeout = const Duration(seconds: 5),
 }) => DriverProcessManager(
-  layout: DriverRuntimeLayout('${root.path}/run'),
+  layout: DriverRuntimeLayout(
+    '${root.path}/run',
+    metadataDirectorySync: metadataDirectorySync,
+  ),
   resolveExecutable: (_) => DriverExecutable(
     path: Platform.resolvedExecutable,
     prefixArguments: [

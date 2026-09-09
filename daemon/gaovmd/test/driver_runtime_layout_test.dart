@@ -19,6 +19,111 @@ void main() {
     if (await root.exists()) await root.delete(recursive: true);
   });
 
+  test('cleanup preserves unknown generation content for recovery', () async {
+    final layout = DriverRuntimeLayout('${root.path}/run');
+    final paths = await layout.create(_correlation);
+    await File('${paths.directory}/metadata.json').writeAsString('{}');
+    await File('${paths.directory}/unexpected').writeAsString('preserve');
+    await expectLater(
+      layout.remove(paths),
+      throwsA(isA<FileSystemException>()),
+    );
+    final quarantine = '${paths.directory}.cleanup.${paths.cleanupToken}';
+    expect(await File('$quarantine/unexpected').readAsString(), 'preserve');
+    expect(await File('$quarantine/metadata.json').readAsString(), '{}');
+  });
+
+  test('cleanup preserves content inside a VM ownership marker', () async {
+    final layout = DriverRuntimeLayout('${root.path}/run');
+    final paths = await layout.create(_correlation);
+    final vmPath = Directory(paths.directory).parent.path;
+    final markerName = '.gaovm-owner-${paths.vmCleanupToken}';
+    await File('$vmPath/$markerName/unexpected').writeAsString('preserve');
+
+    await expectLater(
+      layout.remove(paths),
+      throwsA(isA<FileSystemException>()),
+    );
+
+    final quarantine = '$vmPath.cleanup.${paths.vmCleanupToken}';
+    expect(
+      await File('$quarantine/$markerName/unexpected').readAsString(),
+      'preserve',
+    );
+    await File('$quarantine/$markerName/unexpected').delete();
+    await layout.remove(paths);
+    expect(await Directory(quarantine).exists(), isFalse);
+  });
+
+  test('cleanup resumes after removing the last quarantine marker', () async {
+    final layout = DriverRuntimeLayout('${root.path}/run');
+    final paths = await layout.create(_correlation);
+    final vmPath = Directory(paths.directory).parent.path;
+    final generationQuarantine =
+        '${paths.directory}.cleanup.${paths.cleanupToken}';
+    await Directory(paths.directory).rename(generationQuarantine);
+    await Directory(
+      '$generationQuarantine/.gaovm-owner-${paths.cleanupToken}',
+    ).delete();
+    await layout.remove(paths);
+    expect(await Directory(generationQuarantine).exists(), isFalse);
+    expect(await Directory(vmPath).exists(), isFalse);
+
+    final next = await layout.create(_correlation);
+    await Directory(
+      '${next.directory}/.gaovm-owner-${next.cleanupToken}',
+    ).delete();
+    await Directory(next.directory).delete();
+    final vmQuarantine = '$vmPath.cleanup.${next.vmCleanupToken}';
+    await Directory(vmPath).rename(vmQuarantine);
+    await Directory(
+      '$vmQuarantine/.gaovm-owner-${next.vmCleanupToken}',
+    ).delete();
+    await layout.remove(next);
+    expect(await Directory(vmQuarantine).exists(), isFalse);
+    expect(await Directory(vmPath).exists(), isFalse);
+  });
+
+  test(
+    'recovery reads owned cleanup tokens without changing runtime files',
+    () async {
+      final layout = DriverRuntimeLayout('${root.path}/run');
+      final paths = await layout.create(_correlation);
+      final recovered = await layout.recoverPaths(_correlation);
+      expect(recovered.directory, paths.directory);
+      expect(recovered.cleanupToken, paths.cleanupToken);
+      expect(recovered.vmCleanupToken, paths.vmCleanupToken);
+      final marker = '${paths.directory}/.gaovm-owner-${paths.cleanupToken}';
+      await File('$marker/unexpected').writeAsString('preserve');
+      await expectLater(
+        layout.recoverPaths(_correlation),
+        throwsA(isA<FileSystemException>()),
+      );
+      expect(await File('$marker/unexpected').readAsString(), 'preserve');
+    },
+  );
+
+  test('VM quarantine cleanup never follows a replacement symlink', () async {
+    final layout = DriverRuntimeLayout('${root.path}/run');
+    final paths = await layout.create(_correlation);
+    await layout.remove(paths);
+    final target = await Directory('${root.path}/foreign').create();
+    final marker = await Directory(
+      '${target.path}/.gaovm-owner-${paths.vmCleanupToken}',
+    ).create();
+    final quarantine =
+        '${Directory(paths.directory).parent.path}.cleanup.${paths.vmCleanupToken}';
+    await Link(quarantine).create(target.path);
+
+    await expectLater(
+      layout.remove(paths),
+      throwsA(isA<FileSystemException>()),
+    );
+
+    expect(await marker.exists(), isTrue);
+    expect(await Link(quarantine).exists(), isTrue);
+  });
+
   test('rejects symlink run root and VM directory components', () async {
     final target = await Directory('${root.path}/target').create();
     final linkedRoot = '${root.path}/linked-run';

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi' as ffi;
 import 'dart:io';
@@ -6,6 +7,9 @@ import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
 import 'atomic_json_file.dart';
+import 'driver_runtime_metadata.dart';
+import 'image_filesystem.dart';
+import 'macos_driver_inventory.dart';
 import 'runtime_driver.dart';
 
 final class DriverRuntimePaths {
@@ -25,8 +29,12 @@ final class DriverRuntimePaths {
 }
 
 final class DriverRuntimeLayout {
-  DriverRuntimeLayout(this.runRoot, {Random? secureRandom})
-    : _random = secureRandom ?? Random.secure() {
+  DriverRuntimeLayout(
+    this.runRoot, {
+    Random? secureRandom,
+    FutureOr<void> Function(String)? metadataDirectorySync,
+  }) : _random = secureRandom ?? Random.secure(),
+       _metadataDirectorySync = metadataDirectorySync {
     if (!runRoot.startsWith('/')) {
       throw ArgumentError.value(runRoot, 'runRoot', 'must be absolute');
     }
@@ -34,6 +42,7 @@ final class DriverRuntimeLayout {
 
   final String runRoot;
   final Random _random;
+  final FutureOr<void> Function(String)? _metadataDirectorySync;
 
   DriverRuntimePaths paths(DriverCorrelation correlation) {
     final directory =
@@ -76,17 +85,119 @@ final class DriverRuntimeLayout {
     required String executable,
     required String bundlePath,
     required DateTime createdAt,
-  }) => AtomicJsonFile(paths.metadataPath).write({
-    'version': 1,
-    'vm_id': correlation.vmId.value,
-    'driver_generation': correlation.driverGeneration,
-    'operation_id': correlation.operationId?.value,
-    'pid': pid,
-    'executable': executable,
-    'bundle_path': bundlePath,
-    'socket_path': paths.socketPath,
-    'created_at': createdAt.toUtc().toIso8601String(),
-  });
+    DriverProcessIdentity? processIdentity,
+  }) =>
+      AtomicJsonFile.durable(
+        paths.metadataPath,
+        syncDirectory: _metadataDirectorySync,
+      ).write(
+        DriverRuntimeMetadata.fromJson({
+          'version': 1,
+          'vm_id': correlation.vmId.value,
+          'driver_generation': correlation.driverGeneration,
+          'operation_id': correlation.operationId?.value,
+          'pid': pid,
+          'executable': executable,
+          'bundle_path': bundlePath,
+          'socket_path': paths.socketPath,
+          'created_at': createdAt.toUtc().toIso8601String(),
+          if (processIdentity != null)
+            'process_identity': {
+              'pid': processIdentity.pid,
+              'uid': processIdentity.uid,
+              'executable_path': processIdentity.executablePath,
+              'started_at_microseconds': processIdentity.startedAtMicroseconds,
+              if (processIdentity.pidVersion != null)
+                'pid_version': processIdentity.pidVersion,
+            },
+        }).toJson(),
+      );
+
+  /// Reads existing ownership markers; it neither proves driver exit nor
+  /// authorizes removing a running generation. Startup holds daemon ownership.
+  Future<DriverRuntimePaths> recoverPaths(DriverCorrelation correlation) async {
+    final unresolved = paths(correlation);
+    if (await FileSystemEntity.type(runRoot, followLinks: false) !=
+        FileSystemEntityType.directory) {
+      throw FileSystemException(
+        'runtime root must be a real directory',
+        runRoot,
+      );
+    }
+    final root = await OwnedImageDirectory.open(Directory(runRoot));
+    OwnedImageDirectory? vm;
+    OwnedImageDirectory? generation;
+    try {
+      if (root.mode & 0x3f != 0) {
+        throw FileSystemException('runtime root must be private', runRoot);
+      }
+      vm = root.directory(correlation.vmId.value);
+      generation = vm.directory('${correlation.driverGeneration}');
+      final vmToken = await _recoverToken(vm);
+      final token = await _recoverToken(generation);
+      await root.verifyPathBinding();
+      return DriverRuntimePaths(
+        directory: unresolved.directory,
+        socketPath: unresolved.socketPath,
+        metadataPath: unresolved.metadataPath,
+        cleanupToken: token,
+        vmCleanupToken: vmToken,
+      );
+    } finally {
+      generation?.close();
+      vm?.close();
+      root.close();
+    }
+  }
+
+  Future<String> _recoverToken(OwnedImageDirectory directory) async {
+    const prefix = '.gaovm-owner-';
+    final markers = <String>[];
+    if (directory.mode & 0x3f != 0) {
+      throw FileSystemException(
+        'runtime directory must be private',
+        directory.path,
+      );
+    }
+    await directory.verifyPathBinding();
+    var count = 0;
+    await for (final entry in Directory(
+      directory.path,
+    ).list(followLinks: false)) {
+      if (++count > 4096) {
+        throw FileSystemException(
+          'runtime directory exceeds discovery limit',
+          directory.path,
+        );
+      }
+      final name = entry.path.split(Platform.pathSeparator).last;
+      if (name.startsWith(prefix)) markers.add(name);
+    }
+    if (markers.length != 1 ||
+        !RegExp(
+          r'^\.gaovm-owner-[A-Za-z0-9_-]{32}$',
+        ).hasMatch(markers.single)) {
+      throw FileSystemException(
+        'runtime ownership marker is invalid',
+        directory.path,
+      );
+    }
+    final marker = directory.directory(markers.single);
+    try {
+      if (marker.mode & 0x3f != 0 ||
+          !await Directory(marker.path).list(followLinks: false).isEmpty) {
+        throw FileSystemException(
+          'runtime ownership marker is invalid',
+          marker.path,
+        );
+      }
+      await marker.verifyPathBinding();
+      await directory.verifyPathBinding();
+      return markers.single.substring(prefix.length);
+    } finally {
+      marker.close();
+    }
+  }
 
   Future<void> remove(DriverRuntimePaths paths) async {
     final token = paths.cleanupToken;
@@ -113,7 +224,11 @@ final class DriverRuntimeLayout {
         await FileSystemEntity.type(marker.path, followLinks: false) ==
             FileSystemEntityType.directory;
     if (ownsDirectory) {
-      await Directory(quarantine).delete(recursive: true);
+      await _removeGenerationContents(quarantine, token);
+      await Directory(quarantine).delete();
+      await _removeEmptyVmDirectory(paths);
+    } else if (sourceType == FileSystemEntityType.notFound &&
+        await _removeEmptyQuarantine(quarantine)) {
       await _removeEmptyVmDirectory(paths);
     } else if (await FileSystemEntity.type(
           paths.directory,
@@ -121,6 +236,86 @@ final class DriverRuntimeLayout {
         ) ==
         FileSystemEntityType.notFound) {
       await _renameEntityBack(quarantine, paths.directory);
+    }
+  }
+
+  // The caller supplies the retained cleanup token. An empty, pre-existing
+  // quarantine can remain after marker removal and before the final rmdir.
+  // Never apply this rule to a newly quarantined replacement source directory.
+  Future<bool> _removeEmptyQuarantine(String path) async {
+    if (await FileSystemEntity.type(path, followLinks: false) !=
+        FileSystemEntityType.directory)
+      return false;
+    final parent = await OwnedImageDirectory.open(Directory(path).parent);
+    final name = path.split(Platform.pathSeparator).last;
+    OwnedImageDirectory? directory;
+    try {
+      directory = parent.directory(name);
+      if (!await Directory(path).list(followLinks: false).isEmpty) return false;
+      await directory.verifyPathBinding();
+      parent.removeDirectory(name);
+      await parent.sync();
+      return true;
+    } finally {
+      directory?.close();
+      parent.close();
+    }
+  }
+
+  Future<void> _removeGenerationContents(String path, String token) async {
+    final directory = await OwnedImageDirectory.open(Directory(path));
+    final markerName = '.gaovm-owner-$token';
+    try {
+      final files = <String>[];
+      // Validate every entry before removing anything. Unknown content remains
+      // quarantined with its metadata so recovery can diagnose it.
+      await for (final entry in Directory(path).list(followLinks: false)) {
+        final name = entry.path.split(Platform.pathSeparator).last;
+        final type = await FileSystemEntity.type(
+          entry.path,
+          followLinks: false,
+        );
+        if (name == markerName && type == FileSystemEntityType.directory) {
+          final marker = await directory.directory(name);
+          try {
+            if (!await Directory(
+              marker.path,
+            ).list(followLinks: false).isEmpty) {
+              throw FileSystemException(
+                'runtime ownership marker is not empty',
+                entry.path,
+              );
+            }
+            await marker.verifyPathBinding();
+          } finally {
+            marker.close();
+          }
+        } else if ((name == 'metadata.json' ||
+                RegExp(
+                  r'^metadata\.json\.tmp\.[0-9]+\.[0-9]+$',
+                ).hasMatch(name)) &&
+            type == FileSystemEntityType.file) {
+          final file = await directory.file(name);
+          file.close();
+          files.add(name);
+        } else if (name == 'driver.sock' &&
+            type == FileSystemEntityType.unixDomainSock) {
+          files.add(name);
+        } else {
+          throw FileSystemException(
+            'unknown runtime content requires recovery',
+            entry.path,
+          );
+        }
+      }
+      await directory.verifyPathBinding();
+      for (final name in files) {
+        directory.removeFile(name);
+      }
+      directory.removeDirectory(markerName);
+      await directory.sync();
+    } finally {
+      directory.close();
     }
   }
 
@@ -182,6 +377,13 @@ final class DriverRuntimeLayout {
         FileSystemEntityType.notFound) {
       return;
     }
+    if (await FileSystemEntity.type(quarantine, followLinks: false) !=
+        FileSystemEntityType.directory) {
+      throw FileSystemException(
+        'VM quarantine must be a real directory',
+        quarantine,
+      );
+    }
     final marker = Directory('$quarantine/.gaovm-owner-$token');
     final entries = await Directory(
       quarantine,
@@ -192,7 +394,19 @@ final class DriverRuntimeLayout {
         entries.length == 1 &&
         entries.single.path == marker.path;
     if (ownedAndEmpty) {
-      await Directory(quarantine).delete(recursive: true);
+      final directory = await OwnedImageDirectory.open(Directory(quarantine));
+      try {
+        // rmdir refuses a populated marker. Never recursively delete content
+        // introduced after the VM directory was published.
+        directory.removeDirectory('.gaovm-owner-$token');
+        await directory.sync();
+      } finally {
+        directory.close();
+      }
+      await Directory(quarantine).delete();
+    } else if (sourceType == FileSystemEntityType.notFound &&
+        await _removeEmptyQuarantine(quarantine)) {
+      return;
     } else if (await FileSystemEntity.type(vmDirectory, followLinks: false) ==
         FileSystemEntityType.notFound) {
       await _renameEntityBack(quarantine, vmDirectory);

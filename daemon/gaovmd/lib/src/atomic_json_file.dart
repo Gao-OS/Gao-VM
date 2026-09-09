@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi' as ffi;
 import 'dart:io';
@@ -5,9 +6,18 @@ import 'dart:io';
 import 'package:ffi/ffi.dart';
 
 class AtomicJsonFile {
-  AtomicJsonFile(this.path);
+  AtomicJsonFile(this.path) : _syncDirectory = _PosixDirectoryFsync.bestEffort;
+
+  /// Reports directory-sync failure even when rename has already published the
+  /// new bytes. Callers must reconcile uncertain publication, not assume rollback.
+  /// [syncDirectory] is the filesystem boundary for fault injection.
+  AtomicJsonFile.durable(
+    this.path, {
+    FutureOr<void> Function(String)? syncDirectory,
+  }) : _syncDirectory = syncDirectory ?? _PosixDirectoryFsync.requiredSync;
 
   final String path;
+  final FutureOr<void> Function(String) _syncDirectory;
 
   Future<void> write(Map<String, Object?> jsonMap) async {
     final target = File(path);
@@ -27,7 +37,7 @@ class AtomicJsonFile {
       await raf.close();
     }
     await tmp.rename(target.path);
-    _PosixDirectoryFsync.bestEffort(target.parent.path);
+    await _syncDirectory(target.parent.path);
   }
 }
 
@@ -51,22 +61,30 @@ final class _PosixDirectoryFsync {
       );
 
   static void bestEffort(String dirPath) {
+    try {
+      requiredSync(dirPath);
+    } catch (_) {
+      // Legacy callers retain best-effort directory sync.
+    }
+  }
+
+  static void requiredSync(String dirPath) {
     if (!_enabled) {
-      return;
+      throw UnsupportedError('directory sync is unavailable');
     }
     final ptr = dirPath.toNativeUtf8();
     try {
       final fd = _open(ptr, 0);
       if (fd < 0) {
-        return;
+        throw FileSystemException('cannot open directory for sync', dirPath);
       }
       try {
-        _fsync(fd);
+        if (_fsync(fd) != 0) {
+          throw FileSystemException('cannot sync directory', dirPath);
+        }
       } finally {
         _close(fd);
       }
-    } catch (_) {
-      // Best effort only.
     } finally {
       calloc.free(ptr);
     }

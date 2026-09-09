@@ -9,6 +9,7 @@ import 'package:gaovm_models/gaovm_models.dart';
 import 'driver_protocol_v2.dart';
 import 'driver_rpc_channel.dart';
 import 'driver_runtime_layout.dart';
+import 'macos_driver_inventory.dart';
 import 'runtime_driver.dart';
 
 final class DriverExecutable {
@@ -87,6 +88,13 @@ final class DriverProcessManager implements RuntimeDriverFactory {
   int get pendingSpawnCount => _spawns.length;
   int get activeGenerationCount => _activeByVm.length;
 
+  /// Kernel identities of live owned macOS processes, never PID-only exclusions.
+  Set<DriverProcessIdentity> get managedProcessIdentities => Set.unmodifiable({
+    for (final session in _sessions.values)
+      if (!session._processExited && session._processIdentity != null)
+        session._processIdentity!,
+  });
+
   @override
   Future<RuntimeDriverSession> spawn(RuntimeDriverLaunch launch) async {
     if (_closed) throw _cancelled('driver process manager is closed');
@@ -121,6 +129,9 @@ final class DriverProcessManager implements RuntimeDriverFactory {
       paths = await _layout.create(correlation);
       _requireAttemptActive(key, attempt);
       final executable = await _resolveExecutable(correlation.vmId);
+      final executablePath = Platform.isMacOS
+          ? await File(executable.path).resolveSymbolicLinks()
+          : executable.path;
       final bundlePath = await _resolveBundlePath(correlation.vmId);
       if (!bundlePath.startsWith('/')) {
         throw ArgumentError('driver bundle path must be absolute');
@@ -140,7 +151,7 @@ final class DriverProcessManager implements RuntimeDriverFactory {
         'vz',
       ];
       process = await Process.start(
-        executable.path,
+        executablePath,
         arguments,
         workingDirectory: paths.directory,
         runInShell: false,
@@ -166,11 +177,21 @@ final class DriverProcessManager implements RuntimeDriverFactory {
       );
       attempt.session = session;
       _sessions[key] = session;
+      if (Platform.isMacOS) {
+        session._processIdentity = await MacOsDriverInventory(
+          executablePath: executablePath,
+        ).inspect(process.pid);
+        if (session._processIdentity == null) {
+          throw StateError('spawned driver identity could not be established');
+        }
+      }
+      _requireAttemptActive(key, attempt);
       await _layout.writeMetadata(
         paths,
         correlation: correlation,
         pid: process.pid,
-        executable: executable.path,
+        executable: executablePath,
+        processIdentity: session._processIdentity,
         bundlePath: bundlePath,
         createdAt: _now(),
       );
@@ -388,6 +409,7 @@ final class ProcessRuntimeDriverSession implements RuntimeDriverSession {
   bool _cleanShutdown = false;
   bool _terminalRequested = false;
   bool _processExited = false;
+  DriverProcessIdentity? _processIdentity;
   bool _connected = false;
   bool _released = false;
   bool _logListenerAttached = false;

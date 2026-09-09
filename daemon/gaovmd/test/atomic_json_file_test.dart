@@ -18,6 +18,29 @@ void main() {
   });
 
   group('AtomicJsonFile', () {
+    test(
+      'durable publication reports sync failure without rolling back published bytes',
+      () async {
+        final path = '${tempDir.path}/metadata.json';
+        final failure = FileSystemException('injected directory sync failure');
+        final atomic = AtomicJsonFile.durable(
+          path,
+          syncDirectory: (directory) {
+            expect(directory, tempDir.path);
+            throw failure;
+          },
+        );
+        await expectLater(
+          atomic.write({'generation': 2}),
+          throwsA(same(failure)),
+        );
+        expect(jsonDecode(await File(path).readAsString()), {'generation': 2});
+        expect((await tempDir.list().toList()).length, 1);
+        await AtomicJsonFile.durable(path).write({'generation': 3});
+        expect(jsonDecode(await File(path).readAsString()), {'generation': 3});
+      },
+    );
+
     test('writes valid JSON with pretty printing', () async {
       final path = '${tempDir.path}/test.json';
       final atomic = AtomicJsonFile(path);

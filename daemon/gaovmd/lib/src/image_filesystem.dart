@@ -17,6 +17,10 @@ final _close = _libc.lookupFunction<Int32 Function(Int32), int Function(int)>(
 final _fsync = _libc.lookupFunction<Int32 Function(Int32), int Function(int)>(
   'fsync',
 );
+final _flock = _libc
+    .lookupFunction<Int32 Function(Int32, Int32), int Function(int, int)>(
+      'flock',
+    );
 final _fchmod = _libc
     .lookupFunction<Int32 Function(Int32, Uint32), int Function(int, int)>(
       'fchmod',
@@ -31,6 +35,11 @@ final _unlinkat = _libc
       Int32 Function(Int32, Pointer<Utf8>, Int32),
       int Function(int, Pointer<Utf8>, int)
     >('unlinkat');
+final _mkdirat = _libc
+    .lookupFunction<
+      Int32 Function(Int32, Pointer<Utf8>, Uint32),
+      int Function(int, Pointer<Utf8>, int)
+    >('mkdirat');
 final _fclonefileat = Platform.isMacOS
     ? _libc.lookupFunction<
         Int32 Function(Int32, Int32, Pointer<Utf8>, Uint32),
@@ -114,6 +123,24 @@ int get _outputFlags => Platform.isMacOS
     ? 0x0001 | 0x0200 | 0x0800 | 0x0100 | 0x1000000
     : 0x0001 | 0x0040 | 0x0080 | 0x20000 | 0x80000;
 
+void _verifyDescriptorPath(int fd, String path, {required bool directory}) {
+  final reopened = _openSource(path, directory: directory);
+  try {
+    final held = _sourceStat(fd, identity: true);
+    final current = _sourceStat(reopened.fd, identity: true);
+    if (held.inode != current.inode ||
+        held.deviceMajor != current.deviceMajor ||
+        held.deviceMinor != current.deviceMinor) {
+      throw FileSystemException(
+        'pathname no longer identifies held inode',
+        path,
+      );
+    }
+  } finally {
+    _close(reopened.fd);
+  }
+}
+
 /// An owned descriptor remains bound to its inode across pathname replacement.
 /// Child opens are relative to the held directory, with symlinks disallowed.
 final class OwnedImageDirectory {
@@ -128,6 +155,18 @@ final class OwnedImageDirectory {
     return OwnedImageDirectory._(source.fd, path);
   }
 
+  /// Checks this pathname against the held inode at call time. This does not
+  /// prevent subsequent pathname replacement by another same-UID process.
+  Future<void> verifyPathBinding() async {
+    _requireOpen();
+    _verifyDescriptorPath(_fd, path, directory: true);
+  }
+
+  int get mode {
+    _requireOpen();
+    return _sourceStat(_fd).mode;
+  }
+
   OwnedImageDirectory directory(String name) {
     _requireOpen();
     return OwnedImageDirectory._(
@@ -136,10 +175,92 @@ final class OwnedImageDirectory {
     );
   }
 
+  /// The caller owns and serializes this private child namespace.
+  OwnedImageDirectory createDirectory(String name) {
+    _requireOpen();
+    _validateChildName(name);
+    final nativeName = name.toNativeUtf8();
+    try {
+      if (_mkdirat(_fd, nativeName, 0x1c0) != 0) {
+        throw FileSystemException(
+          'cannot create owned directory',
+          '$path/$name',
+          OSError('mkdirat failed', _currentErrno()),
+        );
+      }
+      OwnedImageDirectory? child;
+      try {
+        child = directory(name);
+        if (_fchmod(child._fd, 0x1c0) != 0) {
+          throw FileSystemException(
+            'cannot set owned directory permissions',
+            '$path/$name',
+            OSError('fchmod failed', _currentErrno()),
+          );
+        }
+        return child;
+      } catch (_) {
+        child?.close();
+        if (_unlinkat(_fd, nativeName, Platform.isMacOS ? 0x80 : 0x200) != 0) {
+          throw FileSystemException(
+            'cannot remove invalid owned directory',
+            '$path/$name',
+            OSError('unlinkat failed', _currentErrno()),
+          );
+        }
+        if (_fsync(_fd) != 0) {
+          throw FileSystemException(
+            'cannot sync owned directory cleanup',
+            path,
+            OSError('fsync failed', _currentErrno()),
+          );
+        }
+        rethrow;
+      }
+    } finally {
+      malloc.free(nativeName);
+    }
+  }
+
   OwnedImageFile file(String name) {
     _requireOpen();
     final source = _openSource(name, parent: _fd);
     return OwnedImageFile._(source.fd, '$path/$name', source.size);
+  }
+
+  OwnedImageDirectory? directoryOrNull(String name) {
+    try {
+      return directory(name);
+    } on FileSystemException catch (error) {
+      if (error.osError?.errorCode == 2) return null; // ENOENT only
+      rethrow;
+    }
+  }
+
+  OwnedImageFile? fileOrNull(String name) {
+    try {
+      return file(name);
+    } on FileSystemException catch (error) {
+      if (error.osError?.errorCode == 2) return null; // ENOENT only
+      rethrow;
+    }
+  }
+
+  void removeDirectory(String name) {
+    _requireOpen();
+    _validateChildName(name);
+    final nativeName = name.toNativeUtf8();
+    try {
+      if (_unlinkat(_fd, nativeName, Platform.isMacOS ? 0x80 : 0x200) != 0) {
+        throw FileSystemException(
+          'cannot remove empty owned directory',
+          '$path/$name',
+          OSError('unlinkat(AT_REMOVEDIR) failed', _currentErrno()),
+        );
+      }
+    } finally {
+      malloc.free(nativeName);
+    }
   }
 
   OwnedImageOutputFile createFile(String childName) {
@@ -226,6 +347,147 @@ final class OwnedImageDirectory {
     }
   }
 
+  /// Lock files persist for the namespace lifetime and must never be unlinked.
+  Future<OwnedImageLock> acquireLock(String name) async =>
+      (await _acquireLock(name, wait: true))!;
+
+  /// Returns null only for contention; never waits for the current owner.
+  Future<OwnedImageLock?> tryAcquireLock(String name) =>
+      _acquireLock(name, wait: false);
+
+  Future<OwnedImageLock?> _acquireLock(
+    String name, {
+    required bool wait,
+  }) async {
+    _requireOpen();
+    _validateChildName(name);
+    final parentFd = _duplicateDescriptor(_fd);
+    final displayPath = '$path/$name';
+    try {
+      final fd = await Isolate.run(() {
+        final nativeName = name.toNativeUtf8();
+        var lockFd = -1;
+        try {
+          final flags = Platform.isMacOS
+              ? 0x2 | 0x200 | 0x100 | 0x1000000 | 0x4
+              : 0x2 | 0x40 | 0x20000 | 0x80000 | 0x800;
+          lockFd = _openatCreate(parentFd, nativeName, flags, 0x180);
+          if (lockFd < 0) {
+            throw FileSystemException(
+              'cannot open owned lock',
+              displayPath,
+              OSError('openat failed', _currentErrno()),
+            );
+          }
+          final stat = _sourceStat(lockFd);
+          if (stat.uid != _getuid() || stat.mode & 0xf000 != 0x8000) {
+            throw FileSystemException(
+              'lock must be an owned regular file',
+              displayPath,
+            );
+          }
+          if (_fchmod(lockFd, 0x180) != 0) {
+            throw FileSystemException(
+              'cannot set owned lock permissions',
+              displayPath,
+              OSError('fchmod failed', _currentErrno()),
+            );
+          }
+          while (_flock(lockFd, wait ? 2 : 2 | 4) != 0) {
+            // LOCK_EX, optionally LOCK_NB.
+            final error = _currentErrno();
+            if (error == 4) continue; // EINTR
+            if (!wait && error == (Platform.isMacOS ? 35 : 11)) {
+              _close(lockFd);
+              return -1; // EWOULDBLOCK
+            }
+            throw FileSystemException(
+              'cannot acquire owned lock',
+              displayPath,
+              OSError('flock failed', error),
+            );
+          }
+          return lockFd;
+        } catch (_) {
+          if (lockFd >= 0) _close(lockFd);
+          rethrow;
+        } finally {
+          malloc.free(nativeName);
+        }
+      });
+      return fd < 0 ? null : OwnedImageLock._(fd, displayPath);
+    } finally {
+      _close(parentFd);
+    }
+  }
+
+  /// Atomically publishes within this caller-owned, serialized namespace.
+  /// An fsync failure can occur after rename; recovery must inspect the proof.
+  Future<void> renameDirectoryNoReplace(
+    String sourceName,
+    String destinationName,
+  ) async {
+    _requireOpen();
+    _validateChildName(sourceName);
+    _validateChildName(destinationName);
+    final fd = _duplicateDescriptor(_fd);
+    final displayPath = path;
+    try {
+      await Isolate.run(() {
+        final source = _openSource(sourceName, parent: fd, directory: true);
+        _close(source.fd);
+        final symbol = Platform.isMacOS ? 'renameatx_np' : 'renameat2';
+        if ((!Platform.isMacOS && !Platform.isLinux) ||
+            !_libc.providesSymbol(symbol)) {
+          throw UnsupportedError(
+            'atomic no-replace directory rename is unavailable',
+          );
+        }
+        final rename = _libc
+            .lookupFunction<
+              Int32 Function(
+                Int32,
+                Pointer<Utf8>,
+                Int32,
+                Pointer<Utf8>,
+                Uint32,
+              ),
+              int Function(int, Pointer<Utf8>, int, Pointer<Utf8>, int)
+            >(symbol);
+        final sourceNative = sourceName.toNativeUtf8();
+        final destinationNative = destinationName.toNativeUtf8();
+        try {
+          if (rename(
+                fd,
+                sourceNative,
+                fd,
+                destinationNative,
+                Platform.isMacOS ? 4 : 1,
+              ) !=
+              0) {
+            throw FileSystemException(
+              'cannot publish owned directory',
+              '$displayPath/$destinationName',
+              OSError('$symbol failed', _currentErrno()),
+            );
+          }
+          if (_fsync(fd) != 0) {
+            throw FileSystemException(
+              'cannot sync owned directory publication',
+              displayPath,
+              OSError('fsync failed', _currentErrno()),
+            );
+          }
+        } finally {
+          malloc.free(sourceNative);
+          malloc.free(destinationNative);
+        }
+      });
+    } finally {
+      _close(fd);
+    }
+  }
+
   Future<int> availableBytes() async {
     _requireOpen();
     final fd = _duplicateDescriptor(_fd);
@@ -247,6 +509,34 @@ final class OwnedImageDirectory {
     if (_closed) return;
     _closed = true;
     _close(_fd);
+  }
+}
+
+final class OwnedImageLock {
+  OwnedImageLock._(this._fd, this._path);
+  final int _fd;
+  final String _path;
+  bool _closed = false;
+
+  void verifyPathBinding() {
+    if (_closed) throw StateError('owned lock is closed');
+    _verifyDescriptorPath(_fd, _path, directory: false);
+  }
+
+  void close() {
+    if (_closed) return;
+    _closed = true;
+    // Closing the last descriptor also releases the lock if unlock fails.
+    final result = _flock(_fd, 8); // LOCK_UN
+    final error = _currentErrno();
+    _close(_fd);
+    if (result != 0) {
+      throw FileSystemException(
+        'cannot release owned lock',
+        null,
+        OSError('flock failed', error),
+      );
+    }
   }
 }
 
@@ -286,6 +576,13 @@ final class OwnedImageFile {
     final path = await file.resolveSymbolicLinks();
     final source = _openSource(path);
     return OwnedImageFile._(source.fd, path, source.size);
+  }
+
+  /// Checks this pathname against the held inode at call time. This does not
+  /// prevent subsequent pathname replacement by another same-UID process.
+  Future<void> verifyPathBinding() async {
+    _requireOpen();
+    _verifyDescriptorPath(_fd, path, directory: false);
   }
 
   /// Dart's asynchronous IO opens a duplicate of this held descriptor, never
@@ -497,17 +794,18 @@ void _validateChildName(String name) {
   if (!Platform.isMacOS && !Platform.isLinux) {
     throw UnsupportedError('owned image sources require Darwin or Linux');
   }
-  if (parent != null &&
-      (path.isEmpty || path == '.' || path == '..' || path.contains('/'))) {
-    throw ArgumentError.value(path, 'path', 'requires one child name');
-  }
+  if (parent != null) _validateChildName(path);
   final native = path.toNativeUtf8();
   var fd = -1;
   try {
     final flags = _sourceFlags | (directory ? _directoryFlag : 0);
     fd = parent == null ? _open(native, flags) : _openat(parent, native, flags);
     if (fd < 0)
-      throw FileSystemException('cannot open owned image source', path);
+      throw FileSystemException(
+        'cannot open owned image source',
+        path,
+        OSError('open failed', _currentErrno()),
+      );
     final stat = _sourceStat(fd);
     if (stat.uid != _getuid() ||
         stat.mode & 0xf000 != (directory ? 0x4000 : 0x8000)) {
@@ -525,7 +823,8 @@ void _validateChildName(String name) {
   }
 }
 
-({int mode, int uid, int size}) _sourceStat(int fd) {
+({int mode, int uid, int size, int inode, int deviceMajor, int deviceMinor})
+_sourceStat(int fd, {bool identity = false}) {
   // Darwin stat64 is 144 bytes on supported 64-bit ABIs. Linux statx is a
   // stable 256-byte UAPI structure, avoiding architecture-specific struct stat.
   final buffer = calloc<Uint8>(256);
@@ -543,6 +842,9 @@ void _validateChildName(String name) {
         mode: bytes.getUint16(4, Endian.host),
         uid: bytes.getUint32(16, Endian.host),
         size: bytes.getInt64(96, Endian.host),
+        inode: bytes.getUint64(8, Endian.host),
+        deviceMajor: bytes.getUint32(0, Endian.host),
+        deviceMinor: 0,
       );
     }
     final statx = _libc
@@ -552,7 +854,11 @@ void _validateChildName(String name) {
         >('statx');
     final empty = ''.toNativeUtf8();
     try {
-      const mask = 0x001 | 0x008 | 0x200; // TYPE | UID | SIZE
+      final mask =
+          0x001 |
+          0x008 |
+          0x200 |
+          (identity ? 0x100 : 0); // TYPE | UID | SIZE | INO
       if (statx(fd, empty, 0x1000, mask, buffer) != 0 ||
           bytes.getUint32(0, Endian.host) & mask != mask) {
         throw FileSystemException('cannot stat image descriptor');
@@ -561,6 +867,9 @@ void _validateChildName(String name) {
         mode: bytes.getUint16(28, Endian.host),
         uid: bytes.getUint32(20, Endian.host),
         size: bytes.getUint64(40, Endian.host),
+        inode: bytes.getUint64(32, Endian.host),
+        deviceMajor: bytes.getUint32(136, Endian.host),
+        deviceMinor: bytes.getUint32(140, Endian.host),
       );
     } finally {
       malloc.free(empty);
