@@ -65,6 +65,8 @@ import 'vm_command_dispatcher.dart';
 import 'vm_command_repository.dart';
 import 'vm_effect_runner.dart';
 import 'vm_intent_recovery_repository.dart';
+import 'vm_log_api_handlers.dart';
+import 'vm_log_application_service.dart';
 import 'vm_provisioning_dispatch_loop.dart';
 import 'vm_provisioning_work_repository.dart';
 import 'vm_provisioning_worker.dart';
@@ -471,6 +473,9 @@ final class DaemonApplication {
       ).register(router);
       ImageApiHandlers(images: imageService).register(router);
       ArtifactApiHandlers(artifacts: artifactService).register(router);
+      VmLogApiHandlers(
+        logs: VmLogApplicationService(database: database, bundles: bundles),
+      ).register(router);
       TestRunApiHandlers(runs: testRuns).register(router);
       EventApiHandlers(feed: feed).register(router);
       final doctor = SystemDoctorService(

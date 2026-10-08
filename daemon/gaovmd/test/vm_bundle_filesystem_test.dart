@@ -5,6 +5,56 @@ import 'package:test/test.dart';
 
 void main() {
   test(
+    'fresh metadata remains bound to the opened file across replacement',
+    () async {
+      final root = await Directory.systemTemp.createTemp('owned-stat-');
+      addTearDown(() => root.delete(recursive: true));
+      final original = await Directory('${root.path}/owned').create();
+      final path = '${original.path}/payload';
+      final source = await File(path).writeAsString('a');
+      imageFileMode(path, 0x180);
+      final directory = await OwnedImageDirectory.open(original);
+      addTearDown(directory.close);
+      final held = directory.file('payload');
+      addTearDown(held.close);
+      expect(held.size, 1);
+      await source.writeAsString('bc', mode: FileMode.append);
+      expect(
+        held.stat().modifiedAt.millisecondsSinceEpoch,
+        (await source.stat()).modified.millisecondsSinceEpoch,
+      );
+      // Dart 3.9's macOS timestamp setter uses utime, which stores whole seconds.
+      // The actual write above exercises subsecond metadata independently.
+      final modified = DateTime.utc(2020, 2, 3, 4, 5, 6);
+      await source.setLastModified(modified);
+      expect(
+        (await source.stat()).modified.toUtc(),
+        modified,
+        reason: 'the fixture must store the expected timestamp',
+      );
+      final moved = await original.rename('${root.path}/moved');
+      await Directory(original.path).create();
+      await File(path).writeAsString('replacement bytes');
+      final stat = held.stat();
+      expect(stat.size, 3);
+      expect(stat.modifiedAt, modified);
+      expect(stat.mode & 0x1ff, 0x180);
+      expect(stat.linkCount, 1);
+      final linked = await Process.run('ln', [
+        '${moved.path}/payload',
+        '${root.path}/alias',
+      ]);
+      expect(linked.exitCode, 0, reason: '${linked.stderr}');
+      expect(held.stat().linkCount, 2);
+      await expectLater(
+        held.verifyPathBinding(),
+        throwsA(isA<FileSystemException>()),
+      );
+      held.close();
+      expect(held.stat, throwsStateError);
+    },
+  );
+  test(
     'owned file reads restart at byte zero after pathname replacement',
     () async {
       final root = await Directory.systemTemp.createTemp('owned-read-');

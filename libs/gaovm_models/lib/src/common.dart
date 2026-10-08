@@ -108,6 +108,28 @@ DateTime _parseRfc3339DateTime(String value, String key) {
       '$key must include a full RFC 3339 time and explicit offset',
     );
   }
+  final year = int.parse(value.substring(0, 4));
+  final month = int.parse(value.substring(5, 7));
+  final day = int.parse(value.substring(8, 10));
+  final date = DateTime.utc(year, month, day);
+  final offsetHour = value.endsWith('Z')
+      ? 0
+      : int.parse(value.substring(value.length - 5, value.length - 3));
+  final offsetMinute = value.endsWith('Z')
+      ? 0
+      : int.parse(value.substring(value.length - 2));
+  // DateTime.parse normalizes overflow (for example February 30) instead of
+  // rejecting it. Validate the wire calendar/clock before UTC normalization.
+  if (date.year != year ||
+      date.month != month ||
+      date.day != day ||
+      int.parse(value.substring(11, 13)) > 23 ||
+      int.parse(value.substring(14, 16)) > 59 ||
+      int.parse(value.substring(17, 19)) > 60 ||
+      offsetHour > 23 ||
+      offsetMinute > 59) {
+    throw FormatException('$key must be an RFC 3339 date-time');
+  }
   final parsed = DateTime.tryParse(value);
   if (parsed == null) {
     throw FormatException('$key must be an RFC 3339 date-time');

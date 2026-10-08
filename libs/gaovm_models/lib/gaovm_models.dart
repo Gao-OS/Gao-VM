@@ -7,6 +7,7 @@ export 'src/doctor.dart';
 export 'src/event.dart';
 export 'src/image.dart';
 export 'src/json_value.dart';
+export 'src/log_reference.dart';
 export 'src/operation.dart';
 export 'src/problem.dart';
 export 'src/resource_id.dart';

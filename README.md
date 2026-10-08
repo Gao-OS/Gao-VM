@@ -13,6 +13,12 @@ The checked-in code is a working single-VM prototype being migrated to the accep
 
 Those documents are frozen for M0. Legacy prototype commands and JSON state paths documented below are historical references, not alternatives to the SQLite/public-API target. The current CLI migration checkpoint is described below.
 
+The public API now lists current per-VM log metadata through
+`GET /v1/vms/{vm_id}/logs`, with an optional driver/serial/guest kind filter.
+This read-only endpoint returns no log bytes or host paths and does not create
+artifact snapshots. See [VM log references](docs/VM_LOGS.md) for ownership checks,
+artifact boundaries, and verification limits.
+
 ---
 
 ## Scope & Target Platform

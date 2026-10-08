@@ -73,6 +73,8 @@ export 'src/vm_controller.dart';
 export 'src/vm_controller_reducer.dart';
 export 'src/vm_effect_runner.dart';
 export 'src/vm_intent_recovery_repository.dart';
+export 'src/vm_log_api_handlers.dart';
+export 'src/vm_log_application_service.dart';
 export 'src/vm_provisioning_plan.dart';
 export 'src/vm_provisioning_dispatch_loop.dart';
 export 'src/vm_provisioning_repository.dart';

@@ -604,6 +604,29 @@ final class OwnedImageFile {
     return _sourceStat(_fd).mode;
   }
 
+  /// Fresh metadata for this held inode, without reading bytes or reopening a
+  /// caller pathname. Size and modification time come from one native stat.
+  ({int size, int mode, int linkCount, DateTime modifiedAt}) stat() {
+    _requireOpen();
+    final stat = _sourceStat(_fd, metadata: true);
+    if (stat.uid != _getuid() ||
+        stat.mode & 0xf000 != 0x8000 ||
+        stat.size < 0 ||
+        stat.modifiedNanoseconds < 0 ||
+        stat.modifiedNanoseconds >= 1000000000) {
+      throw FileSystemException('invalid owned file metadata', path);
+    }
+    return (
+      size: stat.size,
+      mode: stat.mode,
+      linkCount: stat.linkCount,
+      modifiedAt: DateTime.fromMicrosecondsSinceEpoch(
+        stat.modifiedSeconds * 1000000 + stat.modifiedNanoseconds ~/ 1000,
+        isUtc: true,
+      ),
+    );
+  }
+
   static Future<OwnedImageFile> open(File file) async {
     final path = await file.resolveSymbolicLinks();
     final source = _openSource(path);
@@ -873,8 +896,18 @@ void _validateChildName(String name) {
   }
 }
 
-({int mode, int uid, int size, int inode, int deviceMajor, int deviceMinor})
-_sourceStat(int fd, {bool identity = false}) {
+({
+  int mode,
+  int uid,
+  int size,
+  int inode,
+  int deviceMajor,
+  int deviceMinor,
+  int linkCount,
+  int modifiedSeconds,
+  int modifiedNanoseconds,
+})
+_sourceStat(int fd, {bool identity = false, bool metadata = false}) {
   // Darwin stat64 is 144 bytes on supported 64-bit ABIs. Linux statx is a
   // stable 256-byte UAPI structure, avoiding architecture-specific struct stat.
   final buffer = calloc<Uint8>(256);
@@ -895,6 +928,9 @@ _sourceStat(int fd, {bool identity = false}) {
         inode: bytes.getUint64(8, Endian.host),
         deviceMajor: bytes.getUint32(0, Endian.host),
         deviceMinor: 0,
+        linkCount: bytes.getUint16(6, Endian.host),
+        modifiedSeconds: bytes.getInt64(48, Endian.host),
+        modifiedNanoseconds: bytes.getInt64(56, Endian.host),
       );
     }
     final statx = _libc
@@ -906,9 +942,11 @@ _sourceStat(int fd, {bool identity = false}) {
     try {
       final mask =
           0x001 |
+          0x002 |
           0x008 |
           0x200 |
-          (identity ? 0x100 : 0); // TYPE | UID | SIZE | INO
+          (identity ? 0x100 : 0) |
+          (metadata ? 0x004 | 0x040 : 0); // NLINK | MTIME
       if (statx(fd, empty, 0x1000, mask, buffer) != 0 ||
           bytes.getUint32(0, Endian.host) & mask != mask) {
         throw FileSystemException('cannot stat image descriptor');
@@ -920,6 +958,9 @@ _sourceStat(int fd, {bool identity = false}) {
         inode: bytes.getUint64(32, Endian.host),
         deviceMajor: bytes.getUint32(136, Endian.host),
         deviceMinor: bytes.getUint32(140, Endian.host),
+        linkCount: bytes.getUint32(16, Endian.host),
+        modifiedSeconds: bytes.getInt64(112, Endian.host),
+        modifiedNanoseconds: bytes.getUint32(120, Endian.host),
       );
     } finally {
       malloc.free(empty);

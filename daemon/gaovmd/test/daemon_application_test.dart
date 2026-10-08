@@ -109,6 +109,9 @@ void main() {
         final images = await daemon.get('/v1/images');
         expect(images.$1, HttpStatus.ok);
         expect(images.$2['items'], isEmpty);
+        final logs = await daemon.get('/v1/vms/${VmId.generate().value}/logs');
+        expect(logs.$1, HttpStatus.notFound);
+        expect(logs.$2['code'], 'VM_NOT_FOUND');
         final health = await daemon.get('/v1/system/live');
         expect(health.$1, HttpStatus.ok);
       } finally {
