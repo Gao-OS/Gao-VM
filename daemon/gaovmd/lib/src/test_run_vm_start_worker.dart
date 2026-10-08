@@ -11,16 +11,22 @@ import 'vm_lifecycle_intent.dart';
 import 'vm_registry.dart';
 import 'vm_repository.dart';
 
+/// A correlated pass result. Infrastructure failures may retry; durable TestRun
+/// failures are recorded on the resource rather than returned as [error].
 final class TestRunVmStartOutcome {
   const TestRunVmStartOutcome({
     required this.testRunId,
     required this.operationId,
     required this.vmId,
+    required this.requestId,
+    this.driverGeneration,
     this.error,
   });
   final TestRunId testRunId;
   final OperationId operationId;
   final VmId? vmId;
+  final RequestId requestId;
+  final int? driverGeneration;
   final Object? error;
 }
 
@@ -45,8 +51,9 @@ final class TestRunVmStartWorker {
     }
     final items = await database.read((db) {
       const query = '''
-        SELECT id, operation_id, vm_id FROM test_runs
-        WHERE state = 'starting_vm' AND id > ? ORDER BY id LIMIT ?
+        SELECT t.id, t.operation_id, t.vm_id, o.request_id
+        FROM test_runs t JOIN operations o ON o.id = t.operation_id
+        WHERE t.state = 'starting_vm' AND t.id > ? ORDER BY t.id LIMIT ?
       ''';
       var rows = db.select(query, [_cursor?.value ?? '', limit]);
       if (rows.isEmpty && _cursor != null) rows = db.select(query, ['', limit]);
@@ -55,6 +62,7 @@ final class TestRunVmStartWorker {
           (
             id: TestRunId(row['id'] as String),
             operation: OperationId(row['operation_id'] as String),
+            request: RequestId(row['request_id'] as String),
             vm: row['vm_id'] == null ? null : VmId(row['vm_id'] as String),
           ),
       ];
@@ -64,24 +72,69 @@ final class TestRunVmStartWorker {
       await Future.wait(
         items.map((item) async {
           Object? failure;
+          VmController? controller;
           try {
             if (item.vm == null) throw StateError('starting TestRun has no VM');
-            final controller = await registry.get(item.vm!);
+            controller = await registry.get(item.vm!);
             if (controller == null) throw VmNotFoundException(item.vm!);
             await controller.accept(_StartAcceptance(database, item.id, _now));
+          } on VmNotFoundException catch (error) {
+            try {
+              await _failUnavailableVm(item.id, error.id, ErrorCode.vmNotFound);
+            } catch (error) {
+              failure = error;
+            }
+          } on VmAcceptanceConflict catch (error) {
+            try {
+              await _failUnavailableVm(
+                item.id,
+                error.vmId,
+                ErrorCode.vmOperationConflict,
+              );
+            } catch (error) {
+              failure = error;
+            }
           } catch (error) {
             failure = error;
           }
+          final generation = controller?.state.driverGeneration ?? 0;
           return TestRunVmStartOutcome(
             testRunId: item.id,
             operationId: item.operation,
             vmId: item.vm,
+            requestId: item.request,
+            driverGeneration: generation > 0 ? generation : null,
             error: failure,
           );
         }),
       ),
     );
   }
+
+  Future<void> _failUnavailableVm(TestRunId id, VmId vmId, ErrorCode code) =>
+      database.transaction((_) async {
+        final runs = SqliteTestRunRepository(database, now: _now);
+        final run = await runs.get(id);
+        if (run == null || run.state != TestRunState.startingVm) return;
+        if (run.vmId != vmId) throw StateError('TestRun VM target mismatch');
+        await runs.transition(
+          id,
+          expectedState: run.state,
+          nextState: TestRunState.collecting,
+          outcome: TestRunState.failed,
+          error: OperationError(
+            code: code,
+            message: code == ErrorCode.vmNotFound
+                ? 'The TestRun VM is no longer available.'
+                : 'Deletion of the TestRun VM has already been accepted.',
+            retryable: false,
+            details: JsonObjectValue.fromJson({
+              'phase': 'starting_vm',
+              'vm_id': vmId.value,
+            }),
+          ),
+        );
+      });
 }
 
 final class _StartAcceptance implements VmAcceptanceAction<TestRun> {
@@ -277,10 +330,16 @@ final class _StartAcceptance implements VmAcceptanceAction<TestRun> {
               error:
                   stop.error ??
                   OperationError(
-                    code: ErrorCode.driverUnhealthy,
+                    code: stop.state == OperationState.succeeded
+                        ? ErrorCode.vmOperationConflict
+                        : ErrorCode.driverUnhealthy,
                     message: 'The TestRun VM did not drain after its deadline.',
-                    retryable: true,
-                    details: JsonObjectValue.empty,
+                    retryable: stop.state != OperationState.succeeded,
+                    details: JsonObjectValue.fromJson({
+                      'phase': 'starting_vm',
+                      'vm_id': run.vmId!.value,
+                      'stop_operation_id': stop.id.value,
+                    }),
                   ),
             );
         } else if (drained) {
@@ -294,7 +353,10 @@ final class _StartAcceptance implements VmAcceptanceAction<TestRun> {
           collected = await _fail(
             runs,
             run,
-            stop.error?.code ?? ErrorCode.driverUnhealthy,
+            stop.error?.code ??
+                (stop.state == OperationState.succeeded
+                    ? ErrorCode.vmOperationConflict
+                    : ErrorCode.driverUnhealthy),
             child: stop,
           );
         }
@@ -372,12 +434,18 @@ final class _StartAcceptance implements VmAcceptanceAction<TestRun> {
           child?.error?.message ??
           (code == ErrorCode.waitTimeout
               ? 'The TestRun start deadline expired.'
+              : child?.type == 'vm.stop'
+              ? 'Unable to drain the TestRun VM after abort.'
               : 'Unable to start the TestRun VM.'),
       retryable: child?.error?.retryable ?? false,
       details: JsonObjectValue.fromJson({
         'phase': 'starting_vm',
         'vm_id': run.vmId!.value,
-        if (child != null) 'start_operation_id': child.id.value,
+        if (child != null)
+          (child.type == 'vm.stop'
+                  ? 'stop_operation_id'
+                  : 'start_operation_id'):
+              child.id.value,
         if (child?.error != null) 'cause': child!.error!.toJson(),
       }),
     ),

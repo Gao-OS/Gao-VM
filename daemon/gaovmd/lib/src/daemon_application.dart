@@ -47,6 +47,8 @@ import 'test_run_api_handlers.dart';
 import 'test_run_application_service.dart';
 import 'test_run_provisioning_dispatch_loop.dart';
 import 'test_run_provisioning_worker.dart';
+import 'test_run_vm_start_dispatch_loop.dart';
+import 'test_run_vm_start_worker.dart';
 import 'vm_application_service.dart';
 import 'vm_bundle_store.dart';
 import 'vm_command_dispatch_loop.dart';
@@ -248,6 +250,8 @@ final class DaemonApplication {
         VmId? vm,
         OperationId? operation,
         RequestId? request,
+        TestRunId? testRun,
+        int? driverGeneration,
       }) {
         unawaited(
           logger
@@ -257,7 +261,8 @@ final class DaemonApplication {
                   'vm_id': vm?.value,
                   'operation_id': operation?.value,
                   'request_id': request?.value,
-                  'driver_generation': null,
+                  'test_run_id': testRun?.value,
+                  'driver_generation': driverGeneration,
                   'message': 'background work failed',
                   'error_type': '${error.runtimeType}',
                 }),
@@ -339,6 +344,25 @@ final class DaemonApplication {
         },
         onError: (error, _) => report('test_run_provisioning', error),
       );
+      final testRunVmStart = TestRunVmStartDispatchLoop(
+        worker: TestRunVmStartWorker(database: database, registry: registry),
+        onDispatch: (results) {
+          for (final result in results) {
+            if (result.error case final error?) {
+              report(
+                'test_run_vm_start',
+                error,
+                vm: result.vmId,
+                operation: result.operationId,
+                testRun: result.testRunId,
+                request: result.requestId,
+                driverGeneration: result.driverGeneration,
+              );
+            }
+          }
+        },
+        onError: (error, _) => report('test_run_vm_start', error),
+      );
       ResourceApiHandlers(
         vms: VmApplicationService.composed(
           repository: catalog,
@@ -381,10 +405,14 @@ final class DaemonApplication {
       application = DaemonApplication._(server, () async {
         health.ready = false;
         await server.close();
+        // Fence worker producers before registry shutdown; controller
+        // cancellation can unblock delivery already in flight. Drain all of
+        // them before closing their shared catalog and filesystem roots.
         await Future.wait([
           commands.close(),
           provisioning.close(),
           testRunProvisioning.close(),
+          testRunVmStart.close(),
           imageWork.close(),
           reconcile.close(),
           registry.shutdown(),
@@ -406,6 +434,7 @@ final class DaemonApplication {
       commands.start();
       provisioning.start();
       testRunProvisioning.start();
+      testRunVmStart.start();
       imageWork.start();
       reconcile.start();
       health.ready = true;
