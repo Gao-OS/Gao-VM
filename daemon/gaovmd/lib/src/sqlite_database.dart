@@ -24,7 +24,7 @@ const coreTableNames = <String>{
   'outbox',
 };
 
-const _latestSchemaVersion = 8;
+const _latestSchemaVersion = 9;
 final _transactionContextKey = Object();
 final _savepointScopeKey = Object();
 final _transactionGates = <String, _AsyncGate>{};
@@ -493,6 +493,14 @@ const _migrations = <_Migration>[
       BEGIN
         SELECT RAISE(ABORT, 'legacy migration completion is immutable');
       END;
+  '''),
+  _Migration(9, '''
+    ALTER TABLE test_runs ADD COLUMN cancel_requested INTEGER NOT NULL
+      DEFAULT 0 CHECK (cancel_requested IN (0, 1));
+    ALTER TABLE test_runs ADD COLUMN planned_outcome TEXT
+      CHECK (planned_outcome IN ('succeeded', 'failed', 'cancelled'));
+    CREATE INDEX test_runs_unfinished_idx ON test_runs(id)
+      WHERE state NOT IN ('succeeded', 'failed', 'cancelled');
   '''),
 ];
 

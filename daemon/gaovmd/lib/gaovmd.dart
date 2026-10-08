@@ -40,6 +40,7 @@ export 'src/runtime_assets.dart';
 export 'src/runtime_driver.dart';
 export 'src/runtime_driver_effect_adapter.dart';
 export 'src/sqlite_database.dart';
+export 'src/test_run_repository.dart';
 export 'src/sqlite_durable_event_feed.dart';
 export 'src/sqlite_operation_waiter.dart';
 export 'src/sqlite_vm_command_target.dart';

@@ -26,8 +26,8 @@ void main() {
   test('bootstrap configures SQLite and applies the schema once', () async {
     var database = await GaoVmDatabase.open(databasePath);
 
-    expect(database.schemaVersion, 8);
-    expect(database.appliedMigrationVersions, [1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(database.schemaVersion, 9);
+    expect(database.appliedMigrationVersions, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
     expect(database.journalMode, 'wal');
     expect(database.foreignKeysEnabled, isTrue);
     expect(database.busyTimeout, const Duration(seconds: 5));
@@ -54,10 +54,91 @@ void main() {
     database.close();
 
     database = await GaoVmDatabase.open(databasePath);
-    expect(database.schemaVersion, 8);
-    expect(database.appliedMigrationVersions, [1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(database.schemaVersion, 9);
+    expect(database.appliedMigrationVersions, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
     database.close();
   });
+
+  test(
+    'v9 preserves v8 TestRun inputs and steps with safe recovery defaults',
+    () async {
+      final legacy = sqlite3.open(databasePath);
+      legacy.execute('''
+      CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+      CREATE TABLE vms(id TEXT PRIMARY KEY);
+      CREATE TABLE operations(id TEXT PRIMARY KEY);
+      INSERT INTO operations VALUES('operation');
+    ''');
+      for (var version = 1; version <= 8; version++) {
+        legacy.execute('INSERT INTO schema_migrations VALUES (?, ?)', [
+          version,
+          'old',
+        ]);
+      }
+      _createLegacyTestRunTable(legacy);
+      legacy.execute('''
+      CREATE TABLE test_steps (
+        test_run_id TEXT NOT NULL REFERENCES test_runs(id) ON DELETE CASCADE,
+        step_index INTEGER NOT NULL CHECK (step_index >= 0),
+        state TEXT NOT NULL, request_json TEXT NOT NULL, result_json TEXT,
+        error_json TEXT, started_at TEXT, completed_at TEXT,
+        PRIMARY KEY(test_run_id, step_index)
+      );
+      INSERT INTO test_runs(id, state, spec_json, operation_id, result_json,
+        error_json, artifact_ids_json, created_at)
+      VALUES ('test', 'collecting', '{"preserved":"input"}', 'operation',
+        '{"exit_code":1}', '{"preserved":"failure"}', '[]', 'old');
+      INSERT INTO test_steps(test_run_id, step_index, state, request_json, result_json)
+      VALUES('test', 0, 'failed', '{"argv":["gaoos-test"]}', '{"exit_code":1}');
+    ''');
+      final original = Map<String, Object?>.from(
+        legacy.select('SELECT * FROM test_runs').single,
+      );
+      final step = Map<String, Object?>.from(
+        legacy.select('SELECT * FROM test_steps').single,
+      );
+      legacy.userVersion = 8;
+      legacy.dispose();
+      var database = await GaoVmDatabase.open(databasePath);
+      addTearDown(() => database.close());
+      expect(database.schemaVersion, 9);
+      await database.read((connection) {
+        final row = connection.select('SELECT * FROM test_runs').single;
+        for (final entry in original.entries) {
+          expect(row[entry.key], entry.value, reason: entry.key);
+        }
+        expect(row['cancel_requested'], 0);
+        expect(row['planned_outcome'], isNull);
+        expect(connection.select('SELECT * FROM test_steps').single, step);
+        for (final sql in [
+          "UPDATE test_runs SET cancel_requested = 2",
+          "UPDATE test_runs SET planned_outcome = 'running_steps'",
+        ]) {
+          expect(
+            () => connection.execute(sql),
+            throwsA(isA<SqliteException>()),
+          );
+        }
+        final index =
+            connection
+                    .select(
+                      "SELECT sql FROM sqlite_schema WHERE name = 'test_runs_unfinished_idx'",
+                    )
+                    .single['sql']
+                as String;
+        expect(
+          index,
+          contains("WHERE state NOT IN ('succeeded', 'failed', 'cancelled')"),
+        );
+      });
+      database.close();
+      database = await GaoVmDatabase.open(databasePath);
+      expect(database.appliedMigrationVersions, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+      await database.read((connection) {
+        expect(connection.select('SELECT * FROM test_steps').single, step);
+      });
+    },
+  );
 
   test(
     'v5 adds an empty provisioning catalog without changing v4 data',
@@ -73,12 +154,13 @@ void main() {
         INSERT INTO vm_specs VALUES('retained', 7);
         INSERT INTO operations VALUES('operation');
       ''');
+      _createLegacyTestRunTable(legacy);
       legacy.userVersion = 4;
       legacy.dispose();
       final database = await GaoVmDatabase.open(databasePath);
       try {
-        expect(database.schemaVersion, 8);
-        expect(database.appliedMigrationVersions, [1, 2, 3, 4, 5, 6, 7, 8]);
+        expect(database.schemaVersion, 9);
+        expect(database.appliedMigrationVersions, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
         await database.read((db) {
           expect(db.select('SELECT * FROM vm_provisioning'), isEmpty);
           expect(db.select('SELECT * FROM vm_specs').single['generation'], 7);
@@ -124,11 +206,12 @@ void main() {
       );
       INSERT INTO vm_provisioning VALUES('vm', 'op', 7, '{"pinned":true}', 0, 'old');
     ''');
+      _createLegacyTestRunTable(legacy);
       legacy.userVersion = 5;
       legacy.dispose();
       final database = await GaoVmDatabase.open(databasePath);
       try {
-        expect(database.schemaVersion, 8);
+        expect(database.schemaVersion, 9);
         await database.read((db) {
           final job = db.select('SELECT * FROM vm_provisioning').single;
           expect(job['plan_json'], '{"pinned":true}');
@@ -193,13 +276,14 @@ void main() {
       ))
         Map<String, Object?>.from(row),
     ];
+    _createLegacyTestRunTable(legacy);
     legacy.userVersion = 6;
     legacy.dispose();
 
     var database = await GaoVmDatabase.open(databasePath);
     try {
-      expect(database.schemaVersion, 8);
-      expect(database.appliedMigrationVersions, [1, 2, 3, 4, 5, 6, 7, 8]);
+      expect(database.schemaVersion, 9);
+      expect(database.appliedMigrationVersions, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
       await database.read((db) {
         expect(
           db.select('SELECT * FROM vm_provisioning ORDER BY vm_id'),
@@ -250,7 +334,7 @@ void main() {
 
     database = await GaoVmDatabase.open(databasePath);
     try {
-      expect(database.appliedMigrationVersions, [1, 2, 3, 4, 5, 6, 7, 8]);
+      expect(database.appliedMigrationVersions, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
       await database.read((db) {
         expect(
           db.select('SELECT * FROM vm_provisioning ORDER BY vm_id'),
@@ -281,11 +365,12 @@ void main() {
         CREATE TABLE vm_runtime(vm_id TEXT PRIMARY KEY, applied_intent_revision INTEGER, active_operation_id TEXT);
         INSERT INTO vm_runtime VALUES('existing', 7, 'active');
       ''');
+      _createLegacyTestRunTable(legacy);
       legacy.userVersion = 3;
       legacy.dispose();
       final database = await GaoVmDatabase.open(databasePath);
       try {
-        expect(database.schemaVersion, 8);
+        expect(database.schemaVersion, 9);
         await database.read((db) {
           final row = db.select('SELECT * FROM vm_runtime').single;
           expect(row['applied_intent_revision'], 7);
@@ -311,12 +396,13 @@ void main() {
       INSERT INTO vms VALUES('existing-vm', 7, 3);
       INSERT INTO vm_runtime VALUES('existing-vm', 'running', 'starting');
     ''');
+      _createLegacyTestRunTable(legacy);
       legacy.userVersion = 2;
       legacy.dispose();
       final database = await GaoVmDatabase.open(databasePath);
       try {
-        expect(database.schemaVersion, 8);
-        expect(database.appliedMigrationVersions, [1, 2, 3, 4, 5, 6, 7, 8]);
+        expect(database.schemaVersion, 9);
+        expect(database.appliedMigrationVersions, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
         await database.read((db) {
           final vm = db.select('SELECT * FROM vms').single;
           expect(vm['revision'], 7);
@@ -385,13 +471,14 @@ void main() {
         ('events', 'duplicate', '{}', '2026-09-04T09:00:00.000000Z'),
         ('events', 'duplicate', '{}', '2026-09-04T09:00:00.000000Z');
     ''');
+      _createLegacyTestRunTable(legacy);
       legacy.userVersion = 1;
       legacy.dispose();
 
       final database = await GaoVmDatabase.open(databasePath);
 
-      expect(database.schemaVersion, 8);
-      expect(database.appliedMigrationVersions, [1, 2, 3, 4, 5, 6, 7, 8]);
+      expect(database.schemaVersion, 9);
+      expect(database.appliedMigrationVersions, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
       await database.read((connection) {
         expect(
           connection
@@ -625,8 +712,8 @@ void main() {
     ]);
 
     for (final database in databases) {
-      expect(database.schemaVersion, 8);
-      expect(database.appliedMigrationVersions, [1, 2, 3, 4, 5, 6, 7, 8]);
+      expect(database.schemaVersion, 9);
+      expect(database.appliedMigrationVersions, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
       database.close();
     }
   });
@@ -646,8 +733,24 @@ void main() {
     ]);
 
     for (final result in results) {
-      expect(result.schemaVersion, 8);
-      expect(result.migrations, [1, 2, 3, 4, 5, 6, 7, 8]);
+      expect(result.schemaVersion, 9);
+      expect(result.migrations, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
     }
   });
 }
+
+void _createLegacyTestRunTable(Database database) => database.execute('''
+  CREATE TABLE IF NOT EXISTS test_runs (
+    id TEXT PRIMARY KEY,
+    state TEXT NOT NULL,
+    spec_json TEXT NOT NULL,
+    vm_id TEXT REFERENCES vms(id),
+    operation_id TEXT NOT NULL REFERENCES operations(id),
+    cleanup_decision TEXT,
+    result_json TEXT,
+    error_json TEXT,
+    artifact_ids_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    completed_at TEXT
+  );
+''');
