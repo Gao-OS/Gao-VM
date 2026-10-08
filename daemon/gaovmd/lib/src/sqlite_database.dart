@@ -17,6 +17,8 @@ const coreTableNames = <String>{
   'operations',
   'events',
   'test_runs',
+  'test_run_vm_provisioning',
+  'test_run_vm_start',
   'test_steps',
   'artifacts',
   'artifact_payloads',
@@ -25,7 +27,7 @@ const coreTableNames = <String>{
   'outbox',
 };
 
-const _latestSchemaVersion = 12;
+const _latestSchemaVersion = 13;
 final _transactionContextKey = Object();
 final _savepointScopeKey = Object();
 final _transactionGates = <String, _AsyncGate>{};
@@ -521,6 +523,22 @@ const _migrations = <_Migration>[
     );
     CREATE INDEX test_runs_provisioning_idx ON test_runs(id)
       WHERE state IN ('pending', 'provisioning');
+  '''),
+  _Migration(13, '''
+    CREATE TABLE test_run_vm_start (
+      test_run_id TEXT PRIMARY KEY REFERENCES test_runs(id),
+      vm_id TEXT NOT NULL UNIQUE REFERENCES vms(id),
+      operation_id TEXT NOT NULL UNIQUE REFERENCES operations(id),
+      intent_revision INTEGER NOT NULL CHECK (intent_revision > 0),
+      driver_generation INTEGER CHECK (driver_generation > 0),
+      abort_operation_id TEXT UNIQUE REFERENCES operations(id),
+      abort_intent_revision INTEGER CHECK (abort_intent_revision > 0),
+      abort_reason TEXT CHECK (abort_reason IN ('cancelled', 'deadline')),
+      CHECK ((abort_operation_id IS NULL AND abort_intent_revision IS NULL AND abort_reason IS NULL)
+          OR (abort_operation_id IS NOT NULL AND abort_intent_revision IS NOT NULL AND abort_reason IS NOT NULL))
+    );
+    CREATE INDEX test_runs_starting_idx ON test_runs(id)
+      WHERE state = 'starting_vm';
   '''),
 ];
 

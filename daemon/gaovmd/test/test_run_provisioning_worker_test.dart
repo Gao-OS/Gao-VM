@@ -8,6 +8,7 @@ import 'package:gaovmd/gaovmd.dart';
 import 'package:gaovmd/src/image_filesystem.dart' show imageFileMode;
 import 'package:gaovmd/src/test_run_provisioning_worker.dart';
 import 'package:gaovmd/src/test_run_provisioning_dispatch_loop.dart';
+import 'package:gaovmd/src/test_run_vm_start_worker.dart';
 import 'package:sqlite3/sqlite3.dart';
 import 'package:test/test.dart';
 
@@ -115,6 +116,303 @@ void main() {
     expect(run.error!.code, ErrorCode.waitTimeout);
     expect(await SqliteVmRepository(database).list(), isEmpty);
   });
+
+  Future<
+    ({
+      VmRegistry registry,
+      VmCommandDispatcher commands,
+      ManualRuntimeScheduler clock,
+      RuntimeDriverEffectAdapter drivers,
+      Future<void> Function() close,
+    })
+  >
+  openRuntime() async {
+    final clock = ManualRuntimeScheduler();
+    late VmRegistry registry;
+    final drivers = RuntimeDriverEffectAdapter.scopedConfiguration(
+      factory: FakeRuntimeDriverFactory(scheduler: clock),
+      withConfiguration: VmRuntimeConfigurationResolver(
+        assets: SqliteVmRuntimeAssets(
+          database: database,
+          bundles: bundles,
+          images: images,
+        ),
+      ).withConfiguration,
+      dispatch: (id, command) async {
+        final controller = await registry.get(id);
+        if (controller != null) await controller.submit(command);
+      },
+    );
+    final scheduler = HostScheduler(
+      leases: SqliteHostLeaseRepository(database),
+      catalog: SqliteHostCapacityCatalog(database, diskBytes: (_) => 0),
+      metrics: _Metrics(),
+      limits: HostSchedulerLimits(
+        maxRunningVms: 3,
+        maxConcurrentBoots: 3,
+        maxDriverProcesses: 3,
+        maxCpuCount: 8,
+        maxMemoryBytes: 8 * 1024 * 1024 * 1024,
+        minFreeDiskBytes: 0,
+      ),
+      ownerId: 'test-run-start',
+      onLeaseLost: (vm, spec, operation, generation, error) =>
+          registry.handleHostLeaseLost(vm, spec, operation, generation, error),
+    );
+    final runner = RepositoryVmEffectRunner(
+      database: database,
+      operations: SqliteOperationRepository(database),
+      events: SqliteEventRepository(database),
+      persistence: SqliteVmStateEffectAdapter(database),
+      leases: scheduler,
+      drivers: drivers,
+      managedFiles: SqliteVmManagedFileEffectAdapter(
+        database: database,
+        bundles: bundles,
+      ),
+    );
+    registry = VmRegistry(
+      repository: SqliteVmRepository(database),
+      operations: SqliteOperationRepository(database),
+      effectRunner: runner,
+      recovery: SqliteVmIntentRecoveryRepository(database),
+    );
+    final commands = VmCommandDispatcher(
+      commands: SqliteVmCommandRepository(database),
+      target: SqliteVmCommandTarget(
+        database: database,
+        registry: registry,
+        effectRunner: runner,
+      ),
+      owner: 'test-run-start',
+    );
+    Future<void>? closing;
+    Future<void> close() => closing ??= () async {
+      await registry.shutdown();
+      await scheduler.shutdown();
+      await drivers.close();
+    }();
+    addTearDown(close);
+    return (
+      registry: registry,
+      commands: commands,
+      clock: clock,
+      drivers: drivers,
+      close: close,
+    );
+  }
+
+  Future<void> provision() async {
+    await TestRunProvisioningWorker(database: database).dispatchOnce();
+    await VmProvisioningWorker(
+      work: SqliteVmProvisioningWorkRepository(database),
+      bundles: VmBundleStore(
+        database: database,
+        bundles: bundles,
+        images: images,
+      ),
+      owner: 'test',
+    ).dispatchOnce();
+    await TestRunProvisioningWorker(database: database).dispatchOnce();
+  }
+
+  test(
+    'a provisioned TestRun starts its VM through durable lifecycle dispatch',
+    () async {
+      final id = await accept();
+      await provision();
+      final runtime = await openRuntime();
+      final worker = TestRunVmStartWorker(
+        database: database,
+        registry: runtime.registry,
+      );
+      await worker.dispatchOnce();
+      final starts = (await SqliteOperationRepository(
+        database,
+      ).list()).where((operation) => operation.type == 'vm.start').toList();
+      expect(starts, hasLength(1));
+      expect(starts.single.state, OperationState.pending);
+      expect(runtime.drivers.activeSessionCount, 0);
+      final run = (await SqliteTestRunRepository(database).get(id))!;
+      expect(starts.single.resourceId, run.vmId);
+      expect((await runtime.commands.dispatchOnce()).single.error, isNull);
+      await (await runtime.registry.get(run.vmId!))!.waitUntilIdle();
+      runtime.clock.runUntilIdle();
+      final finished =
+          await SqliteOperationWaiter(
+            operations: SqliteOperationRepository(database),
+            events: SqliteDurableEventFeed(
+              database,
+              pollInterval: const Duration(milliseconds: 1),
+            ),
+          ).wait(
+            OperationWaitCommand(
+              operationId: starts.single.id,
+              timeout: const Duration(seconds: 5),
+            ),
+          );
+      expect(finished.state, OperationState.succeeded);
+      await worker.dispatchOnce();
+      expect(
+        (await SqliteTestRunRepository(database).get(id))!.state,
+        TestRunState.waitingReady,
+      );
+      expect(
+        (await SqliteVmRepository(database).get(run.vmId!))!.status.phase,
+        VmPhase.running,
+      );
+    },
+  );
+
+  test(
+    'cancelling an unfinished TestRun start drains a durable VM stop before collection',
+    () async {
+      final id = await accept();
+      await provision();
+      final runtime = await openRuntime();
+      final worker = TestRunVmStartWorker(
+        database: database,
+        registry: runtime.registry,
+      );
+      await worker.dispatchOnce();
+      final run = (await SqliteTestRunRepository(database).get(id))!;
+      expect((await runtime.commands.dispatchOnce()).single.error, isNull);
+      final controller = (await runtime.registry.get(run.vmId!))!;
+      await controller.waitUntilIdle();
+      expect(controller.state.phase, VmPhase.starting);
+      final action = await TestRunApplicationService(database: database)
+          .cancelRun(
+            TestRunCancelCommand(
+              testRunId: id,
+              requestId: RequestId.generate(),
+              idempotencyKey: null,
+              requestBody: const [],
+            ),
+          );
+      await worker.dispatchOnce();
+      final stops = (await SqliteOperationRepository(
+        database,
+      ).list()).where((op) => op.type == 'vm.stop').toList();
+      expect(stops, hasLength(1));
+      expect(
+        (await SqliteTestRunRepository(database).get(id))!.state,
+        TestRunState.startingVm,
+      );
+      expect((await runtime.commands.dispatchOnce()).single.error, isNull);
+      await (await runtime.registry.get(run.vmId!))!.waitUntilIdle();
+      await SqliteOperationWaiter(
+        operations: SqliteOperationRepository(database),
+        events: SqliteDurableEventFeed(
+          database,
+          pollInterval: const Duration(milliseconds: 1),
+        ),
+      ).wait(
+        OperationWaitCommand(
+          operationId: stops.single.id,
+          timeout: const Duration(seconds: 5),
+        ),
+      );
+      await worker.dispatchOnce();
+      final cancelled = (await SqliteTestRunRepository(database).get(id))!;
+      expect(cancelled.state, TestRunState.collecting);
+      expect(cancelled.error, isNull);
+      expect(cancelled.steps.single.state, TestStepState.skipped);
+      expect(
+        (await SqliteVmRepository(database).get(run.vmId!))!.status.phase,
+        VmPhase.stopped,
+      );
+      expect(runtime.drivers.activeSessionCount, 0);
+      final operations = SqliteOperationRepository(database);
+      expect(
+        (await operations.get(stops.single.id))!.state,
+        OperationState.succeeded,
+      );
+      expect(
+        (await operations.get(run.operationId))!.state,
+        OperationState.running,
+      );
+      expect(
+        (await operations.get(action.operationId))!.state,
+        OperationState.pending,
+      );
+    },
+  );
+
+  test(
+    'concurrent start scans after reopen reuse one durable intent beyond cache retention',
+    () async {
+      final id = await accept();
+      await provision();
+      final first = await openRuntime();
+      await TestRunVmStartWorker(
+        database: database,
+        registry: first.registry,
+      ).dispatchOnce();
+      final original = (await SqliteOperationRepository(
+        database,
+      ).list()).singleWhere((op) => op.type == 'vm.start');
+      await first.close();
+      database.close();
+      database = await GaoVmDatabase.open('${temporary.path}/catalog.db');
+      final restored = await openRuntime();
+      final other = await GaoVmDatabase.open('${temporary.path}/catalog.db');
+      try {
+        final outcomes = await Future.wait([
+          TestRunVmStartWorker(
+            database: database,
+            registry: restored.registry,
+            now: () => DateTime.now().add(const Duration(days: 31)),
+          ).dispatchOnce(),
+          TestRunVmStartWorker(
+            database: other,
+            registry: restored.registry,
+          ).dispatchOnce(),
+        ]);
+        expect(
+          outcomes.expand((pass) => pass).every((item) => item.error == null),
+          isTrue,
+        );
+      } finally {
+        other.close();
+      }
+      final starts = (await SqliteOperationRepository(
+        database,
+      ).list()).where((op) => op.type == 'vm.start').toList();
+      expect(starts, hasLength(1));
+      expect(starts.single.id, original.id);
+      expect(restored.drivers.activeSessionCount, 0);
+      expect(
+        (await SqliteEventRepository(database).list(
+          testRunId: id,
+        )).where((event) => event.type == 'test_run.vm_start_accepted'),
+        hasLength(1),
+      );
+      expect((await restored.commands.dispatchOnce()).single.error, isNull);
+      final run = (await SqliteTestRunRepository(database).get(id))!;
+      await (await restored.registry.get(run.vmId!))!.waitUntilIdle();
+      restored.clock.runUntilIdle();
+      await SqliteOperationWaiter(
+        operations: SqliteOperationRepository(database),
+        events: SqliteDurableEventFeed(
+          database,
+          pollInterval: const Duration(milliseconds: 1),
+        ),
+      ).wait(
+        OperationWaitCommand(
+          operationId: original.id,
+          timeout: const Duration(seconds: 5),
+        ),
+      );
+      await TestRunVmStartWorker(
+        database: database,
+        registry: restored.registry,
+      ).dispatchOnce();
+      expect(
+        (await SqliteTestRunRepository(database).get(id))!.state,
+        TestRunState.waitingReady,
+      );
+    },
+  );
 
   test('accepted image TestRun provisions one durable temporary VM', () async {
     final id = await accept(overrides: VmSpecPatch(cpu: 4));
@@ -443,5 +741,16 @@ void main() {
         OperationState.pending,
       );
     },
+  );
+}
+
+final class _Metrics implements HostMetricsSource {
+  @override
+  Future<HostMetrics> sample() async => const HostMetrics(
+    logicalCpuCount: 8,
+    totalMemoryBytes: 16 * 1024 * 1024 * 1024,
+    availableMemoryBytes: 8 * 1024 * 1024 * 1024,
+    freeDiskBytes: 1024 * 1024 * 1024,
+    unmanagedDriverProcesses: 0,
   );
 }
