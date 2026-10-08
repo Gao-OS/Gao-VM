@@ -99,11 +99,15 @@ final class ArtifactApplicationService {
     return repository.list(query);
   }
 
+  /// [artifactId], when supplied, is a daemon-reserved publication identity,
+  /// never a client-selected public ID. Retries return its verified immutable
+  /// payload without consuming a new input stream.
   Future<Artifact> publish({
     required Stream<List<int>> bytes,
     required ArtifactKind kind,
     required String contentType,
     required int maxBytes,
+    ArtifactId? artifactId,
     int? expectedSizeBytes,
     String? expectedDigest,
     VmId? vmId,
@@ -130,12 +134,31 @@ final class ArtifactApplicationService {
     }
     ContentType.parse(contentType);
     await _verifyRoot();
-    final id = ArtifactId.generate();
+    final id = artifactId ?? ArtifactId.generate();
     final stageName = '.stage-${id.value}';
     final lock = await directory.acquireLock('.lock-${id.value}');
     OwnedImageDirectory? stage;
     var published = false;
     try {
+      final existing = await repository.get(id);
+      if (existing != null) {
+        if (existing.kind != kind ||
+            existing.contentType != contentType ||
+            existing.vmId != vmId ||
+            existing.operationId != operationId ||
+            existing.testRunId != testRunId ||
+            existing.retentionUntil != retentionUntil?.toUtc() ||
+            existing.sizeBytes > maxBytes ||
+            expectedSizeBytes != null &&
+                existing.sizeBytes != expectedSizeBytes ||
+            expectedDigest != null && existing.digest != expectedDigest) {
+          throw ArtifactPublicationConflict(id, 'reserved publication differs');
+        }
+        if (!await repository.hasManagedPayload(id))
+          throw ArtifactContentUnavailable(id);
+        (await _verifiedPayload(existing)).close();
+        return existing;
+      }
       stage = directory.createDirectory(stageName);
       await _write(
         stage,

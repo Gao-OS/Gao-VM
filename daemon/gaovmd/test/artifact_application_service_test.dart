@@ -46,6 +46,47 @@ void main() {
     await temporary.delete(recursive: true);
   });
 
+  test('a server-reserved publication replays after catalog reopen', () async {
+    final id = ArtifactId.generate();
+    final retention = DateTime.utc(2026, 11, 7);
+    final first = await service().publish(
+      artifactId: id,
+      bytes: Stream.value([1, 2, 3]),
+      kind: ArtifactKind.result,
+      contentType: 'application/json',
+      maxBytes: 16,
+      testRunId: run.id,
+      operationId: run.operationId,
+      retentionUntil: retention,
+    );
+    expect(first.id, id);
+    database.close();
+    database = await GaoVmDatabase.open('${temporary.path}/catalog.db');
+    var consumed = false;
+    Stream<List<int>> retryInput() async* {
+      consumed = true;
+      yield [4, 5, 6];
+    }
+
+    final retry = await service().publish(
+      artifactId: id,
+      bytes: retryInput(),
+      kind: ArtifactKind.result,
+      contentType: 'application/json',
+      maxBytes: 16,
+      testRunId: run.id,
+      operationId: run.operationId,
+      retentionUntil: retention,
+    );
+    expect(retry, first);
+    expect(consumed, isFalse);
+    expect((await SqliteTestRunRepository(database).get(run.id))!.artifactIds, [
+      id,
+    ]);
+    final content = await service().download(id);
+    expect(await content.bytes.expand((chunk) => chunk).toList(), [1, 2, 3]);
+  });
+
   test('sealed binary payload and catalog references survive reopen', () async {
     final bytes = [0, 255, 10, 13, 128, 1];
     final artifact = await service().publish(
