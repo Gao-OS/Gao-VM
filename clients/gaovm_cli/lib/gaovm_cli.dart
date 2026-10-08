@@ -51,6 +51,10 @@ Future<int> runCli(
             'operation list',
             'operation cancel OP_ID',
             'operation wait OP_ID',
+            'test run',
+            'test get TR_ID',
+            'test cancel TR_ID',
+            'test artifacts TR_ID',
             'events',
           ],
           'options': {
@@ -63,14 +67,15 @@ Future<int> runCli(
                 'vm/image list: comma-separated label filters',
             '--sort FIELD':
                 'vm list: created_at, name, id; prefix - to descend',
-            '--limit N': 'vm/image/operation list: 1-200 items per page',
+            '--limit N':
+                'vm/image/operation list and test artifacts: 1-200 items per page',
             '--cursor CURSOR':
-                'vm/image/operation list: unchanged next_cursor value',
+                'vm/image/operation list and test artifacts: unchanged next_cursor value',
             '--resource-type TYPE': 'operation list: resource type filter',
             '--resource-id ID': 'operation list: resource ID filter',
             '--state STATE': 'operation list: operation state filter',
             '--body-json JSON':
-                'required by vm create, vm patch, and image import',
+                'required by vm create, vm patch, image import, and test run',
             '--if-match REVISION': 'required by vm patch',
             '--condition CONDITION': 'required by vm wait',
             '--service-name NAME': 'guest_service_ready VM wait target',
@@ -278,6 +283,26 @@ _Request _route(_Options options) {
     if (options.bodyJson == null)
       throw const FormatException('create requires --body-json');
     return _Request('POST', '/v1/vms', body: _body(options.bodyJson!));
+  }
+  if (command.length == 2 && command[0] == 'test' && command[1] == 'run') {
+    if (options.bodyJson == null)
+      throw const FormatException('test run requires --body-json');
+    return _Request('POST', '/v1/test-runs', body: _body(options.bodyJson!));
+  }
+  if (command.length == 3 && command[0] == 'test' && command[1] == 'get') {
+    return _Request('GET', '/v1/test-runs/${_id(command[2], 'tr_')}');
+  }
+  if (command.length == 3 && command[0] == 'test' && command[1] == 'cancel') {
+    return _Request('POST', '/v1/test-runs/${_id(command[2], 'tr_')}/cancel');
+  }
+  if (command.length == 3 &&
+      command[0] == 'test' &&
+      command[1] == 'artifacts') {
+    return _Request(
+      'GET',
+      '/v1/test-runs/${_id(command[2], 'tr_')}/artifacts',
+      query: options.query,
+    );
   }
   if (command.length == 2 && command[0] == 'image' && command[1] == 'import') {
     if (options.bodyJson == null)
@@ -536,6 +561,7 @@ final class _Options {
       },
       'vm list' => const {'label_selector', 'limit', 'cursor', 'sort'},
       'image list' => const {'label_selector', 'limit', 'cursor'},
+      'test artifacts' => const {'limit', 'cursor'},
       'operation list' => const {
         'limit',
         'cursor',
@@ -580,7 +606,12 @@ final class _Options {
     }
     final unsupported = [
       if (bodyJson != null &&
-          !const {'vm create', 'vm patch', 'image import'}.contains(verb))
+          !const {
+            'vm create',
+            'vm patch',
+            'image import',
+            'test run',
+          }.contains(verb))
         '--body-json',
       if (ifMatch != null && verb != 'vm patch') '--if-match',
       if (condition != null && verb != 'vm wait') '--condition',
@@ -597,6 +628,8 @@ final class _Options {
             'image import',
             'image delete',
             'operation cancel',
+            'test run',
+            'test cancel',
           }.contains(verb))
         '--idempotency-key',
     ];

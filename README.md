@@ -181,12 +181,15 @@ Implemented commands at this checkpoint:
 - `image import --body-json JSON`, `image list`, `image get IMG_ID`, `image delete IMG_ID`
 - `operation get/cancel OP_ID`, `operation wait OP_ID --timeout-seconds N`
 - `operation list`
+- `test run --body-json JSON`, `test get/cancel/artifacts TR_ID`
 - `events [--after-sequence N] [--vm-id VM_ID] [--operation-id OP_ID] [--test-run-id TR_ID]`
 
 `vm list` accepts `--label-selector`, `--sort`, `--limit`, and `--cursor`.
 `image list` accepts `--label-selector`, `--limit`, and `--cursor`.
 `operation list` accepts `--resource-type`, `--resource-id`, `--state`, `--limit`,
-and `--cursor`. Page sizes are 1–200; pass the returned `next_cursor` unchanged
+and `--cursor`. `test artifacts` accepts `--limit` and `--cursor` and lists artifact
+metadata with public download URLs, not artifact bytes. Page sizes are 1–200;
+pass the returned `next_cursor` unchanged
 with the same filters and sort to resume. Filtering and cursor validation remain
 owned by the public API.
 
@@ -197,6 +200,14 @@ Image import accepts the public `source_path`, `type`, and `architecture` (`arm6
 All output is JSON; `--json` selects compact output for ordinary results and diagnostics. Events always use one compact Event JSON object per line, with SSE comments omitted. Successful results go to stdout and Problems/local diagnostics to stderr. Exit codes are `0` for success or accepted work, `1` for API failure or a failed/cancelled waited Operation, `2` for usage errors, `3` for transport failure, `4` for invalid server responses, `124` for a deadline or `WAIT_TIMEOUT`, `130` for event-stream SIGINT, and `143` for event-stream SIGTERM.
 
 Requests default to a 30-second local deadline; waits require an explicit `--timeout-seconds` and allow five additional seconds for transport. Mutations return accepted Operations without waiting for completion. Use `--idempotency-key KEY` and reuse it for explicit retries; the client does not automatically retry writes. Patch also requires an explicit revision/ETag through `--if-match`.
+
+`test run` takes the public `TestRunCreateRequest`: image source, readiness wait,
+ordered steps, cleanup policy, and `retain_on_failure`, with optional VM overrides
+and overall `timeout_seconds`. Its acceptance is not a successful guest test.
+`test cancel` sends a bodyless cancellation request and returns its durable pending
+Operation; collection and cleanup finish asynchronously. Track accepted work with
+`operation get/wait` and `test get`. The CLI's `--timeout-seconds` bounds the local
+request, not the TestRun's execution budget, and a local timeout does not cancel it.
 
 The event deadline bounds the entire subscription, including heartbeats. On a
 disconnect (`3`), timeout (`124`), or interruption (`130`/`143`), resume explicitly
@@ -213,7 +224,7 @@ dart run bin/gaovm_cli.dart --socket-path /absolute/state/run/api.sock events --
 dart test
 ```
 
-Coverage includes real public-socket requests, VM/image deletion contracts, SQLite-backed filtered/paginated catalog queries, image lookup across pages, create/import/replay/query/cancellation with durable Operation waits, and resumable/live event streaming. Executable signal tests verify idle subscription cleanup and stable JSON/exit codes. This is a partial M7 checkpoint: guest, TestRun/artifact commands, doctor, and the legacy alias adapter remain pending. It does not establish installed-daemon or Apple Silicon VM boot/display acceptance.
+Coverage includes real public-socket requests, VM/image deletion contracts, SQLite-backed filtered/paginated catalog queries, image lookup across pages, create/import/replay/query/cancellation with durable Operation waits, and resumable/live event streaming. TestRun tests exercise cross-client acceptance/query/cancellation, retry conflicts, isolated artifact pages, and the CLI executable querying a collected pre-allocation cancellation with a downloadable result. Executable signal tests verify idle subscription cleanup and stable JSON/exit codes. This is a partial M7 checkpoint: guest exec, doctor, and the legacy alias adapter remain pending. It does not establish installed-daemon, native guest execution, or Apple Silicon VM boot/display acceptance.
 
 ## Legacy Prototype CLI Reference (Not Supported)
 

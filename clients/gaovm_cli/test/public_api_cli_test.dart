@@ -231,6 +231,10 @@ void main() {
         'operation list',
         'operation cancel OP_ID',
         'operation wait OP_ID',
+        'test run',
+        'test get TR_ID',
+        'test cancel TR_ID',
+        'test artifacts TR_ID',
         'events',
       ]),
     );
@@ -477,6 +481,31 @@ void main() {
       }
     },
   );
+  test('TestRun query honors the explicit local deadline', () async {
+    final release = Completer<void>();
+    final router = PublicApiRouter()
+      ..add('GET', '/v1/test-runs/{test_run_id}', (request) async {
+        expect(request.headers['idempotency-key'], isNull);
+        await release.future;
+        return PublicApiResponse.json(status: 200, body: const {});
+      });
+    await _withServer(router, (server) async {
+      try {
+        final result = await _invoke(server, [
+          'test',
+          'get',
+          TestRunId.generate().value,
+          '--timeout-seconds',
+          '1',
+        ]);
+        expect(result.code, 124);
+        expect(result.output, isEmpty);
+        expect(jsonDecode(result.error)['code'], 'CLI_TIMEOUT');
+      } finally {
+        release.complete();
+      }
+    });
+  });
 }
 
 Future<void> _withServer(
