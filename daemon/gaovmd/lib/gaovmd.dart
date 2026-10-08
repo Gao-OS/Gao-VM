@@ -26,6 +26,7 @@ export 'src/image_filesystem.dart'
         OwnedImageLock;
 export 'src/image_repository.dart';
 export 'src/image_store.dart';
+export 'src/legacy_vm_migration.dart';
 export 'src/managed_disk_materializer.dart';
 export 'src/operation_application_service.dart';
 export 'src/operation_repository.dart';

@@ -12,6 +12,7 @@ const coreTableNames = <String>{
   'vm_runtime',
   'vm_provisioning',
   'vm_provisioning_cancellations',
+  'legacy_vm_migrations',
   'images',
   'operations',
   'events',
@@ -23,7 +24,7 @@ const coreTableNames = <String>{
   'outbox',
 };
 
-const _latestSchemaVersion = 7;
+const _latestSchemaVersion = 8;
 final _transactionContextKey = Object();
 final _savepointScopeKey = Object();
 final _transactionGates = <String, _AsyncGate>{};
@@ -470,6 +471,27 @@ const _migrations = <_Migration>[
       BEFORE UPDATE ON vm_provisioning_cancellations
       BEGIN
         SELECT RAISE(ABORT, 'provisioning cancellation identity is immutable');
+      END;
+  '''),
+  _Migration(8, '''
+    CREATE TABLE legacy_vm_migrations (
+      migration_key TEXT PRIMARY KEY CHECK (migration_key = 'legacy-single-vm-v1'),
+      vm_id TEXT NOT NULL UNIQUE REFERENCES vms(id),
+      operation_id TEXT NOT NULL UNIQUE REFERENCES operations(id),
+      backup_digest TEXT NOT NULL,
+      desired_state TEXT NOT NULL CHECK (desired_state IN ('stopped', 'running')),
+      completed_at TEXT
+    );
+    CREATE TRIGGER legacy_vm_migration_immutable_input
+      BEFORE UPDATE OF migration_key, vm_id, operation_id, backup_digest, desired_state
+      ON legacy_vm_migrations
+      BEGIN
+        SELECT RAISE(ABORT, 'legacy migration identity is immutable');
+      END;
+    CREATE TRIGGER legacy_vm_migration_immutable_completion
+      BEFORE UPDATE ON legacy_vm_migrations WHEN OLD.completed_at IS NOT NULL
+      BEGIN
+        SELECT RAISE(ABORT, 'legacy migration completion is immutable');
       END;
   '''),
 ];

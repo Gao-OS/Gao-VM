@@ -15,6 +15,7 @@ import 'host_lease_repository.dart';
 import 'host_scheduler.dart';
 import 'host_scheduler_models.dart';
 import 'image_filesystem.dart';
+import 'legacy_vm_migration.dart';
 import 'macos_driver_inventory.dart';
 import 'macos_host_metrics.dart';
 import 'operation_application_service.dart';
@@ -97,22 +98,6 @@ final class DaemonApplication {
       ownership = await DaemonOwnership.tryAcquire(state);
       if (ownership == null)
         throw StateError('another daemon owns this state directory');
-      for (final legacy in [
-        'config.json',
-        'pending_config.json',
-        'desired_state.json',
-        'daemon_state.json',
-      ]) {
-        if (await FileSystemEntity.type(
-              '${state.path}/$legacy',
-              followLinks: false,
-            ) !=
-            FileSystemEntityType.notFound) {
-          throw StateError(
-            'legacy state requires migration; existing files were not changed',
-          );
-        }
-      }
       final driverPath = await File(driverBinary).resolveSymbolicLinks();
       final run = await _privateChild(state, 'run');
       roots.add(run);
@@ -166,6 +151,13 @@ final class DaemonApplication {
         ),
         readInventory: inventory.snapshot,
       ).recover();
+      await LegacyVmMigration(
+        database: database,
+        state: state,
+        bundles: bundles,
+        images: images,
+        ownership: ownership,
+      ).migrate();
       final metrics = MacOsHostMetricsSource(
         storage: state,
         countUnmanagedDrivers: () async => (await inventory.snapshot())

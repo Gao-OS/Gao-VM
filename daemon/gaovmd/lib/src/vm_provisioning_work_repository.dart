@@ -52,6 +52,7 @@ final class SqliteVmProvisioningWorkRepository {
     required String owner,
     required Duration lease,
     int limit = 100,
+    OperationId? operationId,
   }) => _transaction((db) async {
     if (owner.isEmpty || owner.length > 255) {
       throw ArgumentError.value(
@@ -70,6 +71,7 @@ final class SqliteVmProvisioningWorkRepository {
       '''
       SELECT candidate.* FROM outbox candidate
       WHERE candidate.topic = ? AND candidate.published_at IS NULL
+        AND (? IS NULL OR candidate.key = ?)
         AND (candidate.claimed_by IS NULL OR candidate.claim_expires_at <= ?)
         AND NOT EXISTS (
           SELECT 1 FROM outbox earlier
@@ -78,7 +80,13 @@ final class SqliteVmProvisioningWorkRepository {
         )
       ORDER BY candidate.id LIMIT ?
     ''',
-      [vmProvisioningOutboxTopic, formatPersistenceTimestamp(now), limit],
+      [
+        vmProvisioningOutboxTopic,
+        operationId?.value,
+        operationId?.value,
+        formatPersistenceTimestamp(now),
+        limit,
+      ],
     );
     final claims = <VmProvisioningClaim>[];
     for (final row in rows) {
