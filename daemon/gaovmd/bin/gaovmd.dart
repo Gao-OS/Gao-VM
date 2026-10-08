@@ -1,9 +1,7 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 
 import 'package:gaovmd/gaovmd.dart';
-import 'package:yaml/yaml.dart';
 
 Future<void> main(List<String> args) async {
   if (args.contains('--help')) {
@@ -22,12 +20,7 @@ Future<void> main(List<String> args) async {
   DaemonApplication application;
   try {
     final config = _Config.parse(args);
-    final openapi = Map<String, Object?>.from(
-      jsonDecode(
-            jsonEncode(loadYaml(await File(config.openapi).readAsString())),
-          )
-          as Map,
-    );
+    final openapi = await loadPublicOpenApiDocument(File(config.openapi));
     application = await DaemonApplication.start(
       stateDirectory: Directory(config.state),
       driverBinary: config.driver,

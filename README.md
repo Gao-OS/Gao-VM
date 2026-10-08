@@ -184,6 +184,7 @@ Implemented commands at this checkpoint:
 - `test run --body-json JSON`, `test get/cancel/artifacts TR_ID`
 - `events [--after-sequence N] [--vm-id VM_ID] [--operation-id OP_ID] [--test-run-id TR_ID]`
 - `doctor [--timeout-seconds N]`
+- `schema [--timeout-seconds N]`
 
 `vm list` accepts `--label-selector`, `--sort`, `--limit`, and `--cursor`.
 `image list` accepts `--label-selector`, `--limit`, and `--cursor`.
@@ -201,6 +202,13 @@ Image import accepts the public `source_path`, `type`, and `architecture` (`arm6
 All output is JSON; `--json` selects compact output for ordinary results and diagnostics. Events always use one compact Event JSON object per line, with SSE comments omitted. Successful results go to stdout and Problems/local diagnostics to stderr. Exit codes are `0` for success or accepted work, `1` for API failure or a failed/cancelled waited Operation, `2` for usage errors, `3` for transport failure, `4` for invalid server responses, `124` for a deadline or `WAIT_TIMEOUT`, `130` for event-stream SIGINT, and `143` for event-stream SIGTERM.
 
 Requests default to a 30-second local deadline; waits require an explicit `--timeout-seconds` and allow five additional seconds for transport. Mutations return accepted Operations without waiting for completion. Use `--idempotency-key KEY` and reuse it for explicit retries; the client does not automatically retry writes. Patch also requires an explicit revision/ETag through `--if-match`.
+
+`schema` reads `GET /v1/openapi.json` and prints the complete OpenAPI 3.1 JSON,
+including resource schemas. The daemon links canonical VmSpec definitions into
+local references; the CLI never reads repository schema files. Invalid envelopes
+return exit `4`; the ordinary API/transport/deadline exits still apply. Schema
+discovery describes the contract, not runtime or guest readiness. See
+[API discovery](docs/API_DISCOVERY.md) for source layout, limits, and verification.
 
 `test run` takes the public `TestRunCreateRequest`: image source, readiness wait,
 ordered steps, cleanup policy, and `retain_on_failure`, with optional VM overrides

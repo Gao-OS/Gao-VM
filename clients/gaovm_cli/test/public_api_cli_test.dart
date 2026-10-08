@@ -237,6 +237,7 @@ void main() {
         'test artifacts TR_ID',
         'events',
         'doctor',
+        'schema',
       ]),
     );
     expect(help['options'], contains('--label-selector SELECTOR'));

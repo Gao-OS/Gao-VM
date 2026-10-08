@@ -38,6 +38,7 @@ export 'src/managed_disk_materializer.dart';
 export 'src/operation_application_service.dart';
 export 'src/operation_repository.dart';
 export 'src/public_api_server.dart';
+export 'src/public_openapi_document.dart';
 export 'src/system_api_handlers.dart';
 export 'src/system_doctor_host.dart';
 export 'src/system_doctor_service.dart';

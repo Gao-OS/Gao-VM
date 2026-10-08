@@ -57,6 +57,7 @@ Future<int> runCli(
             'test artifacts TR_ID',
             'events',
             'doctor',
+            'schema',
           ],
           'options': {
             '--after-sequence N':
@@ -143,6 +144,22 @@ Future<int> runCli(
           ? null
           : options.idempotencyKey ?? _newKey(),
     );
+    if (route.path == '/v1/openapi.json') {
+      final document = response.body.toJson();
+      final version = document['openapi'];
+      final info = document['info'];
+      final components = document['components'];
+      if (version is! String ||
+          !RegExp(r'^3\.1\.[0-9]+$').hasMatch(version) ||
+          info is! Map ||
+          info['title'] is! String ||
+          info['version'] is! String ||
+          document['paths'] is! Map ||
+          components is! Map ||
+          components['schemas'] is! Map) {
+        throw const ApiProtocolException('invalid OpenAPI 3.1 response');
+      }
+    }
     if (route.path == '/v1/system/doctor') {
       final DoctorResult report;
       try {
@@ -284,6 +301,9 @@ Future<ProcessSignal> _consumeEvents(
 
 _Request _route(_Options options) {
   final command = options.command;
+  if (command.length == 1 && command.single == 'schema') {
+    return _Request('GET', '/v1/openapi.json');
+  }
   if (command.length == 1 && command.single == 'doctor') {
     return _Request('GET', '/v1/system/doctor');
   }
