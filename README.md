@@ -181,6 +181,7 @@ Implemented commands at this checkpoint:
 - `image import --body-json JSON`, `image list`, `image get IMG_ID`, `image delete IMG_ID`
 - `operation get/cancel OP_ID`, `operation wait OP_ID --timeout-seconds N`
 - `operation list`
+- `guest exec VM_ID --body-json JSON` (client adapter; installed Guest API pending)
 - `test run --body-json JSON`, `test get/cancel/artifacts TR_ID`
 - `events [--after-sequence N] [--vm-id VM_ID] [--operation-id OP_ID] [--test-run-id TR_ID]`
 - `doctor [--timeout-seconds N]`
@@ -202,6 +203,15 @@ Image import accepts the public `source_path`, `type`, and `architecture` (`arm6
 All output is JSON; `--json` selects compact output for ordinary results and diagnostics. Events always use one compact Event JSON object per line, with SSE comments omitted. Successful results go to stdout and Problems/local diagnostics to stderr. Exit codes are `0` for success or accepted work, `1` for API failure or a failed/cancelled waited Operation, `2` for usage errors, `3` for transport failure, `4` for invalid server responses, `124` for a deadline or `WAIT_TIMEOUT`, `130` for event-stream SIGINT, and `143` for event-stream SIGTERM.
 
 Requests default to a 30-second local deadline; waits require an explicit `--timeout-seconds` and allow five additional seconds for transport. Mutations return accepted Operations without waiting for completion. Use `--idempotency-key KEY` and reuse it for explicit retries; the client does not automatically retry writes. Patch also requires an explicit revision/ETag through `--if-match`.
+
+`guest exec` sends the frozen public `GuestExecRequest` to
+`POST /v1/vms/{vm_id}/guest/exec`, preserving argv, cwd, environment, capture, and
+the Guest execution timeout. It never runs the command on the host. Exit `0`
+requires a valid `202` Operation acceptance for the requested VM; it is not the
+Guest command's exit code. The installed daemon does not yet register this endpoint
+or provide a Guest session/exec worker, so this is client-adapter coverage only,
+not completed Guest execution. See [Guest exec CLI](docs/GUEST_EXEC_CLI.md) for
+timeouts, retries, failure behavior, and the remaining M6 dependency.
 
 `schema` reads `GET /v1/openapi.json` and prints the complete OpenAPI 3.1 JSON,
 including resource schemas. The daemon links canonical VmSpec definitions into

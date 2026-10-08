@@ -51,6 +51,7 @@ Future<int> runCli(
             'operation list',
             'operation cancel OP_ID',
             'operation wait OP_ID',
+            'guest exec VM_ID',
             'test run',
             'test get TR_ID',
             'test cancel TR_ID',
@@ -77,7 +78,7 @@ Future<int> runCli(
             '--resource-id ID': 'operation list: resource ID filter',
             '--state STATE': 'operation list: operation state filter',
             '--body-json JSON':
-                'required by vm create, vm patch, image import, and test run',
+                'required by vm create, vm patch, image import, test run, and guest exec',
             '--if-match REVISION': 'required by vm patch',
             '--condition CONDITION': 'required by vm wait',
             '--service-name NAME': 'guest_service_ready VM wait target',
@@ -144,6 +145,26 @@ Future<int> runCli(
           ? null
           : options.idempotencyKey ?? _newKey(),
     );
+    if (route.path.endsWith('/guest/exec')) {
+      final accepted = response.body.toJson();
+      final operationId = accepted['operation_id'];
+      if (response.status != HttpStatus.accepted ||
+          operationId is! String ||
+          accepted['resource_type'] != 'virtual_machine' ||
+          accepted['resource_id'] != options.command[2] ||
+          !const {
+            'pending',
+            'running',
+            'succeeded',
+          }.contains(accepted['state'])) {
+        throw const ApiProtocolException('invalid guest exec acceptance');
+      }
+      try {
+        OperationId(operationId);
+      } on FormatException {
+        throw const ApiProtocolException('invalid guest exec acceptance');
+      }
+    }
     if (route.path == '/v1/openapi.json') {
       final document = response.body.toJson();
       final version = document['openapi'];
@@ -330,6 +351,15 @@ _Request _route(_Options options) {
     if (options.bodyJson == null)
       throw const FormatException('test run requires --body-json');
     return _Request('POST', '/v1/test-runs', body: _body(options.bodyJson!));
+  }
+  if (command.length == 3 && command[0] == 'guest' && command[1] == 'exec') {
+    if (options.bodyJson == null)
+      throw const FormatException('guest exec requires --body-json');
+    return _Request(
+      'POST',
+      '/v1/vms/${_id(command[2], 'vm_')}/guest/exec',
+      body: _body(options.bodyJson!),
+    );
   }
   if (command.length == 3 && command[0] == 'test' && command[1] == 'get') {
     return _Request('GET', '/v1/test-runs/${_id(command[2], 'tr_')}');
@@ -653,6 +683,7 @@ final class _Options {
             'vm patch',
             'image import',
             'test run',
+            'guest exec',
           }.contains(verb))
         '--body-json',
       if (ifMatch != null && verb != 'vm patch') '--if-match',
@@ -672,6 +703,7 @@ final class _Options {
             'operation cancel',
             'test run',
             'test cancel',
+            'guest exec',
           }.contains(verb))
         '--idempotency-key',
     ];

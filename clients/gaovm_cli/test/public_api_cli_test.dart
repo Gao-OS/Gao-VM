@@ -231,6 +231,7 @@ void main() {
         'operation list',
         'operation cancel OP_ID',
         'operation wait OP_ID',
+        'guest exec VM_ID',
         'test run',
         'test get TR_ID',
         'test cancel TR_ID',
@@ -246,6 +247,7 @@ void main() {
     expect(help['options'], contains('--vm-id VM_ID'));
     expect(help['options'], contains('--operation-id OP_ID'));
     expect(help['options'], contains('--test-run-id TR_ID'));
+    expect(help['options']['--body-json JSON'], contains('guest exec'));
     expect(
       help['options']['--service-name NAME'],
       'guest_service_ready VM wait target',
