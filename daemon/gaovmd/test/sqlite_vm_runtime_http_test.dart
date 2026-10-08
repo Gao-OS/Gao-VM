@@ -442,6 +442,50 @@ void main() {
           otherMetadata['pid'],
         );
         final secondId = VmId(created.last['resource_id'] as String);
+        final peerBeforeRestart = await request(
+          'GET',
+          '/v1/vms/${firstId.value}',
+        );
+        final explicitRestart = await request(
+          'POST',
+          '/v1/vms/${secondId.value}/actions/restart',
+          {},
+          'restart-patched',
+        );
+        await wait(explicitRestart);
+        final applied = await request('GET', '/v1/vms/${secondId.value}');
+        expect((applied['status'] as Map)['phase'], 'running');
+        expect((applied['status'] as Map)['driver_generation'], 2);
+        expect((applied['status'] as Map)['spec_generation'], 2);
+        expect((applied['status'] as Map)['observed_generation'], 2);
+        expect((applied['status'] as Map)['restart_required'], isFalse);
+        final replacement =
+            jsonDecode(
+                  await File(
+                    '${root.path}/run/${secondId.value}/2/metadata.json',
+                  ).readAsString(),
+                )
+                as Map;
+        expect(replacement['pid'], isNot(otherMetadata['pid']));
+        expect(await File(otherMetadataPath).exists(), isFalse);
+        expect(manager.activeProcessCount, 1);
+        expect(
+          await request('GET', '/v1/vms/${firstId.value}'),
+          peerBeforeRestart,
+        );
+        expect(
+          (await request(
+            'POST',
+            '/v1/vms/${secondId.value}/actions/restart',
+            {},
+            'restart-patched',
+          ))['operation_id'],
+          explicitRestart['operation_id'],
+        );
+        expect(
+          (await request('GET', '/v1/vms/${secondId.value}'))['status'],
+          applied['status'],
+        );
         final secondBundle = Directory(
           '${vmRoot.path}/${secondId.value}.gaovm',
         );

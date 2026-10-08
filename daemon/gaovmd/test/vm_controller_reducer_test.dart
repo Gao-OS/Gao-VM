@@ -494,39 +494,143 @@ void main() {
       },
     );
 
-    test('restart replaces the generation and rejects a late old exit', () {
-      var transition = reduce(_running(), RestartRequested(_operation2));
-      expect(transition.state.desiredState, DesiredState.running);
-      expect(transition.state.phase, VmPhase.stopping);
-      expect(transition.effects.last, isA<StopRuntime>());
+    test(
+      'restart drains a stopped runtime before replacing its generation',
+      () {
+        var transition = reduce(_running(), RestartRequested(_operation2));
+        expect(transition.state.desiredState, DesiredState.running);
+        expect(transition.state.phase, VmPhase.stopping);
+        expect(transition.effects.last, isA<StopRuntime>());
 
-      transition = reduce(
-        transition.state,
-        DriverExited(
-          operationId: _operation2,
-          driverGeneration: 1,
-          cleanShutdown: true,
-        ),
-      );
-      transition = reduce(transition.state, HostLeaseReleased(_operation2));
-      expect(transition.state.leaseState, VmLeaseState.acquiring);
-      expect(transition.effects.last, isA<AcquireHostLease>());
+        transition = reduce(
+          transition.state,
+          VmStateChanged(
+            operationId: _operation2,
+            driverGeneration: 1,
+            phase: VmPhase.stopped,
+          ),
+        );
+        expect(transition.state.phase, VmPhase.stopping);
+        expect(transition.state.activeDriverGeneration, 1);
+        expect(
+          transition.state.currentOperation?.state,
+          OperationState.running,
+        );
+        expect(transition.effects.whereType<ReleaseHostLease>(), isEmpty);
 
-      transition = reduce(transition.state, HostLeaseAcquired(_operation2));
-      expect(transition.state.driverGeneration, 2);
-      expect(transition.state.activeDriverGeneration, 2);
+        transition = reduce(
+          transition.state,
+          DriverExited(
+            operationId: _operation2,
+            driverGeneration: 1,
+            cleanShutdown: true,
+          ),
+        );
+        transition = reduce(transition.state, HostLeaseReleased(_operation2));
+        expect(transition.state.leaseState, VmLeaseState.acquiring);
+        expect(transition.effects.last, isA<AcquireHostLease>());
 
-      final stale = reduce(
-        transition.state,
-        DriverExited(
-          operationId: _operation2,
-          driverGeneration: 1,
-          cleanShutdown: true,
-        ),
-      );
-      expect(stale.state, same(transition.state));
-      expect(stale.effects, isEmpty);
-    });
+        transition = reduce(transition.state, HostLeaseAcquired(_operation2));
+        expect(transition.state.driverGeneration, 2);
+        expect(transition.state.activeDriverGeneration, 2);
+
+        final stale = reduce(
+          transition.state,
+          DriverExited(
+            operationId: _operation2,
+            driverGeneration: 1,
+            cleanShutdown: true,
+          ),
+        );
+        expect(stale.state, same(transition.state));
+        expect(stale.effects, isEmpty);
+      },
+    );
+
+    test(
+      'a stopped replacement driver fails restart rather than draining again',
+      () {
+        var state = reduce(
+          _running(policy: RestartPolicy.never),
+          RestartRequested(_operation2),
+        ).state;
+        for (final command in <VmCommand>[
+          VmStateChanged(
+            operationId: _operation2,
+            driverGeneration: 1,
+            phase: VmPhase.stopped,
+          ),
+          DriverExited(
+            operationId: _operation2,
+            driverGeneration: 1,
+            cleanShutdown: true,
+          ),
+          HostLeaseReleased(_operation2),
+          HostLeaseAcquired(_operation2),
+          DriverSpawned(operationId: _operation2, driverGeneration: 2),
+          DriverHandshakeCompleted(
+            operationId: _operation2,
+            driverGeneration: 2,
+          ),
+          DriverCommandSucceeded(
+            operationId: _operation2,
+            driverGeneration: 2,
+            command: RuntimeCommandKind.configure,
+          ),
+        ]) {
+          state = reduce(state, command).state;
+        }
+        expect(state.phase, VmPhase.starting);
+        expect(state.activeDriverGeneration, 2);
+        expect(state.currentOperation?.state, OperationState.running);
+        final oldEvent = reduce(
+          state,
+          VmStateChanged(
+            operationId: _operation2,
+            driverGeneration: 1,
+            phase: VmPhase.stopped,
+          ),
+        );
+        expect(oldEvent.state, same(state));
+        expect(oldEvent.effects, isEmpty);
+        state = reduce(
+          state,
+          VmStateChanged(
+            operationId: _operation2,
+            driverGeneration: 2,
+            phase: VmPhase.stopping,
+          ),
+        ).state;
+        state = reduce(
+          state,
+          VmStateChanged(
+            operationId: _operation2,
+            driverGeneration: 2,
+            phase: VmPhase.stopped,
+          ),
+        ).state;
+        var transition = reduce(
+          state,
+          DriverExited(
+            operationId: _operation2,
+            driverGeneration: 2,
+            cleanShutdown: true,
+          ),
+        );
+        expect(transition.state.currentOperation?.state, OperationState.failed);
+        expect(
+          transition.effects.whereType<FailOperation>().single.operationId,
+          _operation2,
+        );
+        expect(transition.state.desiredState, DesiredState.stopped);
+        transition = reduce(transition.state, HostLeaseReleased(_operation2));
+        expect(transition.state.activeDriverGeneration, isNull);
+        expect(transition.state.leaseState, VmLeaseState.none);
+        expect(transition.state.driverGeneration, 2);
+        expect(transition.effects.whereType<AcquireHostLease>(), isEmpty);
+        expect(transition.effects.whereType<SpawnDriver>(), isEmpty);
+      },
+    );
 
     test('clean and crash exits follow distinct restart policies', () {
       final cleanOnFailure = reduce(

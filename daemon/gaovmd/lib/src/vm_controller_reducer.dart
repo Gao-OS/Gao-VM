@@ -2252,6 +2252,19 @@ VmTransition _vmStateChanged(
   if (state.phase == phase || !_allowsPhaseTransition(state.phase, phase)) {
     return VmTransition(state: state);
   }
+  final pendingOperation = state.currentOperation;
+  if (pendingOperation != null &&
+      pendingOperation.kind == VmOperationKind.restart &&
+      !pendingOperation.isTerminal &&
+      state.desiredState == DesiredState.running) {
+    // Only the explicit intent enters restart's drain stage, and only confirmed
+    // process exit ends it. A replacement's observed stopping is not a new drain.
+    final draining = state.phase == VmPhase.stopping;
+    if (draining && phase == VmPhase.stopped ||
+        !draining && phase == VmPhase.stopping) {
+      return VmTransition(state: state);
+    }
+  }
   if (phase != VmPhase.running) {
     return VmTransition(
       state: state.copyWith(phase: phase),

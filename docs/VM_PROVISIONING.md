@@ -588,6 +588,28 @@ allow another VM's events to progress, and exercise failed cleanup and shutdown
 retries. Real process-manager tests verify confirmed exit and runtime-file cleanup;
 the HTTP lease-loss scenario remains covered with the reordered boundary.
 
+### Restart drains the old process, not just its VM runtime
+
+During explicit `vm.restart`, a normal `runtime.state_changed: stopped` notification
+does not end the controller's `stopping` drain stage. The old driver still owns its
+generation and lease until confirmed process release delivers `DriverExited`.
+Only after lease release may restart acquire capacity and start a new generation.
+Previously, adopting `stopped` too early caused the subsequent expected exit to be
+classified as `DRIVER_START_FAILED: driver exited unexpectedly`.
+Only the accepted restart intent enters this drain stage. An unsolicited
+`stopping` notification from the replacement driver must not enter it again and
+bypass ordinary exit failure/retry handling.
+
+Reducer regressions cover stopped-before-exit ordering, late old-generation events,
+and an unexpectedly stopped replacement generation (which must still fail/recover
+under its ordinary retry policy, not be mistaken for another restart drain).
+The TestRun readiness fixture also uses the actual public restart acceptor and
+durable dispatcher/controller/lease pipeline to create a newer generation, then
+rejects that generation as TestRun-owned work without changing its runtime.
+Its manual VZ clock advances after adapter event drainage so the newly scheduled
+start completion is observed. This is component evidence, not native VZ restart
+or installed-daemon acceptance.
+
 ## Public runtime integration evidence
 
 `sqlite_vm_runtime_http_test.dart` composes the public HTTP/UDS server, durable
@@ -610,6 +632,13 @@ Crash recovery is observed through public SSE with `Last-Event-ID`. Deleting the
 remaining running VM stops its driver, removes its managed bundle, emits
 `vm.deleted`, and replays the original delete acceptance while preserving its
 peer's bundle and the base image.
+
+After VM-A is stopped, the same HTTP fixture explicitly restarts the patched
+VM-B. It verifies a new PID/generation, application of spec generation 2,
+cleared `restart_required`, removal of the old generation's runtime files, and
+unchanged VM-A state. Retrying the same restart key returns the original
+operation without replacing that new runtime again. Removing the restart drain
+guard reproduces the unexpected-exit failure through this real subprocess path.
 
 The subprocess fixture substitutes for Virtualization.framework, and host metrics
 are synthetic. Images are imported directly during setup; guest-service readiness
