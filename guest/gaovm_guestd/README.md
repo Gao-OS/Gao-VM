@@ -44,6 +44,15 @@ terminates the connection. `is_ready()` means protocol negotiation only, not
 VM runtime state, guest health, or service readiness. It is not transport
 authentication: the future vsock service must verify its host peer identity.
 
+`control::negotiate` drives a fresh `Session` over the asynchronous framing halves
+under one absolute handshake deadline. It returns only after both hellos and
+acknowledgements agree and every outbound message has been flushed. A protocol or
+I/O error, timeout, or cancellation of a polled negotiation permanently invalidates
+the session and both halves, even if the raw protocol state became ready before
+the final acknowledgement flush. Unlike a standalone frame read, an interrupted
+handshake cannot be resumed. Callers must close a failed transport and establish
+a new connection/session; host-peer authentication is still required separately.
+
 The six `CORE_CAPABILITIES` are the frozen P0 contract, not claims that handlers
 already exist. Guest hello validation requires all six; a future executable must
 not advertise them until all corresponding handlers and binary transfer paths
@@ -178,6 +187,9 @@ cross-VM/generation messages are exercised through the library interfaces.
 Async framing tests include real Unix sockets, partial-read/write cancellation,
 retained deadlines, malformed input, EOF, and stalled writes. These socket tests
 are not native virtio-vsock acceptance.
+Negotiation tests include a real Unix-socket hello/health round trip, both hello
+orderings, capability intersection, identity/version failures, malformed/EOF
+frames, silence, and cancellation/failure/deadline during the final buffered flush.
 
 ## Remaining package and MVP work
 

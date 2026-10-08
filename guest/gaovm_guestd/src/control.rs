@@ -1,10 +1,88 @@
-//! Deadline-bound control framing; not a listener or transport authentication.
+//! Deadline-bound framing and negotiation; not a listener or peer authentication.
 
 use crate::frame::{MAX_FRAME_BYTES, decode_object, encode_object};
+use crate::protocol::ProtocolError;
+use crate::session::Session;
 use serde_json::Value;
 use std::io;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::{Instant, timeout_at};
+
+#[derive(Debug)]
+pub enum NegotiationError {
+    Io(io::Error),
+    Protocol(ProtocolError),
+}
+
+/// Drive a fresh session's bidirectional hello under one absolute deadline.
+///
+/// Success requires every outbound hello/acknowledgement to be flushed. Errors,
+/// timeouts, and dropping a polled negotiation invalidate the session and both
+/// framing halves. The caller must close the transport; a failed negotiation is
+/// not resumable. Peer authentication remains the caller's responsibility.
+pub async fn negotiate<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    session: &mut Session,
+    reader: &mut FrameReader<R>,
+    writer: &mut FrameWriter<W>,
+    deadline: Instant,
+) -> Result<(), NegotiationError> {
+    let mut pending = PendingNegotiation {
+        session,
+        reader,
+        writer,
+        complete: false,
+    };
+    let hello = pending
+        .session
+        .hello()
+        .map_err(NegotiationError::Protocol)?;
+    pending
+        .writer
+        .write_object(&hello, deadline)
+        .await
+        .map_err(NegotiationError::Io)?;
+    while !pending.session.is_ready() {
+        let message = pending
+            .reader
+            .read_object(deadline)
+            .await
+            .map_err(NegotiationError::Io)?
+            .ok_or_else(|| NegotiationError::Io(io::ErrorKind::UnexpectedEof.into()))?;
+        if let Some(reply) = pending
+            .session
+            .receive_hello(&message)
+            .map_err(NegotiationError::Protocol)?
+        {
+            pending
+                .writer
+                .write_object(&reply, deadline)
+                .await
+                .map_err(NegotiationError::Io)?;
+        }
+    }
+    if Instant::now() >= deadline {
+        return Err(NegotiationError::Io(io::ErrorKind::TimedOut.into()));
+    }
+    pending.complete = true;
+    Ok(())
+}
+
+struct PendingNegotiation<'a, R: AsyncRead + Unpin, W: AsyncWrite + Unpin> {
+    session: &'a mut Session,
+    reader: &'a mut FrameReader<R>,
+    writer: &'a mut FrameWriter<W>,
+    complete: bool,
+}
+
+impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> Drop for PendingNegotiation<'_, R, W> {
+    fn drop(&mut self) {
+        if !self.complete {
+            self.session.invalidate();
+            self.reader.invalidate();
+            self.writer.state = WriteState::Failed;
+        }
+    }
+}
 
 pub struct FrameReader<R> {
     reader: R,

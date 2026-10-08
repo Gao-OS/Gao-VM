@@ -88,6 +88,10 @@ impl Session {
             && self.negotiated == self.acknowledged
     }
 
+    pub(crate) fn invalidate(&mut self) {
+        self.failed = true;
+    }
+
     pub fn authorize_request(&self, message: &Value) -> Result<(), ProtocolError> {
         if !self.is_ready() {
             return Err(invalid("guest session is not ready"));
