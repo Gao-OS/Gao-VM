@@ -56,6 +56,7 @@ Future<int> runCli(
             'test cancel TR_ID',
             'test artifacts TR_ID',
             'events',
+            'doctor',
           ],
           'options': {
             '--after-sequence N':
@@ -142,6 +143,24 @@ Future<int> runCli(
           ? null
           : options.idempotencyKey ?? _newKey(),
     );
+    if (route.path == '/v1/system/doctor') {
+      final DoctorResult report;
+      try {
+        report = DoctorResult.fromJson(response.body.toJson());
+      } on FormatException {
+        throw const ApiProtocolException('invalid doctor response');
+      } on ArgumentError {
+        throw const ApiProtocolException('invalid doctor response');
+      }
+      if (report.healthy &&
+          report.checks.any(
+            (check) => check.status == DoctorCheckStatus.error,
+          )) {
+        throw const ApiProtocolException('doctor reports healthy with errors');
+      }
+      write(encode(report.toJson()));
+      return report.healthy ? 0 : 1;
+    }
     Operation? terminal;
     if (route.terminalOperation) {
       try {
@@ -265,6 +284,9 @@ Future<ProcessSignal> _consumeEvents(
 
 _Request _route(_Options options) {
   final command = options.command;
+  if (command.length == 1 && command.single == 'doctor') {
+    return _Request('GET', '/v1/system/doctor');
+  }
   if (command.length == 2 && command[0] == 'vm' && command[1] == 'list') {
     return _Request('GET', '/v1/vms', query: options.query);
   }

@@ -183,6 +183,7 @@ Implemented commands at this checkpoint:
 - `operation list`
 - `test run --body-json JSON`, `test get/cancel/artifacts TR_ID`
 - `events [--after-sequence N] [--vm-id VM_ID] [--operation-id OP_ID] [--test-run-id TR_ID]`
+- `doctor [--timeout-seconds N]`
 
 `vm list` accepts `--label-selector`, `--sort`, `--limit`, and `--cursor`.
 `image list` accepts `--label-selector`, `--limit`, and `--cursor`.
@@ -209,6 +210,18 @@ Operation; collection and cleanup finish asynchronously. Track accepted work wit
 `operation get/wait` and `test get`. The CLI's `--timeout-seconds` bounds the local
 request, not the TestRun's execution budget, and a local timeout does not cancel it.
 
+`doctor` calls the non-mutating `GET /v1/system/doctor` endpoint. The complete
+report goes to stdout: exit `0` means no error checks, and exit `1` means unhealthy;
+warnings do not fail host readiness. Malformed or contradictory reports use exit
+`4`. The daemon bounds its scan to eight seconds and coalesces unfinished probes.
+It checks the platform, static ARM64 driver signature/entitlement, catalog,
+directory bindings/permissions, images, capacity estimates, and runtime namespace.
+Image manifests/sizes are required checks; content hashing has a shared 64 MiB
+budget, and skipped digests are explicitly warned about. Guest session/exec
+readiness remains unverified. Doctor does not repair files, release leases, signal
+processes, start a VM, or prove native VM/TestRun or release acceptance. It requires
+a running daemon and cannot bypass a pre-listener startup census failure.
+
 The event deadline bounds the entire subscription, including heartbeats. On a
 disconnect (`3`), timeout (`124`), or interruption (`130`/`143`), resume explicitly
 with `--after-sequence` set to the last consumed Event's `sequence` and the same
@@ -220,11 +233,12 @@ cd clients/gaovm_cli
 dart pub get --enforce-lockfile
 dart run bin/gaovm_cli.dart --help --json
 dart run bin/gaovm_cli.dart --socket-path /absolute/state/run/api.sock vm list --json
+dart run bin/gaovm_cli.dart --socket-path /absolute/state/run/api.sock doctor --timeout-seconds 10 --json
 dart run bin/gaovm_cli.dart --socket-path /absolute/state/run/api.sock events --after-sequence 42 --timeout-seconds 30 --json
 dart test
 ```
 
-Coverage includes real public-socket requests, VM/image deletion contracts, SQLite-backed filtered/paginated catalog queries, image lookup across pages, create/import/replay/query/cancellation with durable Operation waits, and resumable/live event streaming. TestRun tests exercise cross-client acceptance/query/cancellation, retry conflicts, isolated artifact pages, and the CLI executable querying a collected pre-allocation cancellation with a downloadable result. Executable signal tests verify idle subscription cleanup and stable JSON/exit codes. This is a partial M7 checkpoint: guest exec, doctor, and the legacy alias adapter remain pending. It does not establish installed-daemon, native guest execution, or Apple Silicon VM boot/display acceptance.
+Coverage includes real public-socket requests, VM/image deletion contracts, SQLite-backed filtered/paginated catalog queries, image lookup across pages, create/import/replay/query/cancellation with durable Operation waits, and resumable/live event streaming. TestRun tests exercise cross-client acceptance/query/cancellation, retry conflicts, isolated artifact pages, and the CLI executable querying a collected pre-allocation cancellation with a downloadable result. Doctor tests cover healthy/unhealthy reports, protocol validation, and local deadlines; daemon tests use real SQLite/filesystem/socket state, plus native static-signing fixtures that are never executed. Executable signal tests verify idle subscription cleanup and stable JSON/exit codes. This is a partial M7 checkpoint: guest exec and the legacy alias adapter remain pending. It does not establish installed-daemon, native guest execution, or Apple Silicon VM boot/display acceptance.
 
 ## Legacy Prototype CLI Reference (Not Supported)
 

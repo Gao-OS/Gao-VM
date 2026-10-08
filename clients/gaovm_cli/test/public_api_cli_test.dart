@@ -236,6 +236,7 @@ void main() {
         'test cancel TR_ID',
         'test artifacts TR_ID',
         'events',
+        'doctor',
       ]),
     );
     expect(help['options'], contains('--label-selector SELECTOR'));
