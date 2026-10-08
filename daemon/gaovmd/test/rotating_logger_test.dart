@@ -17,6 +17,20 @@ void main() {
   });
 
   group('RotatingLogger', () {
+    test(
+      'flush drains all accepted writes before state ownership is released',
+      () async {
+        final logPath = '${tempDir.path}/test.log';
+        final logger = RotatingLogger(path: logPath);
+        final writes = [logger.info('first'), logger.warn('second')];
+        await logger.flush();
+        final contents = await File(logPath).readAsString();
+        expect(contents, contains('[info] first'));
+        expect(contents, contains('[warn] second'));
+        await Future.wait(writes);
+      },
+    );
+
     test('creates log file and writes messages', () async {
       final logPath = '${tempDir.path}/test.log';
       final logger = RotatingLogger(path: logPath);

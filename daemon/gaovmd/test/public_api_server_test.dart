@@ -42,6 +42,30 @@ void main() {
   });
 
   test(
+    'startup preparation publishes no listener and preserves a live API',
+    () async {
+      final server = PublicApiServer(
+        socketPath: socketPath,
+        openApiDocument: const {},
+        systemHealth: _HealthService(),
+      );
+      addTearDown(server.close);
+      await server.prepare();
+      expect(server.isRunning, isFalse);
+      expect(
+        await FileSystemEntity.type(socketPath, followLinks: false),
+        FileSystemEntityType.notFound,
+      );
+      await server.start();
+      await expectLater(server.prepare(), throwsStateError);
+      expect(
+        (await _request(socketPath, 'GET', '/v1/system/live')).status,
+        200,
+      );
+    },
+  );
+
+  test(
     'passes resource path parameters through the HTTP handler boundary',
     () async {
       final router = PublicApiRouter()

@@ -504,6 +504,15 @@ final class PublicApiServer {
   Future<void> get done => _doneCompleter?.future ?? Future<void>.value();
   Object? get fatalError => _fatalError;
 
+  /// Reconciles the API socket namespace without publishing a listener, so
+  /// startup recovery can inspect the shared run directory before activation.
+  Future<void> prepare() => _pathGate.run(socketPath, () async {
+    if (_server != null) throw StateError('public API is already started');
+    await _preparePrivateParent();
+    await _removeSocketIfPresent();
+    await _cleanupStaleOwnershipArtifacts();
+  });
+
   Future<void> start() => _pathGate.run(socketPath, _startLocked);
 
   Future<void> _startLocked() async {

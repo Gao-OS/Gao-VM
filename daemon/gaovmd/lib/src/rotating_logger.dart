@@ -21,6 +21,9 @@ class RotatingLogger {
   Future<void> info(String message) => log(LogLevel.info, message);
   Future<void> debug(String message) => log(LogLevel.debug, message);
 
+  /// Drains accepted writes before the daemon releases state ownership.
+  Future<void> flush() => _writeQueue;
+
   Future<void> log(LogLevel level, String message) async {
     if (level.index > minLevel.index) {
       return;

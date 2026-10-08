@@ -2,6 +2,7 @@ library gaovmd;
 
 export 'src/atomic_json_file.dart';
 export 'src/daemon_server.dart';
+export 'src/daemon_application.dart';
 export 'src/driver_process_manager.dart';
 export 'src/driver_protocol_v2.dart';
 export 'src/driver_rpc_channel.dart';
