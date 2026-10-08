@@ -849,6 +849,9 @@ void main() {
       final original = (await SqliteTestRunRepository(database).get(id))!;
       database.close();
       final legacy = sqlite3.open('${temporary.path}/catalog.db');
+      legacy.execute('DROP INDEX test_runs_cleaning_up_idx');
+      legacy.execute('DROP TABLE test_run_vm_cleanup');
+      legacy.execute('DELETE FROM schema_migrations WHERE version = 15');
       legacy.execute('DROP INDEX test_runs_collecting_idx');
       legacy.execute('DROP TABLE test_run_collection_items');
       legacy.execute('DROP TABLE test_run_collection');
@@ -859,7 +862,7 @@ void main() {
       legacy.userVersion = 12;
       legacy.dispose();
       database = await GaoVmDatabase.open('${temporary.path}/catalog.db');
-      expect(database.schemaVersion, 14);
+      expect(database.schemaVersion, 15);
       final restored = (await SqliteTestRunRepository(database).get(id))!;
       expect(restored.toJson()['spec'], original.toJson()['spec']);
       expect(restored.vmId, original.vmId);

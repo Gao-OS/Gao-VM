@@ -5,9 +5,11 @@ import 'dart:io';
 import 'package:gaovm_models/gaovm_models.dart';
 import 'package:gaovmd/gaovmd.dart';
 import 'package:gaovmd/src/image_filesystem.dart' show imageFileMode;
+import 'package:gaovmd/src/test_run_cleanup_worker.dart';
 import 'package:gaovmd/src/test_run_collection_worker.dart';
 import 'package:gaovmd/src/test_run_collection_dispatch_loop.dart';
 import 'package:gaovmd/src/test_run_provisioning_worker.dart';
+import 'package:gaovmd/src/test_run_vm_start_worker.dart';
 import 'package:sqlite3/sqlite3.dart';
 import 'package:test/test.dart';
 
@@ -64,7 +66,10 @@ void main() {
     await temporary.delete(recursive: true);
   });
 
-  Future<TestRunId> accept() async {
+  Future<TestRunId> accept({
+    CleanupPolicy cleanup = CleanupPolicy.deleteOnSuccess,
+    bool retainOnFailure = true,
+  }) async {
     final spec = TestRunSpec(
       source: ImageTestRunSource(source.id),
       vmOverrides: VmSpecPatch.fromJson({
@@ -77,8 +82,8 @@ void main() {
       steps: [
         TestStepRequest(argv: ['true'], timeoutSeconds: 30),
       ],
-      cleanup: CleanupPolicy.deleteOnSuccess,
-      retainOnFailure: true,
+      cleanup: cleanup,
+      retainOnFailure: retainOnFailure,
     );
     final accepted = await TestRunApplicationService(database: database).create(
       TestRunCreateCommand(
@@ -176,8 +181,11 @@ void main() {
     );
   }
 
-  Future<TestRun> prepareCollectingVm() async {
-    final id = await accept();
+  Future<TestRun> prepareProvisionedVm({
+    CleanupPolicy cleanup = CleanupPolicy.deleteOnSuccess,
+    bool retainOnFailure = true,
+  }) async {
+    final id = await accept(cleanup: cleanup, retainOnFailure: retainOnFailure);
     await TestRunProvisioningWorker(database: database).dispatchOnce();
     await VmProvisioningWorker(
       work: SqliteVmProvisioningWorkRepository(database),
@@ -189,8 +197,19 @@ void main() {
       owner: 'collection-test',
     ).dispatchOnce();
     await TestRunProvisioningWorker(database: database).dispatchOnce();
+    return TestRunApplicationService(database: database).get(id);
+  }
+
+  Future<TestRun> prepareCollectingVm({
+    CleanupPolicy cleanup = CleanupPolicy.deleteOnSuccess,
+    bool retainOnFailure = true,
+  }) async {
+    final run = await prepareProvisionedVm(
+      cleanup: cleanup,
+      retainOnFailure: retainOnFailure,
+    );
     return SqliteTestRunRepository(database).transition(
-      id,
+      run.id,
       expectedState: TestRunState.startingVm,
       nextState: TestRunState.collecting,
       outcome: TestRunState.failed,
@@ -204,7 +223,7 @@ void main() {
   }
 
   test(
-    'collection retries storage faults with correlation and leaves a failed VM running',
+    'collected failure completes retention without stopping its running VM',
     () async {
       final run = await prepareCollectingVm();
       final runtime = await openRuntime();
@@ -284,11 +303,1014 @@ void main() {
               )
               as Map;
       expect(body['driver_generation'], running.status.driverGeneration);
+      final cleanup = (await TestRunCleanupWorker(
+        database: database,
+      ).dispatchOnce()).single;
+      expect(cleanup.completed, isTrue);
+      expect(cleanup.error, isNull);
+      expect(cleanup.testRunId, run.id);
+      expect(cleanup.operationId, run.operationId);
+      expect(cleanup.requestId, parent.requestId);
+      expect(cleanup.vmId, run.vmId);
+      expect(cleanup.driverGeneration, running.status.driverGeneration);
+      final finished = await TestRunApplicationService(
+        database: database,
+      ).get(run.id);
+      expect(finished.state, TestRunState.failed);
+      expect(finished.cleanupDecision, 'retain');
+      expect(finished.error, run.error);
+      expect(finished.completedAt, isNotNull);
+      final completedParent = (await SqliteOperationRepository(
+        database,
+      ).get(run.operationId))!;
+      expect(completedParent.state, OperationState.failed);
+      expect(completedParent.error, run.error);
+      expect(
+        (await artifactService().listForTestRun(run.id)).items,
+        contains(result),
+      );
       final retained = (await SqliteVmRepository(database).get(run.vmId!))!;
+      expect(retained, running);
       expect(retained.status.phase, VmPhase.running);
       expect(retained.status.desiredState, DesiredState.running);
       expect(retained.status.driverGeneration, running.status.driverGeneration);
       expect(runtime.drivers.activeSessionCount, 1);
+    },
+  );
+
+  test(
+    'an accepted deletion is recorded as failed retention before VM teardown',
+    () async {
+      final run = await prepareCollectingVm();
+      expect((await collector().dispatchOnce()).single.collected, isTrue);
+      final artifacts = (await artifactService().listForTestRun(run.id)).items;
+      final runtime = await openRuntime();
+      final deletion =
+          await SqliteVmLifecycleAcceptor(
+            database: database,
+            registry: runtime.registry,
+            idempotencyRetention: const Duration(days: 1),
+          ).lifecycle(
+            VmLifecycleCommand(
+              requestId: RequestId.generate(),
+              idempotencyKey: null,
+              requestBody: const [],
+              vmId: run.vmId!,
+              action: VmLifecycleAction.delete,
+            ),
+          );
+      final acceptedVm = (await SqliteVmRepository(database).get(run.vmId!))!;
+      // Acceptance fences the VM before its asynchronous delete command runs.
+      expect(acceptedVm.status.phase, VmPhase.stopped);
+      final cleaned = (await TestRunCleanupWorker(
+        database: database,
+      ).dispatchOnce()).single;
+      expect(cleaned.completed, isTrue);
+      expect(cleaned.error, isNull);
+      final completed = await TestRunApplicationService(
+        database: database,
+      ).get(run.id);
+      expect(completed.state, TestRunState.failed);
+      expect(completed.cleanupDecision, 'retain');
+      expect(completed.error, run.error);
+      final failure = (await SqliteEventRepository(database).list(
+        testRunId: run.id,
+      )).singleWhere((event) => event.type == 'test_run.failure_recorded');
+      expect(failure.vmId, run.vmId);
+      expect(failure.operationId, run.operationId);
+      final error = OperationError.fromJson(
+        failure.payload.toJson()['failure'],
+      );
+      expect(error.code, ErrorCode.vmOperationConflict);
+      expect(error.details.toJson()['phase'], 'cleaning_up');
+      expect(error.details.toJson()['vm_id'], run.vmId!.value);
+      expect(await SqliteVmRepository(database).get(run.vmId!), acceptedVm);
+      expect(
+        (await SqliteOperationRepository(
+          database,
+        ).get(deletion.operationId))!.state,
+        OperationState.pending,
+      );
+      expect((await artifactService().listForTestRun(run.id)).items, artifacts);
+      expect(
+        await TestRunCleanupWorker(database: database).dispatchOnce(),
+        isEmpty,
+      );
+    },
+  );
+
+  test(
+    'retention completion rolls back with its cancellation and retries after reopen',
+    () async {
+      final run = await prepareCollectingVm();
+      final cancellation = await TestRunApplicationService(database: database)
+          .cancelRun(
+            TestRunCancelCommand(
+              testRunId: run.id,
+              requestId: RequestId.generate(),
+              idempotencyKey: null,
+              requestBody: const [],
+            ),
+          );
+      expect((await collector().dispatchOnce()).single.collected, isTrue);
+      final before = await TestRunApplicationService(
+        database: database,
+      ).get(run.id);
+      final vm = await SqliteVmRepository(database).get(run.vmId!);
+      final artifacts = (await artifactService().listForTestRun(run.id)).items;
+      final events = await SqliteEventRepository(database).list();
+      final outbox = await SqliteEventRepository(
+        database,
+      ).readUnpublishedOutbox();
+      await database.transaction(
+        (db) => db.execute('''
+        CREATE TRIGGER reject_retention BEFORE INSERT ON events
+        WHEN NEW.type = 'test_run.completed'
+        BEGIN SELECT RAISE(ABORT, 'retention commit fault'); END
+      '''),
+      );
+      final fault = (await TestRunCleanupWorker(
+        database: database,
+      ).dispatchOnce()).single;
+      expect(fault.completed, isFalse);
+      expect(fault.error, isA<SqliteException>());
+      expect(fault.vmId, run.vmId);
+      expect(
+        await TestRunApplicationService(database: database).get(run.id),
+        before,
+      );
+      expect(await SqliteVmRepository(database).get(run.vmId!), vm);
+      expect(
+        (await SqliteOperationRepository(database).get(run.operationId))!.state,
+        OperationState.running,
+      );
+      expect(
+        (await SqliteOperationRepository(
+          database,
+        ).get(cancellation.operationId))!.state,
+        OperationState.pending,
+      );
+      expect(await SqliteEventRepository(database).list(), events);
+      expect(
+        (await SqliteEventRepository(
+          database,
+        ).readUnpublishedOutbox()).map((row) => row.key),
+        outbox.map((row) => row.key),
+      );
+
+      await database.transaction(
+        (db) => db.execute('DROP TRIGGER reject_retention'),
+      );
+      database.close();
+      database = await GaoVmDatabase.open('${temporary.path}/catalog.db');
+      expect(
+        (await TestRunCleanupWorker(
+          database: database,
+        ).dispatchOnce()).single.completed,
+        isTrue,
+      );
+      final completed = await TestRunApplicationService(
+        database: database,
+      ).get(run.id);
+      expect(completed.state, TestRunState.failed);
+      expect(completed.cleanupDecision, 'retain');
+      expect(completed.error, run.error);
+      expect(await SqliteVmRepository(database).get(run.vmId!), vm);
+      expect((await artifactService().listForTestRun(run.id)).items, artifacts);
+      final action = (await SqliteOperationRepository(
+        database,
+      ).get(cancellation.operationId))!;
+      expect(action.state, OperationState.failed);
+      expect(action.error, run.error);
+      expect(
+        (await SqliteEventRepository(database).list(
+          testRunId: run.id,
+        )).where((event) => event.type == 'test_run.completed'),
+        hasLength(1),
+      );
+      expect(
+        await TestRunCleanupWorker(database: database).dispatchOnce(),
+        isEmpty,
+      );
+    },
+  );
+
+  test(
+    'failed retain and delete-on-success policies leave their owned VMs unchanged',
+    () async {
+      final runs = <TestRun>[];
+      for (final policy in [
+        CleanupPolicy.retain,
+        CleanupPolicy.deleteOnSuccess,
+      ]) {
+        for (final retainOnFailure in [true, false]) {
+          runs.add(
+            await prepareCollectingVm(
+              cleanup: policy,
+              retainOnFailure: retainOnFailure,
+            ),
+          );
+        }
+      }
+      final vms = await SqliteVmRepository(database).list();
+      final collected = await collector().dispatchOnce();
+      expect(collected, hasLength(runs.length));
+      expect(
+        collected.every((result) => result.collected && result.error == null),
+        isTrue,
+      );
+      final results = await TestRunCleanupWorker(
+        database: database,
+      ).dispatchOnce();
+      expect(results, hasLength(runs.length));
+      expect(
+        results.every((result) => result.completed && result.error == null),
+        isTrue,
+      );
+      for (final run in runs) {
+        final finished = await TestRunApplicationService(
+          database: database,
+        ).get(run.id);
+        expect(finished.state, TestRunState.failed);
+        expect(finished.cleanupDecision, 'retain');
+        expect(finished.error, run.error);
+        expect(
+          (await artifactService().listForTestRun(run.id)).items,
+          hasLength(1),
+        );
+      }
+      expect(await SqliteVmRepository(database).list(), vms);
+    },
+  );
+
+  test(
+    'lost provisioning ownership blocks one retention without starving another',
+    () async {
+      final run = await prepareCollectingVm();
+      final other = await prepareCollectingVm();
+      final child = (await SqliteOperationRepository(database).list(
+        resourceType: ResourceType.virtualMachine,
+        resourceId: run.vmId!,
+      )).single;
+      expect(
+        (await collector().dispatchOnce()).every((result) => result.collected),
+        isTrue,
+      );
+      final artifacts = (await artifactService().listForTestRun(run.id)).items;
+      final vm = await SqliteVmRepository(database).get(run.vmId!);
+      await database.transaction(
+        (db) => db.execute(
+          'DELETE FROM test_run_vm_provisioning WHERE test_run_id = ?',
+          [run.id.value],
+        ),
+      );
+      final worker = TestRunCleanupWorker(database: database);
+      final outcomes = await worker.dispatchOnce();
+      final blocked = outcomes.singleWhere((item) => item.testRunId == run.id);
+      expect(blocked.completed, isFalse);
+      expect(blocked.error, isA<StateError>());
+      expect(blocked.vmId, run.vmId);
+      expect(blocked.operationId, run.operationId);
+      expect(
+        outcomes.singleWhere((item) => item.testRunId == other.id).completed,
+        isTrue,
+      );
+      expect(
+        (await TestRunApplicationService(database: database).get(run.id)).state,
+        TestRunState.collecting,
+      );
+      expect(
+        (await SqliteOperationRepository(database).get(run.operationId))!.state,
+        OperationState.running,
+      );
+      expect(await SqliteVmRepository(database).get(run.vmId!), vm);
+
+      await database.transaction(
+        (db) => db.execute(
+          'INSERT INTO test_run_vm_provisioning(test_run_id, vm_id, operation_id) VALUES (?, ?, ?)',
+          [run.id.value, run.vmId!.value, child.id.value],
+        ),
+      );
+      expect((await worker.dispatchOnce()).single.completed, isTrue);
+      expect(
+        (await TestRunApplicationService(
+          database: database,
+        ).get(run.id)).cleanupDecision,
+        'retain',
+      );
+      expect((await artifactService().listForTestRun(run.id)).items, artifacts);
+      for (final id in [run.id, other.id]) {
+        expect(
+          (await SqliteEventRepository(database).list(
+            testRunId: id,
+          )).where((event) => event.type == 'test_run.completed'),
+          hasLength(1),
+        );
+      }
+      expect(await worker.dispatchOnce(), isEmpty);
+    },
+  );
+
+  test(
+    'an already deleted VM completes failed retention with a durable diagnostic',
+    () async {
+      final run = await prepareCollectingVm();
+      expect((await collector().dispatchOnce()).single.collected, isTrue);
+      final runtime = await openRuntime();
+      final deletion =
+          await SqliteVmLifecycleAcceptor(
+            database: database,
+            registry: runtime.registry,
+            idempotencyRetention: const Duration(days: 1),
+          ).lifecycle(
+            VmLifecycleCommand(
+              requestId: RequestId.generate(),
+              idempotencyKey: null,
+              requestBody: const [],
+              vmId: run.vmId!,
+              action: VmLifecycleAction.delete,
+            ),
+          );
+      expect((await runtime.commands.dispatchOnce()).single.error, isNull);
+      final deleted =
+          await SqliteOperationWaiter(
+            operations: SqliteOperationRepository(database),
+            events: SqliteDurableEventFeed(
+              database,
+              pollInterval: const Duration(milliseconds: 1),
+            ),
+          ).wait(
+            OperationWaitCommand(
+              operationId: deletion.operationId,
+              timeout: const Duration(seconds: 5),
+            ),
+          );
+      expect(deleted.state, OperationState.succeeded);
+      expect(await SqliteVmRepository(database).get(run.vmId!), isNull);
+      expect(
+        await Directory('${bundles.path}/${run.vmId!.value}.gaovm').exists(),
+        isFalse,
+      );
+
+      final cleanup = (await TestRunCleanupWorker(
+        database: database,
+      ).dispatchOnce()).single;
+      expect(cleanup.completed, isTrue);
+      expect(cleanup.error, isNull);
+      final completed = await TestRunApplicationService(
+        database: database,
+      ).get(run.id);
+      expect(completed.state, TestRunState.failed);
+      expect(completed.error, run.error);
+      final failure = (await SqliteEventRepository(database).list(
+        testRunId: run.id,
+      )).singleWhere((event) => event.type == 'test_run.failure_recorded');
+      final error = OperationError.fromJson(
+        failure.payload.toJson()['failure'],
+      );
+      expect(error.code, ErrorCode.vmNotFound);
+      expect(error.details.toJson()['phase'], 'cleaning_up');
+      final artifact = (await artifactService().listForTestRun(
+        run.id,
+      )).items.single;
+      final body =
+          jsonDecode(
+                await utf8.decoder
+                    .bind((await artifactService().download(artifact.id)).bytes)
+                    .join(),
+              )
+              as Map;
+      expect((body['execution'] as Map)['error'], run.error!.toJson());
+      expect(
+        await TestRunCleanupWorker(database: database).dispatchOnce(),
+        isEmpty,
+      );
+    },
+  );
+
+  test(
+    'always-delete failure awaits durable VM deletion and preserves collected artifacts',
+    () async {
+      final run = await prepareCollectingVm(
+        cleanup: CleanupPolicy.alwaysDelete,
+        retainOnFailure: false,
+      );
+      expect((await collector().dispatchOnce()).single.collected, isTrue);
+      final artifacts = (await artifactService().listForTestRun(run.id)).items;
+      final runtime = await openRuntime();
+      final worker = TestRunCleanupWorker(
+        database: database,
+        registry: runtime.registry,
+      );
+      final accepted = (await worker.dispatchOnce()).single;
+      expect(accepted.error, isNull);
+      expect(accepted.completed, isFalse);
+      final cleaning = await TestRunApplicationService(
+        database: database,
+      ).get(run.id);
+      expect(cleaning.state, TestRunState.cleaningUp);
+      expect(cleaning.cleanupDecision, 'delete');
+      expect(
+        (await SqliteOperationRepository(database).get(run.operationId))!.state,
+        OperationState.running,
+      );
+      expect(
+        await Directory('${bundles.path}/${run.vmId!.value}.gaovm').exists(),
+        isTrue,
+      );
+      final deletion = (await SqliteOperationRepository(database).list(
+        resourceType: ResourceType.virtualMachine,
+        resourceId: run.vmId!,
+      )).singleWhere((operation) => operation.type == 'vm.delete');
+      expect(deletion.state, OperationState.pending);
+      expect((await worker.dispatchOnce()).single.completed, isFalse);
+      expect((await runtime.commands.dispatchOnce()).single.error, isNull);
+      final deleted =
+          await SqliteOperationWaiter(
+            operations: SqliteOperationRepository(database),
+            events: SqliteDurableEventFeed(
+              database,
+              pollInterval: const Duration(milliseconds: 1),
+            ),
+          ).wait(
+            OperationWaitCommand(
+              operationId: deletion.id,
+              timeout: const Duration(seconds: 5),
+            ),
+          );
+      expect(deleted.state, OperationState.succeeded);
+      final finished = (await worker.dispatchOnce()).single;
+      expect(finished.error, isNull);
+      expect(finished.completed, isTrue);
+      final completed = await TestRunApplicationService(
+        database: database,
+      ).get(run.id);
+      expect(completed.state, TestRunState.failed);
+      expect(completed.error, run.error);
+      expect(completed.cleanupDecision, 'delete');
+      expect(await SqliteVmRepository(database).get(run.vmId!), isNull);
+      expect(
+        await Directory('${bundles.path}/${run.vmId!.value}.gaovm').exists(),
+        isFalse,
+      );
+      expect((await artifactService().listForTestRun(run.id)).items, artifacts);
+      final body =
+          jsonDecode(
+                await utf8.decoder
+                    .bind(
+                      (await artifactService().download(
+                        artifacts.single.id,
+                      )).bytes,
+                    )
+                    .join(),
+              )
+              as Map;
+      expect((body['execution'] as Map)['error'], run.error!.toJson());
+      expect(
+        (await ImageRepository(database).get(source.id))!.digest,
+        source.digest,
+      );
+      expect(
+        await (await ImageStore(
+          database,
+          Directory(images.path),
+        ).objectFile(source.id, 'payload')).readAsString(),
+        'root disk',
+      );
+      expect(await worker.dispatchOnce(), isEmpty);
+      expect(
+        (await SqliteOperationRepository(database).list(
+          resourceType: ResourceType.virtualMachine,
+          resourceId: run.vmId!,
+        )).where((operation) => operation.type == 'vm.delete'),
+        hasLength(1),
+      );
+    },
+  );
+
+  test(
+    'v14 collected runs recover cleanup acceptance rollback and replay one immutable intent',
+    () async {
+      final run = await prepareCollectingVm(
+        cleanup: CleanupPolicy.alwaysDelete,
+        retainOnFailure: false,
+      );
+      expect((await collector().dispatchOnce()).single.collected, isTrue);
+      final before = await TestRunApplicationService(
+        database: database,
+      ).get(run.id);
+      final vm = await SqliteVmRepository(database).get(run.vmId!);
+      final artifacts = (await artifactService().listForTestRun(run.id)).items;
+      database.close();
+      final legacy = sqlite3.open('${temporary.path}/catalog.db');
+      legacy.execute('DROP INDEX test_runs_cleaning_up_idx');
+      legacy.execute('DROP TABLE test_run_vm_cleanup');
+      legacy.execute('DELETE FROM schema_migrations WHERE version = 15');
+      legacy.userVersion = 14;
+      legacy.dispose();
+      database = await GaoVmDatabase.open('${temporary.path}/catalog.db');
+      expect(database.schemaVersion, 15);
+      expect(
+        await TestRunApplicationService(database: database).get(run.id),
+        before,
+      );
+      expect(await SqliteVmRepository(database).get(run.vmId!), vm);
+      expect((await artifactService().listForTestRun(run.id)).items, artifacts);
+
+      final runtime = await openRuntime();
+      final worker = TestRunCleanupWorker(
+        database: database,
+        registry: runtime.registry,
+      );
+      final events = await SqliteEventRepository(database).list();
+      final outbox = await SqliteEventRepository(
+        database,
+      ).readUnpublishedOutbox();
+      await database.transaction(
+        (db) => db.execute('''
+        CREATE TRIGGER reject_cleanup BEFORE INSERT ON events
+        WHEN NEW.type = 'test_run.vm_cleanup_accepted'
+        BEGIN SELECT RAISE(ABORT, 'cleanup acceptance fault'); END
+      '''),
+      );
+      final fault = (await worker.dispatchOnce()).single;
+      expect(fault.error, isA<SqliteException>());
+      expect(fault.completed, isFalse);
+      expect(
+        await TestRunApplicationService(database: database).get(run.id),
+        before,
+      );
+      expect(await SqliteVmRepository(database).get(run.vmId!), vm);
+      expect(await SqliteEventRepository(database).list(), events);
+      expect(
+        (await SqliteEventRepository(
+          database,
+        ).readUnpublishedOutbox()).map((row) => row.key),
+        outbox.map((row) => row.key),
+      );
+      expect(
+        (await SqliteOperationRepository(database).list(
+          resourceType: ResourceType.virtualMachine,
+          resourceId: run.vmId!,
+        )).where((operation) => operation.type == 'vm.delete'),
+        isEmpty,
+      );
+      await database.read(
+        (db) => expect(db.select('SELECT * FROM test_run_vm_cleanup'), isEmpty),
+      );
+      await database.transaction(
+        (db) => db.execute('DROP TRIGGER reject_cleanup'),
+      );
+      expect((await worker.dispatchOnce()).single.error, isNull);
+      final deletion = (await SqliteOperationRepository(database).list(
+        resourceType: ResourceType.virtualMachine,
+        resourceId: run.vmId!,
+      )).singleWhere((operation) => operation.type == 'vm.delete');
+      await database.read((db) {
+        expect(
+          () => db.execute("UPDATE test_run_vm_cleanup SET action = 'stop'"),
+          throwsA(isA<SqliteException>()),
+        );
+      });
+      await runtime.close();
+      database.close();
+      database = await GaoVmDatabase.open('${temporary.path}/catalog.db');
+      final recovered = await openRuntime();
+      final recovery = TestRunCleanupWorker(
+        database: database,
+        registry: recovered.registry,
+      );
+      expect((await recovery.dispatchOnce()).single.completed, isFalse);
+      expect((await recovered.commands.dispatchOnce()).single.error, isNull);
+      expect(
+        (await SqliteOperationWaiter(
+              operations: SqliteOperationRepository(database),
+              events: SqliteDurableEventFeed(
+                database,
+                pollInterval: const Duration(milliseconds: 1),
+              ),
+            ).wait(
+              OperationWaitCommand(
+                operationId: deletion.id,
+                timeout: const Duration(seconds: 5),
+              ),
+            ))
+            .state,
+        OperationState.succeeded,
+      );
+      expect((await recovery.dispatchOnce()).single.completed, isTrue);
+      final completed = await TestRunApplicationService(
+        database: database,
+      ).get(run.id);
+      expect(completed.state, TestRunState.failed);
+      expect(completed.error, run.error);
+      expect(completed.cleanupDecision, 'delete');
+      expect(await SqliteVmRepository(database).get(run.vmId!), isNull);
+      expect((await artifactService().listForTestRun(run.id)).items, artifacts);
+      expect(
+        (await SqliteOperationRepository(database).list(
+          resourceType: ResourceType.virtualMachine,
+          resourceId: run.vmId!,
+        )).where((operation) => operation.type == 'vm.delete'),
+        hasLength(1),
+      );
+      for (final type in [
+        'test_run.vm_cleanup_accepted',
+        'test_run.completed',
+      ]) {
+        expect(
+          (await SqliteEventRepository(
+            database,
+          ).list(testRunId: run.id)).where((event) => event.type == type),
+          hasLength(1),
+        );
+      }
+      final body =
+          jsonDecode(
+                await utf8.decoder
+                    .bind(
+                      (await artifactService().download(
+                        artifacts.single.id,
+                      )).bytes,
+                    )
+                    .join(),
+              )
+              as Map;
+      expect((body['execution'] as Map)['error'], run.error!.toJson());
+      expect(await recovery.dispatchOnce(), isEmpty);
+    },
+  );
+
+  test(
+    'destructive cleanup preserves a newer user start and records its conflict',
+    () async {
+      final run = await prepareCollectingVm(
+        cleanup: CleanupPolicy.alwaysDelete,
+        retainOnFailure: false,
+      );
+      expect((await collector().dispatchOnce()).single.collected, isTrue);
+      final artifacts = (await artifactService().listForTestRun(run.id)).items;
+      final runtime = await openRuntime();
+      final start =
+          await SqliteVmLifecycleAcceptor(
+            database: database,
+            registry: runtime.registry,
+            idempotencyRetention: const Duration(days: 1),
+          ).lifecycle(
+            VmLifecycleCommand(
+              requestId: RequestId.generate(),
+              idempotencyKey: null,
+              requestBody: const [],
+              vmId: run.vmId!,
+              action: VmLifecycleAction.start,
+            ),
+          );
+      expect((await runtime.commands.dispatchOnce()).single.error, isNull);
+      await (await runtime.registry.get(run.vmId!))!.waitUntilIdle();
+      runtime.clock.runUntilIdle();
+      expect(
+        (await SqliteOperationWaiter(
+              operations: SqliteOperationRepository(database),
+              events: SqliteDurableEventFeed(
+                database,
+                pollInterval: const Duration(milliseconds: 1),
+              ),
+            ).wait(
+              OperationWaitCommand(
+                operationId: start.operationId,
+                timeout: const Duration(seconds: 5),
+              ),
+            ))
+            .state,
+        OperationState.succeeded,
+      );
+      final running = (await SqliteVmRepository(database).get(run.vmId!))!;
+      expect(running.status.phase, VmPhase.running);
+      final result = (await TestRunCleanupWorker(
+        database: database,
+        registry: runtime.registry,
+      ).dispatchOnce()).single;
+      expect(result.error, isNull);
+      expect(result.completed, isTrue);
+      final completed = await TestRunApplicationService(
+        database: database,
+      ).get(run.id);
+      expect(completed.state, TestRunState.failed);
+      expect(completed.error, run.error);
+      expect(await SqliteVmRepository(database).get(run.vmId!), running);
+      expect(runtime.drivers.activeSessionCount, 1);
+      expect((await artifactService().listForTestRun(run.id)).items, artifacts);
+      final failure = (await SqliteEventRepository(database).list(
+        testRunId: run.id,
+      )).singleWhere((event) => event.type == 'test_run.failure_recorded');
+      final error = OperationError.fromJson(
+        failure.payload.toJson()['failure'],
+      );
+      expect(error.code, ErrorCode.vmOperationConflict);
+      expect(
+        error.details.toJson()['driver_generation'],
+        running.status.driverGeneration,
+      );
+      expect(
+        (await SqliteOperationRepository(database).list(
+          resourceType: ResourceType.virtualMachine,
+          resourceId: run.vmId!,
+        )).where(
+          (operation) =>
+              operation.type == 'vm.delete' || operation.type == 'vm.stop',
+        ),
+        isEmpty,
+      );
+    },
+  );
+
+  test(
+    'cleanup deletion failure preserves foreign bundle content and the primary test error',
+    () async {
+      final run = await prepareCollectingVm(
+        cleanup: CleanupPolicy.alwaysDelete,
+        retainOnFailure: false,
+      );
+      expect((await collector().dispatchOnce()).single.collected, isTrue);
+      final artifacts = (await artifactService().listForTestRun(run.id)).items;
+      final foreign = await File(
+        '${bundles.path}/${run.vmId!.value}.gaovm/artifacts/foreign-result',
+      ).writeAsString('unowned evidence');
+      final runtime = await openRuntime();
+      final worker = TestRunCleanupWorker(
+        database: database,
+        registry: runtime.registry,
+      );
+      expect((await worker.dispatchOnce()).single.error, isNull);
+      final deletion = (await SqliteOperationRepository(database).list(
+        resourceType: ResourceType.virtualMachine,
+        resourceId: run.vmId!,
+      )).singleWhere((operation) => operation.type == 'vm.delete');
+      expect((await runtime.commands.dispatchOnce()).single.error, isNull);
+      final failed =
+          await SqliteOperationWaiter(
+            operations: SqliteOperationRepository(database),
+            events: SqliteDurableEventFeed(
+              database,
+              pollInterval: const Duration(milliseconds: 1),
+            ),
+          ).wait(
+            OperationWaitCommand(
+              operationId: deletion.id,
+              timeout: const Duration(seconds: 5),
+            ),
+          );
+      expect(failed.state, OperationState.failed);
+      expect(failed.error, isNotNull);
+      final result = (await worker.dispatchOnce()).single;
+      expect(result.error, isNull);
+      expect(result.completed, isTrue);
+      final completed = await TestRunApplicationService(
+        database: database,
+      ).get(run.id);
+      expect(completed.state, TestRunState.failed);
+      expect(completed.error, run.error);
+      expect(
+        (await SqliteOperationRepository(database).get(run.operationId))!.error,
+        run.error,
+      );
+      final failure = (await SqliteEventRepository(database).list(
+        testRunId: run.id,
+      )).singleWhere((event) => event.type == 'test_run.failure_recorded');
+      expect(
+        OperationError.fromJson(failure.payload.toJson()['failure']),
+        failed.error,
+      );
+      expect(await SqliteVmRepository(database).get(run.vmId!), isNotNull);
+      expect(await foreign.readAsString(), 'unowned evidence');
+      expect(
+        await File(
+          '${bundles.path}/${run.vmId!.value}.gaovm/disks/root.raw',
+        ).exists(),
+        isTrue,
+      );
+      expect((await artifactService().listForTestRun(run.id)).items, artifacts);
+      expect(await worker.dispatchOnce(), isEmpty);
+    },
+  );
+
+  test(
+    'delete-on-success stops its running VM before completing the successful run',
+    () async {
+      final run = await prepareProvisionedVm();
+      final runtime = await openRuntime();
+      final startWorker = TestRunVmStartWorker(
+        database: database,
+        registry: runtime.registry,
+      );
+      expect((await startWorker.dispatchOnce()).single.error, isNull);
+      expect((await runtime.commands.dispatchOnce()).single.error, isNull);
+      final controller = (await runtime.registry.get(run.vmId!))!;
+      await controller.waitUntilIdle();
+      runtime.clock.runUntilIdle();
+      final start = (await SqliteOperationRepository(database).list(
+        resourceType: ResourceType.virtualMachine,
+        resourceId: run.vmId!,
+      )).singleWhere((operation) => operation.type == 'vm.start');
+      final waiter = SqliteOperationWaiter(
+        operations: SqliteOperationRepository(database),
+        events: SqliteDurableEventFeed(
+          database,
+          pollInterval: const Duration(milliseconds: 1),
+        ),
+      );
+      expect(
+        (await waiter.wait(
+          OperationWaitCommand(
+            operationId: start.id,
+            timeout: const Duration(seconds: 5),
+          ),
+        )).state,
+        OperationState.succeeded,
+      );
+      expect((await startWorker.dispatchOnce()).single.error, isNull);
+      final running = (await SqliteVmRepository(database).get(run.vmId!))!;
+      expect(running.status.phase, VmPhase.running);
+      final runs = SqliteTestRunRepository(database);
+      // Supply the upstream execution boundary; native guest exec is not wired.
+      await runs.transition(
+        run.id,
+        expectedState: TestRunState.waitingReady,
+        nextState: TestRunState.runningSteps,
+      );
+      await runs.startStep(run.id, index: 0);
+      await runs.finishStep(
+        run.id,
+        index: 0,
+        state: TestStepState.succeeded,
+        result: JsonObjectValue.fromJson({'exit_code': 0}),
+      );
+      await runs.transition(
+        run.id,
+        expectedState: TestRunState.runningSteps,
+        nextState: TestRunState.collecting,
+        outcome: TestRunState.succeeded,
+      );
+      expect((await collector().dispatchOnce()).single.collected, isTrue);
+      final artifacts = (await artifactService().listForTestRun(run.id)).items;
+      final worker = TestRunCleanupWorker(
+        database: database,
+        registry: runtime.registry,
+      );
+      final accepted = (await worker.dispatchOnce()).single;
+      expect(accepted.error, isNull);
+      expect(accepted.completed, isFalse);
+      expect(accepted.driverGeneration, running.status.driverGeneration);
+      expect(
+        (await TestRunApplicationService(database: database).get(run.id)).state,
+        TestRunState.cleaningUp,
+      );
+      final deletion = (await SqliteOperationRepository(database).list(
+        resourceType: ResourceType.virtualMachine,
+        resourceId: run.vmId!,
+      )).singleWhere((operation) => operation.type == 'vm.delete');
+      expect((await runtime.commands.dispatchOnce()).single.error, isNull);
+      await controller.waitUntilIdle();
+      runtime.clock.runUntilIdle();
+      expect(
+        (await waiter.wait(
+          OperationWaitCommand(
+            operationId: deletion.id,
+            timeout: const Duration(seconds: 5),
+          ),
+        )).state,
+        OperationState.succeeded,
+      );
+      final finished = (await worker.dispatchOnce()).single;
+      expect(finished.error, isNull);
+      expect(finished.completed, isTrue);
+      final completed = await TestRunApplicationService(
+        database: database,
+      ).get(run.id);
+      expect(completed.state, TestRunState.succeeded);
+      expect(completed.cleanupDecision, 'delete');
+      expect(completed.steps.single.state, TestStepState.succeeded);
+      expect(
+        (await SqliteOperationRepository(database).get(run.operationId))!.state,
+        OperationState.succeeded,
+      );
+      expect(await SqliteVmRepository(database).get(run.vmId!), isNull);
+      expect((await artifactService().listForTestRun(run.id)).items, artifacts);
+      expect(runtime.drivers.activeSessionCount, 0);
+      expect(await SqliteHostLeaseRepository(database).list(), isEmpty);
+      expect(await worker.dispatchOnce(), isEmpty);
+    },
+  );
+
+  test(
+    'cancelled retain cleanup stops the running VM before completing cancellation',
+    () async {
+      final run = await prepareProvisionedVm(cleanup: CleanupPolicy.retain);
+      final runtime = await openRuntime();
+      final startWorker = TestRunVmStartWorker(
+        database: database,
+        registry: runtime.registry,
+      );
+      await startWorker.dispatchOnce();
+      expect((await runtime.commands.dispatchOnce()).single.error, isNull);
+      final controller = (await runtime.registry.get(run.vmId!))!;
+      await controller.waitUntilIdle();
+      runtime.clock.runUntilIdle();
+      final waiter = SqliteOperationWaiter(
+        operations: SqliteOperationRepository(database),
+        events: SqliteDurableEventFeed(
+          database,
+          pollInterval: const Duration(milliseconds: 1),
+        ),
+      );
+      final start = (await SqliteOperationRepository(database).list(
+        resourceType: ResourceType.virtualMachine,
+        resourceId: run.vmId!,
+      )).singleWhere((operation) => operation.type == 'vm.start');
+      expect(
+        (await waiter.wait(
+          OperationWaitCommand(
+            operationId: start.id,
+            timeout: const Duration(seconds: 5),
+          ),
+        )).state,
+        OperationState.succeeded,
+      );
+      await startWorker.dispatchOnce();
+      final running = (await SqliteVmRepository(database).get(run.vmId!))!;
+      final cancellation = await TestRunApplicationService(database: database)
+          .cancelRun(
+            TestRunCancelCommand(
+              testRunId: run.id,
+              requestId: RequestId.generate(),
+              idempotencyKey: null,
+              requestBody: const [],
+            ),
+          );
+      await SqliteTestRunRepository(database).transition(
+        run.id,
+        expectedState: TestRunState.waitingReady,
+        nextState: TestRunState.collecting,
+        outcome: TestRunState.cancelled,
+      );
+      expect((await collector().dispatchOnce()).single.collected, isTrue);
+      final worker = TestRunCleanupWorker(
+        database: database,
+        registry: runtime.registry,
+      );
+      final accepted = (await worker.dispatchOnce()).single;
+      expect(accepted.error, isNull);
+      expect(accepted.completed, isFalse);
+      expect(
+        (await SqliteOperationRepository(
+          database,
+        ).get(cancellation.operationId))!.state,
+        OperationState.pending,
+      );
+      final stop = (await SqliteOperationRepository(database).list(
+        resourceType: ResourceType.virtualMachine,
+        resourceId: run.vmId!,
+      )).singleWhere((operation) => operation.type == 'vm.stop');
+      expect((await runtime.commands.dispatchOnce()).single.error, isNull);
+      await controller.waitUntilIdle();
+      runtime.clock.runUntilIdle();
+      expect(
+        (await waiter.wait(
+          OperationWaitCommand(
+            operationId: stop.id,
+            timeout: const Duration(seconds: 5),
+          ),
+        )).state,
+        OperationState.succeeded,
+      );
+      expect((await worker.dispatchOnce()).single.completed, isTrue);
+      final finished = await TestRunApplicationService(
+        database: database,
+      ).get(run.id);
+      expect(finished.state, TestRunState.cancelled);
+      expect(finished.cleanupDecision, 'retain');
+      expect(
+        (await SqliteOperationRepository(
+          database,
+        ).get(cancellation.operationId))!.state,
+        OperationState.succeeded,
+      );
+      final retained = (await SqliteVmRepository(database).get(run.vmId!))!;
+      expect(retained.status.phase, VmPhase.stopped);
+      expect(retained.status.desiredState, DesiredState.stopped);
+      expect(retained.status.driverGeneration, running.status.driverGeneration);
+      expect(retained.spec, running.spec);
+      expect(
+        await Directory('${bundles.path}/${run.vmId!.value}.gaovm').exists(),
+        isTrue,
+      );
+      expect(
+        (await artifactService().listForTestRun(run.id)).items,
+        hasLength(1),
+      );
+      expect(runtime.drivers.activeSessionCount, 0);
+      expect(await SqliteHostLeaseRepository(database).list(), isEmpty);
+      expect(await worker.dispatchOnce(), isEmpty);
     },
   );
 

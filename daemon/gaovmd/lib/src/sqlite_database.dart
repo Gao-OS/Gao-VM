@@ -19,6 +19,7 @@ const coreTableNames = <String>{
   'test_runs',
   'test_run_vm_provisioning',
   'test_run_vm_start',
+  'test_run_vm_cleanup',
   'test_run_collection',
   'test_run_collection_items',
   'test_steps',
@@ -29,7 +30,7 @@ const coreTableNames = <String>{
   'outbox',
 };
 
-const _latestSchemaVersion = 14;
+const _latestSchemaVersion = 15;
 final _transactionContextKey = Object();
 final _savepointScopeKey = Object();
 final _transactionGates = <String, _AsyncGate>{};
@@ -559,6 +560,23 @@ const _migrations = <_Migration>[
       CHECK ((state = 'failed' AND error_json IS NOT NULL) OR (state <> 'failed' AND error_json IS NULL))
     );
     CREATE INDEX test_runs_collecting_idx ON test_runs(id) WHERE state = 'collecting';
+  '''),
+  _Migration(15, '''
+    CREATE TABLE test_run_vm_cleanup (
+      test_run_id TEXT PRIMARY KEY REFERENCES test_runs(id),
+      vm_id TEXT NOT NULL UNIQUE REFERENCES vms(id),
+      operation_id TEXT NOT NULL UNIQUE REFERENCES operations(id),
+      action TEXT NOT NULL CHECK (action IN ('stop', 'delete')),
+      intent_revision INTEGER NOT NULL CHECK (intent_revision > 0),
+      spec_generation INTEGER NOT NULL CHECK (spec_generation > 0),
+      driver_generation INTEGER NOT NULL CHECK (driver_generation >= 0)
+    );
+    CREATE TRIGGER test_run_vm_cleanup_immutable
+      BEFORE UPDATE ON test_run_vm_cleanup
+      BEGIN
+        SELECT RAISE(ABORT, 'TestRun cleanup identity is immutable');
+      END;
+    CREATE INDEX test_runs_cleaning_up_idx ON test_runs(id) WHERE state = 'cleaning_up';
   '''),
 ];
 
