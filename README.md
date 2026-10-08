@@ -178,17 +178,21 @@ Implemented commands at this checkpoint:
 - `vm delete VM_ID`
 - `vm start/stop/restart/kill VM_ID`
 - `vm wait VM_ID --condition CONDITION --timeout-seconds N` (add `--service-name NAME` for `guest_service_ready`)
+- `image import --body-json JSON`, `image list`, `image get IMG_ID`, `image delete IMG_ID`
 - `operation get/cancel OP_ID`, `operation wait OP_ID --timeout-seconds N`
 - `operation list`
 - `events [--after-sequence N] [--vm-id VM_ID] [--operation-id OP_ID] [--test-run-id TR_ID]`
 
 `vm list` accepts `--label-selector`, `--sort`, `--limit`, and `--cursor`.
+`image list` accepts `--label-selector`, `--limit`, and `--cursor`.
 `operation list` accepts `--resource-type`, `--resource-id`, `--state`, `--limit`,
 and `--cursor`. Page sizes are 1–200; pass the returned `next_cursor` unchanged
 with the same filters and sort to resume. Filtering and cursor validation remain
 owned by the public API.
 
-Targets must be real server-generated `vm_`/`op_`/`tr_` ULIDs. There is no implicit or name-based `default` VM. Create accepts the public `api_version`, `kind`, `metadata`, and `spec` object; patch accepts the public metadata/spec patch object, not the legacy config format below.
+Targets must be real server-generated `vm_`/`img_`/`op_`/`tr_` ULIDs. There is no implicit or name-based `default` VM. Create accepts the public `api_version`, `kind`, `metadata`, and `spec` object; patch accepts the public metadata/spec patch object, not the legacy config format below.
+
+Image import accepts the public `source_path`, `type`, and `architecture` (`arm64`) object, with optional image metadata and labels. The source path must be readable by the daemon. Import and deletion return durable Operations; use `operation get/wait/cancel` to track them. `image get` searches the paginated public catalog because the frozen API has no image-by-ID GET endpoint. Its local deadline covers the whole catalog walk; a missing image returns exit `1` with `IMAGE_NOT_FOUND`, and malformed pages or repeated cursors return exit `4`.
 
 All output is JSON; `--json` selects compact output for ordinary results and diagnostics. Events always use one compact Event JSON object per line, with SSE comments omitted. Successful results go to stdout and Problems/local diagnostics to stderr. Exit codes are `0` for success or accepted work, `1` for API failure or a failed/cancelled waited Operation, `2` for usage errors, `3` for transport failure, `4` for invalid server responses, `124` for a deadline or `WAIT_TIMEOUT`, `130` for event-stream SIGINT, and `143` for event-stream SIGTERM.
 
@@ -209,7 +213,7 @@ dart run bin/gaovm_cli.dart --socket-path /absolute/state/run/api.sock events --
 dart test
 ```
 
-Coverage includes real public-socket requests, the deletion request contract, SQLite-backed filtered/paginated catalog queries, create/replay/query/cancellation with durable Operation waits, and resumable/live event streaming. Executable signal tests verify idle subscription cleanup and stable JSON/exit codes. This is a partial M7 checkpoint: image, guest, TestRun/artifact commands, doctor, and the legacy alias adapter remain pending. It does not establish installed-daemon or Apple Silicon VM boot/display acceptance.
+Coverage includes real public-socket requests, VM/image deletion contracts, SQLite-backed filtered/paginated catalog queries, image lookup across pages, create/import/replay/query/cancellation with durable Operation waits, and resumable/live event streaming. Executable signal tests verify idle subscription cleanup and stable JSON/exit codes. This is a partial M7 checkpoint: guest, TestRun/artifact commands, doctor, and the legacy alias adapter remain pending. It does not establish installed-daemon or Apple Silicon VM boot/display acceptance.
 
 ## Legacy Prototype CLI Reference (Not Supported)
 

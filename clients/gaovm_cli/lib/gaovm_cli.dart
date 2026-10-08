@@ -43,6 +43,10 @@ Future<int> runCli(
             'vm restart VM_ID',
             'vm kill VM_ID',
             'vm wait VM_ID',
+            'image import',
+            'image list',
+            'image get IMG_ID',
+            'image delete IMG_ID',
             'operation get OP_ID',
             'operation list',
             'operation cancel OP_ID',
@@ -56,15 +60,17 @@ Future<int> runCli(
             '--operation-id OP_ID': 'events: Operation filter',
             '--test-run-id TR_ID': 'events: TestRun filter',
             '--label-selector SELECTOR':
-                'vm list: comma-separated label filters',
+                'vm/image list: comma-separated label filters',
             '--sort FIELD':
                 'vm list: created_at, name, id; prefix - to descend',
-            '--limit N': 'vm/operation list: 1-200 items per page',
-            '--cursor CURSOR': 'vm/operation list: unchanged next_cursor value',
+            '--limit N': 'vm/image/operation list: 1-200 items per page',
+            '--cursor CURSOR':
+                'vm/image/operation list: unchanged next_cursor value',
             '--resource-type TYPE': 'operation list: resource type filter',
             '--resource-id ID': 'operation list: resource ID filter',
             '--state STATE': 'operation list: operation state filter',
-            '--body-json JSON': 'required by vm create and vm patch',
+            '--body-json JSON':
+                'required by vm create, vm patch, and image import',
             '--if-match REVISION': 'required by vm patch',
             '--condition CONDITION': 'required by vm wait',
             '--service-name NAME': 'guest_service_ready VM wait target',
@@ -100,6 +106,20 @@ Future<int> runCli(
         'CLI_INTERRUPTED',
         'event stream interrupted by $signal',
       );
+    }
+    if (options.command.length == 3 &&
+        options.command[0] == 'image' &&
+        options.command[1] == 'get') {
+      final id = ImageId(_id(options.command[2], 'img_'));
+      final image = await _findImage(client, id, options.timeout);
+      if (image == null)
+        return fail(
+          1,
+          'IMAGE_NOT_FOUND',
+          'No image exists with ID ${id.value}.',
+        );
+      write(encode(image.toJson()));
+      return 0;
     }
     final route = _route(options);
     final response = await client.request(
@@ -149,6 +169,48 @@ Future<int> runCli(
   } on ApiProtocolException catch (exception) {
     return fail(4, 'CLI_PROTOCOL', exception);
   }
+}
+
+Future<Image?> _findImage(
+  GaoVmApiClient client,
+  ImageId id,
+  Duration timeout,
+) async {
+  final elapsed = Stopwatch()..start();
+  final seenCursors = <String>{};
+  String? cursor;
+  do {
+    final remaining = timeout - elapsed.elapsed;
+    if (remaining <= Duration.zero) throw ApiTimeoutException(timeout);
+    final response = await client.request(
+      'GET',
+      '/v1/images',
+      query: {'limit': '200', if (cursor != null) 'cursor': cursor},
+      timeout: remaining,
+    );
+    final page = response.body.toJson();
+    final items = page['items'];
+    final next = page['next_cursor'];
+    if (page.length != 2 ||
+        !page.containsKey('next_cursor') ||
+        items is! List ||
+        next != null && (next is! String || next.isEmpty || next.length > 512))
+      throw const ApiProtocolException('invalid Image list response');
+    if (next is String && !seenCursors.add(next))
+      throw const ApiProtocolException('Image list repeated its cursor');
+    try {
+      final images = items.map(Image.fromJson).toList();
+      for (final image in images) {
+        if (image.id == id) return image;
+      }
+    } on FormatException {
+      throw const ApiProtocolException('invalid Image list response');
+    } on ArgumentError {
+      throw const ApiProtocolException('invalid Image list response');
+    }
+    cursor = next as String?;
+  } while (cursor != null);
+  return null;
 }
 
 Future<ProcessSignal> _consumeEvents(
@@ -201,6 +263,12 @@ _Request _route(_Options options) {
   if (command.length == 2 && command[0] == 'vm' && command[1] == 'list') {
     return _Request('GET', '/v1/vms', query: options.query);
   }
+  if (command.length == 2 && command[0] == 'image' && command[1] == 'list') {
+    return _Request('GET', '/v1/images', query: options.query);
+  }
+  if (command.length == 3 && command[0] == 'image' && command[1] == 'delete') {
+    return _Request('DELETE', '/v1/images/${_id(command[2], 'img_')}');
+  }
   if (command.length == 2 &&
       command[0] == 'operation' &&
       command[1] == 'list') {
@@ -210,6 +278,15 @@ _Request _route(_Options options) {
     if (options.bodyJson == null)
       throw const FormatException('create requires --body-json');
     return _Request('POST', '/v1/vms', body: _body(options.bodyJson!));
+  }
+  if (command.length == 2 && command[0] == 'image' && command[1] == 'import') {
+    if (options.bodyJson == null)
+      throw const FormatException('image import requires --body-json');
+    return _Request(
+      'POST',
+      '/v1/images/import',
+      body: _body(options.bodyJson!),
+    );
   }
   if (command.length == 3 && command[1] == 'get') {
     final prefix = switch (command[0]) {
@@ -458,6 +535,7 @@ final class _Options {
         'test_run_id',
       },
       'vm list' => const {'label_selector', 'limit', 'cursor', 'sort'},
+      'image list' => const {'label_selector', 'limit', 'cursor'},
       'operation list' => const {
         'limit',
         'cursor',
@@ -501,7 +579,8 @@ final class _Options {
         throw const FormatException('unsupported --sort');
     }
     final unsupported = [
-      if (bodyJson != null && !const {'vm create', 'vm patch'}.contains(verb))
+      if (bodyJson != null &&
+          !const {'vm create', 'vm patch', 'image import'}.contains(verb))
         '--body-json',
       if (ifMatch != null && verb != 'vm patch') '--if-match',
       if (condition != null && verb != 'vm wait') '--condition',
@@ -515,6 +594,8 @@ final class _Options {
             'vm restart',
             'vm kill',
             'vm delete',
+            'image import',
+            'image delete',
             'operation cancel',
           }.contains(verb))
         '--idempotency-key',
