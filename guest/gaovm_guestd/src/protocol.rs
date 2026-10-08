@@ -11,6 +11,14 @@ pub enum ErrorCode {
     ProtocolVersionMismatch,
     CapabilityMismatch,
     CapabilityNotSupported,
+    ExecNotFound,
+    ExecStartFailed,
+    ExecCancelFailed,
+    ExecTimeout,
+    OutputLimitExceeded,
+    ArtifactNotFound,
+    ArtifactLimitExceeded,
+    GuestInternalError,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

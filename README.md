@@ -368,8 +368,9 @@ cd guest/gaovm_guestd
 cargo test --locked
 ```
 
-This currently tests the framed control protocol and bidirectional negotiation,
-not an installed guest daemon or native vsock execution. See the
+This tests framed control, bidirectional negotiation, real Unix subprocess
+execution, system queries, and bounded local artifact collection in the test host
+OS, not an installed guest daemon or native vsock execution. See the
 [guest package scope](guest/gaovm_guestd/README.md) before using it.
 
 ---
