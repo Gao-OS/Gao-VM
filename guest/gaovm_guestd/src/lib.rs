@@ -1,5 +1,6 @@
 #[cfg(unix)]
 pub mod artifact;
+pub mod control;
 #[cfg(unix)]
 pub mod exec;
 pub mod frame;

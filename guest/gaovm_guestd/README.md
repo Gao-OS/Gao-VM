@@ -20,6 +20,16 @@ allowed only between frames. An outbound size/type error writes no frame bytes.
 Framing errors are fatal to the channel; callers must close it, not retry from
 an uncertain byte offset. A transport must set bounded read/write deadlines.
 
+`control::FrameReader` and `FrameWriter` provide asynchronous framing with absolute
+deadlines. Cancelling a read preserves its buffered header/payload and original
+deadline; resuming cannot extend that deadline. A framing error or timeout makes
+the reader unusable. Cancelling a polled write, or any write/flush failure, makes
+the writer unusable because a partial frame may already be on the connection.
+Outbound validation is bounded and happens before any frame bytes are written.
+These wrappers do not perform wire negotiation, dispatch RPCs, authenticate a
+peer, or close the underlying transport; the composition layer still owns those
+responsibilities.
+
 `Session` binds one connection to a VM ID and driver generation. Both peers send
 `session.hello` and acknowledge the same capability intersection; both required
 sets must be satisfied. Either hello/acknowledgement ordering is supported.
@@ -165,6 +175,9 @@ CI also checks the library for `aarch64-unknown-linux-gnu`. That is compilation
 coverage, not a native ARM64 guest/vsock test. Schema examples, fragmented and
 coalesced frames, invalid lengths, pre-hello calls, capability mismatch, and
 cross-VM/generation messages are exercised through the library interfaces.
+Async framing tests include real Unix sockets, partial-read/write cancellation,
+retained deadlines, malformed input, EOF, and stalled writes. These socket tests
+are not native virtio-vsock acceptance.
 
 ## Remaining package and MVP work
 
