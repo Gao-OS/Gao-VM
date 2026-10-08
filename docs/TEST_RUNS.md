@@ -22,6 +22,11 @@ Background workers currently implement:
 3. Host artifact collection for runs in `collecting`.
 4. Terminal completion for collected failures/cancellations which never allocated
    a VM, including cancellation or an overall deadline before provisioning.
+5. Terminal completion of collected failures with `retain` or `delete_on_success`,
+   preserving the allocated VM's current runtime state for manual debugging.
+6. Allocated-VM cleanup through durable stop/delete child operations. The parent
+   remains active until the selected lifecycle operation has finished and its
+   generation, intent, resource, and lease checks prove cleanup completed.
 
 Readiness and ordered guest execution are still unfinished. An allocated run
 reaching `waiting_ready` is not evidence of a successful guest test.
@@ -29,9 +34,9 @@ reaching `waiting_ready` is not evidence of a successful guest test.
 ## Host artifact collection
 
 `TestRunCollectionWorker` reserves stable artifact IDs and an execution snapshot
-in schema-v14 `test_run_collection` / `test_run_collection_items`. It publishes
-driver and serial log snapshots, when present, and a structured JSON result under
-the independent managed artifact root described in [ARTIFACTS.md](ARTIFACTS.md).
+in `test_run_collection` / `test_run_collection_items`, introduced in schema v14.
+It publishes driver and serial log snapshots, when present, and a structured JSON
+result under the independent managed artifact root described in [ARTIFACTS.md](ARTIFACTS.md).
 Its result format is `gaovm.test-result.v1`.
 
 Collection holds the existing per-VM filesystem lock, verifies provisioning and
@@ -77,15 +82,79 @@ occurs on this path. The original failure remains primary. A failed final commit
 leaves the run collecting, its operation active, and its artifacts intact for retry.
 Reopening the catalog does not duplicate completion or artifact publication.
 
-This path reuses schema-v14 checkpoints and the frozen TestRun DTO; it needs no
-new migration or public response fields. Existing unrelated `cleaning_up`
-decisions are not silently reinterpreted as `not_required`.
+This path still uses the collection checkpoint and frozen TestRun DTO; schema v15
+does not change VM-free completion or public response fields. Existing unrelated
+`cleaning_up` decisions are not silently reinterpreted as `not_required`.
 
-Cleanup for allocated VMs is still unfinished: stop/delete intents, ownership and
-generation checks, cleanup failures, and final retention decisions must use the
-existing VM primitives. The interaction of `always_delete` with
-`retain_on_failure: true` needs an explicit accepted precedence decision; this
-implementation does not choose one or silently delete a failed environment.
+## Retaining a failed VM
+
+PRD UC-03 requires a failed test VM to remain running for manual debugging.
+For a failed outcome, neither `retain` nor `delete_on_success` requests deletion.
+After committed collection, the cleanup worker verifies the exact provisioning
+ownership, its settled `vm.create` child, and any existing start VM binding. One
+transaction records `cleanup_decision: retain`, completes the failed TestRun and
+parent/cancellation actions, and commits their events/outbox rows. It does not
+stop/restart the VM or change its spec, desired state, phase, or driver generation.
+It also leaves already-stopped/failed VMs in their current state rather than
+inventing a successful runtime recovery.
+
+Retention must inspect the catalog's deletion fence, not just runtime phase:
+`vm.delete` acceptance sets `deleting_at` before its asynchronous command begins
+teardown. If deletion has been accepted or the VM is already tombstoned, cleanup
+records a non-retryable secondary `VM_OPERATION_CONFLICT` or `VM_NOT_FOUND` failure
+at `cleaning_up` and completes the failed run without interfering with deletion.
+`retain` records the selected decision, not a claim that a concurrently deleted
+VM was retained. The failure event carries the retention diagnostic; the original
+failure (including a guest exit code when supplied) remains primary on the run and
+parent operation. A lost/mismatched ownership checkpoint is an infrastructure
+error which blocks that run, not authority to adopt another VM or starve peers.
+
+Retention and all terminal records are atomic. A failed commit leaves the run
+collecting, cancellation actions pending, and published artifacts/VM state intact;
+reopen/retry completes once without duplicate artifacts or completion events.
+This uses existing public fields/decisions. Unrelated durable cleanup decisions
+are not silently reinterpreted as retention.
+
+## Allocated-VM lifecycle cleanup
+
+Schema v15 adds the immutable `test_run_vm_cleanup` checkpoint and a bounded-scan
+index. The checkpoint links the run and its owned VM to one stop/delete child,
+intent revision, spec generation, and driver generation. The migration is additive;
+existing TestRun specs, ownership, collection checkpoints, and artifact references
+remain unchanged. It adds no public API or driver/guest protocol fields.
+
+After collection, the selected actions are:
+
+| Outcome | Policy | Cleanup action |
+| --- | --- | --- |
+| Succeeded | `delete_on_success` or `always_delete` | Delete through the normal stop/release/remove/tombstone lifecycle |
+| Succeeded | `retain` | Stop and retain the bundle |
+| Cancelled | `always_delete` | Delete through the normal VM lifecycle |
+| Cancelled | `retain` or `delete_on_success` | Stop and retain the bundle |
+| Failed | `always_delete`, `retain_on_failure: false` | Delete through the normal VM lifecycle |
+| Failed | `retain` or `delete_on_success` | Preserve the current runtime for manual debugging, as described above |
+| Failed | `always_delete`, `retain_on_failure: true` | Defer pending an accepted precedence decision |
+
+The last combination remains unresolved; no policy precedence is invented.
+Successful-artifact 7-day retention and retention-aware garbage collection also
+remain unfinished.
+
+Stop/delete acceptance runs under the existing per-VM controller gate. One SQLite
+transaction records `cleaning_up`, the selected decision, the child operation and
+command, immutable checkpoint, events, and outbox. Filesystem/driver work stays
+outside that transaction and uses the existing guarded VM primitives. Repeated
+passes and catalog reopen reuse the same child rather than accepting another
+destructive intent. Cleanup does not inherit an already-expired TestRun deadline.
+
+Before accepting a stop/delete, the worker checks provisioning ownership and the
+TestRun's last owned start/abort intent, applied intent, pinned spec, and known
+driver generation. A newer user intent, spec, or generation produces a durable
+cleanup conflict instead of stopping/deleting that environment. Terminal observation
+also requires the checkpoint's revision/generations, desired `stopped`, no VM leases,
+and either a stopped unfenced VM or a deleted tombstone. A failed child or mismatched
+completion fails the run; an earlier test failure stays primary, with the cleanup
+failure recorded independently. Managed artifacts and source images are not removed
+with the temporary VM bundle.
 
 ## Daemon lifecycle
 
@@ -103,8 +172,8 @@ These workers are not activated by status requests or client polling.
 | --- | --- | --- |
 | TST-001/002/010 | Durable acceptance, isolated provisioning and start checkpoint tests | Full parallel guest-test transactions |
 | TST-006 | Real host log/result bytes, stable-ID replay, crash and corruption tests | Guest stdout/stderr/system info and real GaoOS collection |
-| TST-009, OP-002/004/006 | Pre-allocation abort completion, cancellation actions, rollback/reopen and background dispatch tests | Allocated-VM/active-step cancellation and cleanup |
-| TST-007/008 | No-VM completion does not delete resources; failed environments remain intact during collection | Complete cleanup-policy/retention execution |
+| TST-009, OP-002/004/006 | Pre-allocation abort completion, cancellation actions, retained-VM stop before cancellation completion, rollback/reopen and background dispatch tests | Active-step cancellation and full guest-to-cleanup transactions |
+| TST-007/008, UC-03 | Failed-runtime retention, deletion/stop child completion, independent artifact survival, schema upgrade and checkpoint replay tests | Complete policy/fault matrix, accepted failure-override precedence, successful-artifact retention, and real guest failure retention |
 
 Focused validation:
 
@@ -116,7 +185,10 @@ mise exec dart@3.9 -- dart test --concurrency=1 \
   test/test_run_repository_test.dart \
   test/test_run_application_service_test.dart \
   test/test_run_api_handlers_test.dart \
-  test/test_run_provisioning_worker_test.dart
+  test/test_run_provisioning_worker_test.dart \
+  test/artifact_repository_test.dart \
+  test/sqlite_database_test.dart \
+  test/sqlite_vm_managed_file_effect_adapter_test.dart
 mise exec dart@3.9 -- dart format --output=none --set-exit-if-changed bin lib test
 mise exec dart@3.9 -- dart analyze
 ```
@@ -127,10 +199,17 @@ not an installed-daemon, launchd, or VZ transaction. The installed-daemon regres
 in `daemon_application_test.dart` waits for durable completion before checking
 TestRun/operation state and downloading the result through HTTP over UDS.
 
+Allocated fixtures supply upstream success/failure/cancellation through the durable
+repository because readiness and guest execution are not yet wired. Their
+provisioning, image store, artifacts, lifecycle dispatcher/controller, scheduler,
+and managed deletion are real components; only the VZ boundary, clock, and host
+metrics are simulated.
+They prove retention/cleanup behavior, not native guest execution or GaoOS AC-06/07.
+
 On the current macOS x86_64 validation host, installed startup is blocked before
 listening: the native process census rejects unresolved executables. The same
-guard failure was reproduced with the previously committed and current binaries;
-source-based startup checks can also expire waiting for listening. No census,
-ownership, handshake, or authentication guard is bypassed. Apple Silicon VZ,
+guard failure was reproduced with the previously committed binary and current
+source-based startup checks. No census, ownership, handshake, or authentication
+guard is bypassed. Apple Silicon VZ,
 native guest transport, GaoOS AC-06/07, packaging, launchd, signing, and release
 validation remain unproven. These component checks do not satisfy those gates.
