@@ -45,6 +45,8 @@ import 'sqlite_vm_runtime_assets.dart';
 import 'sqlite_vm_state_effect_adapter.dart';
 import 'test_run_api_handlers.dart';
 import 'test_run_application_service.dart';
+import 'test_run_cleanup_dispatch_loop.dart';
+import 'test_run_cleanup_worker.dart';
 import 'test_run_collection_dispatch_loop.dart';
 import 'test_run_collection_worker.dart';
 import 'test_run_provisioning_dispatch_loop.dart';
@@ -388,6 +390,25 @@ final class DaemonApplication {
         },
         onError: (error, _) => report('test_run_collection', error),
       );
+      final testRunCleanup = TestRunCleanupDispatchLoop(
+        worker: TestRunCleanupWorker(database: database),
+        onDispatch: (results) {
+          for (final result in results) {
+            if (result.error case final error?) {
+              report(
+                'test_run_cleanup',
+                error,
+                vm: result.vmId,
+                operation: result.operationId,
+                testRun: result.testRunId,
+                request: result.requestId,
+                driverGeneration: result.driverGeneration,
+              );
+            }
+          }
+        },
+        onError: (error, _) => report('test_run_cleanup', error),
+      );
       ResourceApiHandlers(
         vms: VmApplicationService.composed(
           repository: catalog,
@@ -439,6 +460,7 @@ final class DaemonApplication {
           testRunProvisioning.close(),
           testRunVmStart.close(),
           testRunCollection.close(),
+          testRunCleanup.close(),
           imageWork.close(),
           reconcile.close(),
           registry.shutdown(),
@@ -462,6 +484,7 @@ final class DaemonApplication {
       testRunProvisioning.start();
       testRunVmStart.start();
       testRunCollection.start();
+      testRunCleanup.start();
       imageWork.start();
       reconcile.start();
       health.ready = true;

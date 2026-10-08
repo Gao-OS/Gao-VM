@@ -9,7 +9,7 @@ import 'package:test/test.dart';
 
 void main() {
   test(
-    'installed daemon collects a pre-cancelled TestRun without client polling',
+    'installed daemon completes a pre-cancelled TestRun without client polling',
     () async {
       final state = await Directory('/private/tmp').createTemp('gvm-collect-');
       addTearDown(() => state.delete(recursive: true));
@@ -53,19 +53,27 @@ void main() {
           requestBody: const [],
         ),
       );
-      final collected = Completer<void>();
+      final completed = Completer<void>();
       final subscription = SqliteDurableEventFeed(database)
           .watch(testRunId: id)
           .listen((event) {
-            if (event.type == 'test_run.artifacts_collected' &&
-                !collected.isCompleted) {
-              collected.complete();
+            if (event.type == 'test_run.completed' && !completed.isCompleted) {
+              completed.complete();
             }
-          }, onError: collected.completeError);
+          }, onError: completed.completeError);
       _Daemon? daemon;
       try {
         daemon = await _Daemon.start(state, '/bin/cat');
-        await collected.future.timeout(const Duration(seconds: 5));
+        await completed.future.timeout(const Duration(seconds: 5));
+        final status = await daemon.get('/v1/test-runs/${id.value}');
+        expect(status.$1, HttpStatus.ok);
+        expect(status.$2['state'], 'cancelled');
+        expect(status.$2['cleanup_decision'], 'not_required');
+        final operation = await daemon.get(
+          '/v1/operations/${acceptance.operationId.value}',
+        );
+        expect(operation.$1, HttpStatus.ok);
+        expect(operation.$2['state'], 'cancelled');
         final response = await daemon.get(
           '/v1/test-runs/${id.value}/artifacts',
         );
