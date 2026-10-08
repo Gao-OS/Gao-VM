@@ -371,12 +371,18 @@ final class OwnedImageDirectory {
           final flags = Platform.isMacOS
               ? 0x2 | 0x200 | 0x100 | 0x1000000 | 0x4
               : 0x2 | 0x40 | 0x20000 | 0x80000 | 0x800;
-          lockFd = _openatCreate(parentFd, nativeName, flags, 0x180);
-          if (lockFd < 0) {
+          for (var attempt = 0; ; attempt++) {
+            lockFd = _openatCreate(parentFd, nativeName, flags, 0x180);
+            if (lockFd >= 0) break;
+            final error = _currentErrno();
+            // Concurrent first creation can return ENOENT on Darwin even
+            // with a live held parent. Keep the same no-follow descriptor
+            // lookup and bound retries; permanent errors still fail closed.
+            if (Platform.isMacOS && error == 2 && attempt < 2) continue;
             throw FileSystemException(
               'cannot open owned lock',
               displayPath,
-              OSError('openat failed', _currentErrno()),
+              OSError('openat failed', error),
             );
           }
           final stat = _sourceStat(lockFd);

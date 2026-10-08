@@ -78,6 +78,39 @@ void main() {
       await expectLater(held.acquireLock(name), throwsArgumentError);
     }
   });
+  test('concurrent first-use lockers serialize a fresh lock', () async {
+    final temporary = await Directory.systemTemp.createTemp('fresh-lock-');
+    addTearDown(() => temporary.delete(recursive: true));
+    for (var attempt = 0; attempt < 20; attempt++) {
+      final directory = await Directory('${temporary.path}/$attempt').create();
+      final held = await OwnedImageDirectory.open(directory);
+      var holders = 0;
+      var maxHolders = 0;
+      try {
+        await Future.wait(
+          List.generate(2, (_) async {
+            final lock = await held.acquireLock('shared.lock');
+            try {
+              holders++;
+              if (holders > maxHolders) maxHolders = holders;
+              await Future<void>.delayed(Duration.zero);
+            } finally {
+              holders--;
+              lock.close();
+            }
+          }),
+        );
+        expect(maxHolders, 1);
+        await held.verifyPathBinding();
+        expect(
+          (await File('${directory.path}/shared.lock').stat()).mode & 0x1ff,
+          0x180,
+        );
+      } finally {
+        held.close();
+      }
+    }
+  });
   test(
     'independent held locks wait until release across parent path replacement',
     () async {
