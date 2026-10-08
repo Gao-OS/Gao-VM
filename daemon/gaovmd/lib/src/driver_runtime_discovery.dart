@@ -43,18 +43,36 @@ final class DriverDiscoverySnapshot {
   final List<DriverDiscoveryIssue> issues;
 }
 
-/// Read-only startup discovery. The caller holds exclusive startup ownership
-/// and supplies catalog-derived bindings; records never authorize PID signaling.
+/// Read-only catalog-bound discovery. Startup recovery holds exclusive ownership;
+/// live diagnostics may observe concurrent generation changes. Neither use
+/// supplies authorization to signal a PID.
 final class DriverRuntimeDiscovery {
-  DriverRuntimeDiscovery({required this.root, required this.resolveBinding});
+  DriverRuntimeDiscovery({
+    required this.root,
+    required this.resolveBinding,
+    Set<String> reservedNames = const {'api.sock'},
+  }) : reservedNames = Set.unmodifiable(reservedNames) {
+    if (reservedNames.any(
+      (name) =>
+          name.isEmpty || name.contains('/') || name == '.' || name == '..',
+    )) {
+      throw ArgumentError(
+        'reserved runtime names must be single path components',
+      );
+    }
+  }
   final OwnedImageDirectory root;
   final Future<DriverRecoveryBinding?> Function(VmId) resolveBinding;
+
+  /// Live diagnostics pass only the verified current API socket link names.
+  /// Startup retains its existing reservation and exclusive ownership contract.
+  final Set<String> reservedNames;
 
   Future<DriverDiscoverySnapshot> scan() async {
     final records = <DriverRuntimeMetadata>[];
     final issues = <DriverDiscoveryIssue>[];
     for (final name in await _names(root)) {
-      if (name == 'api.sock') continue;
+      if (reservedNames.contains(name)) continue;
       final VmId vmId;
       try {
         vmId = VmId(name);

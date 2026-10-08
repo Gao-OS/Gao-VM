@@ -506,6 +506,31 @@ final class PublicApiServer {
   Future<void> get done => _doneCompleter?.future ?? Future<void>.value();
   Object? get fatalError => _fatalError;
 
+  /// Non-mutating observation of this live listener's exact ownership links.
+  /// Unlike prepare/close, this never quarantines or removes a pathname.
+  Future<Set<String>>
+  inspectOwnedSocketPaths() => _pathGate.run(socketPath, () async {
+    final owner = _ownerLinkPath, generation = _generationPath;
+    if (!isRunning || !_ownsSocket || owner == null || generation == null) {
+      throw StateError('public API listener is not live');
+    }
+    final paths = {socketPath, owner, generation};
+    for (final path in paths) {
+      if (await FileSystemEntity.type(path, followLinks: false) !=
+              FileSystemEntityType.unixDomainSock ||
+          (await File(path).stat()).mode & 0x1ff != 0x180 ||
+          !await FileSystemEntity.identical(owner, path)) {
+        throw FileSystemException(
+          'public API socket ownership link is missing, replaced, or not private',
+          path,
+        );
+      }
+    }
+    if (!isRunning)
+      throw StateError('public API listener stopped during inspection');
+    return Set.unmodifiable(paths);
+  });
+
   /// Reconciles the API socket namespace without publishing a listener, so
   /// startup recovery can inspect the shared run directory before activation.
   Future<void> prepare() => _pathGate.run(socketPath, () async {

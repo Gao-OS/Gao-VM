@@ -389,6 +389,31 @@ Do not skip the census, fall back to basename/arguments, or signal unrelated PID
 to make installed-daemon tests pass. Coordinate affected application/process
 recovery with the operator; the fail-closed startup check remains a real gate.
 
+The installed composition registers non-mutating `GET /v1/system/doctor` through
+`SystemDoctorService`; the CLI uses `gaovm doctor --timeout-seconds N --json`.
+It requires an already-running daemon, so it cannot diagnose through a listener
+that startup recovery has deliberately refused to publish.
+
+Doctor independently reports platform, driver binary, entitlement, database,
+state permissions/bindings, image store, CPU/memory/disk estimates, runtime
+namespace, and guest profile capability. Errors make `healthy=false`; warnings
+are non-blocking. An eight-second observation deadline reports unfinished required
+checks as errors and coalesces outstanding probes instead of starting duplicates.
+Image manifest/size checks are required; content rehashing has a shared 64 MiB
+budget. Skipped digests explicitly produce an image warning, not integrity proof.
+No reconciliation, lease release/renewal, process signals, driver RPCs, VM starts,
+or socket cleanup occur. Only the live server's verified exact API socket link
+names are reserved during read-only namespace discovery; other `.g.*`/`.o.*`
+entries remain visible as issues.
+
+Native signing checks select the ARM64 code slice before reading the boolean
+virtualization entitlement and validate signatures across architectures, following
+[Apple's static-code validation contract](https://developer.apple.com/documentation/security/secstaticcodecheckvalidity%28_%3A_%3A_%3A%29).
+Generated ad-hoc signing fixtures exercise this without running driver code.
+These observations are not launch authorization, distribution-signing/notarization
+proof, guest readiness, or installed-daemon/VZ/TestRun acceptance. Authenticated
+guest session/exec/service readiness remains an explicit warning in this composition.
+
 On macOS, `DriverProcessManager` now canonicalizes the executable before launch
 and captures its kernel identity after installing the owned process session and
 output drainage. Missing/mismatched identity or inspection failure fails spawn

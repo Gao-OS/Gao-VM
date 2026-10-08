@@ -24,6 +24,7 @@ import 'image_work_dispatch_loop.dart';
 import 'legacy_vm_migration.dart';
 import 'macos_driver_inventory.dart';
 import 'macos_host_metrics.dart';
+import 'macos_system_doctor_host.dart';
 import 'operation_application_service.dart';
 import 'operation_repository.dart';
 import 'public_api_server.dart';
@@ -43,6 +44,8 @@ import 'sqlite_vm_patch_acceptor.dart';
 import 'sqlite_vm_provisioning_cancellation.dart';
 import 'sqlite_vm_runtime_assets.dart';
 import 'sqlite_vm_state_effect_adapter.dart';
+import 'system_api_handlers.dart';
+import 'system_doctor_service.dart';
 import 'test_run_api_handlers.dart';
 import 'test_run_application_service.dart';
 import 'test_run_cleanup_dispatch_loop.dart';
@@ -139,6 +142,17 @@ final class DaemonApplication {
         resolveBundlePath: (id) => '${bundles.path}/${id.value}.gaovm',
       );
       final catalog = SqliteVmRepository(database);
+      Future<DriverRecoveryBinding?> recoveryBinding(VmId id) async {
+        final vm = await catalog.get(id, includeDeleted: true);
+        return vm == null
+            ? null
+            : DriverRecoveryBinding(
+                driverGeneration: vm.status.driverGeneration,
+                executable: driverPath,
+                bundlePath: '${bundles.path}/${id.value}.gaovm',
+              );
+      }
+
       final health = _DaemonHealth(ownership, database);
       final router = PublicApiRouter();
       final server = PublicApiServer(
@@ -158,16 +172,7 @@ final class DaemonApplication {
         layout: layout,
         discovery: DriverRuntimeDiscovery(
           root: run,
-          resolveBinding: (id) async {
-            final vm = await catalog.get(id, includeDeleted: true);
-            return vm == null
-                ? null
-                : DriverRecoveryBinding(
-                    driverGeneration: vm.status.driverGeneration,
-                    executable: driverPath,
-                    bundlePath: '${bundles.path}/${id.value}.gaovm',
-                  );
-          },
+          resolveBinding: recoveryBinding,
         ),
         readInventory: inventory.snapshot,
       ).recover();
@@ -214,19 +219,20 @@ final class DaemonApplication {
           if (controller != null) await controller.submit(command);
         },
       );
+      final schedulerLimits = HostSchedulerLimits(
+        maxRunningVms: maxRunningVms,
+        maxConcurrentBoots: maxConcurrentBoots,
+        maxDriverProcesses: maxRunningVms,
+        maxCpuCount: capacity.logicalCpuCount,
+        maxMemoryBytes: capacity.totalMemoryBytes * 3 ~/ 4,
+        minFreeDiskBytes: 1024 * 1024 * 1024,
+      );
       final scheduler = HostScheduler(
         leases: SqliteHostLeaseRepository(database),
         // Disk materialization precedes admission; boot allocates no new disk.
         catalog: SqliteHostCapacityCatalog(database, diskBytes: (_) => 0),
         metrics: metrics,
-        limits: HostSchedulerLimits(
-          maxRunningVms: maxRunningVms,
-          maxConcurrentBoots: maxConcurrentBoots,
-          maxDriverProcesses: maxRunningVms,
-          maxCpuCount: capacity.logicalCpuCount,
-          maxMemoryBytes: capacity.totalMemoryBytes * 3 ~/ 4,
-          minFreeDiskBytes: 1024 * 1024 * 1024,
-        ),
+        limits: schedulerLimits,
         ownerId: RequestId.generate().value,
         onLeaseLost: (vm, spec, operation, generation, error) => registry
             .handleHostLeaseLost(vm, spec, operation, generation, error),
@@ -467,6 +473,23 @@ final class DaemonApplication {
       ArtifactApiHandlers(artifacts: artifactService).register(router);
       TestRunApiHandlers(runs: testRuns).register(router);
       EventApiHandlers(feed: feed).register(router);
+      final doctor = SystemDoctorService(
+        database: database,
+        stateDirectory: state,
+        runtimeDirectory: run,
+        imageStore: imageStore,
+        imageDirectory: images,
+        publicServer: server,
+        processManager: manager,
+        resolveBinding: recoveryBinding,
+        limits: schedulerLimits,
+        host: MacOsDoctorHost(
+          driverBinary: driverPath,
+          metrics: metrics,
+          processes: inventory,
+        ),
+      );
+      SystemApiHandlers(doctor: doctor).register(router);
       final ownedDatabase = database;
       final ownedLock = ownership;
       application = DaemonApplication._(server, () async {
@@ -476,6 +499,7 @@ final class DaemonApplication {
         // cancellation can unblock delivery already in flight. Drain all of
         // them before closing their shared catalog and filesystem roots.
         await Future.wait([
+          doctor.close(),
           commands.close(),
           provisioning.close(),
           testRunProvisioning.close(),

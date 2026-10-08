@@ -32,6 +32,39 @@ final class ImageStore {
   Future<List<Image>> list() => repository.list();
   Future<Image?> get(ImageId id) => repository.get(id);
 
+  /// Always validates metadata and object sizes. Content hashing is all-or-none
+  /// per image and bounded by the caller's remaining byte budget. Never repairs.
+  Future<({bool digestsVerified, int bytesHashed})> verifyImage(
+    ImageId id, {
+    required int contentByteBudget,
+    bool Function()? isCancelled,
+  }) async {
+    if (contentByteBudget < 0)
+      throw ArgumentError.value(contentByteBudget, 'contentByteBudget');
+    final image = await get(id);
+    if (image == null) throw ImageNotFound(id);
+    final manifest = ImageManifest.fromJson(image.manifest.toJson());
+    var remaining = contentByteBudget;
+    var verifyDigests = true;
+    for (final object in manifest.objects.values) {
+      final size = object['size_bytes'] as int;
+      if (size > remaining) {
+        verifyDigests = false;
+        break;
+      }
+      remaining -= size;
+    }
+    await _validatePublished(
+      image,
+      isCancelled: isCancelled,
+      verifyContentDigests: verifyDigests,
+    );
+    return (
+      digestsVerified: verifyDigests,
+      bytesHashed: verifyDigests ? contentByteBudget - remaining : 0,
+    );
+  }
+
   Future<Image> importFile(
     File source, {
     required ImageType type,
@@ -479,6 +512,7 @@ final class ImageStore {
   Future<void> _validatePublished(
     Image image, {
     bool Function()? isCancelled,
+    bool verifyContentDigests = true,
   }) async {
     final root = '${directory.path}/sha256-${image.digest.substring(7)}';
     if (await FileSystemEntity.type(root, followLinks: false) !=
@@ -497,11 +531,13 @@ final class ImageStore {
             canonicalImageJson(image.manifest.toJson()))
       throw FormatException('catalog manifest mismatch');
     for (final object in manifest.objects.entries) {
+      _checkCancelled(isCancelled);
       final file = File('$root/objects/${object.key}');
       await _checkManagedObjectPath(file);
       if (await file.length() != object.value['size_bytes'] ||
-          await _fileDigest(file, isCancelled: isCancelled) !=
-              object.value['digest'])
+          verifyContentDigests &&
+              await _fileDigest(file, isCancelled: isCancelled) !=
+                  object.value['digest'])
         throw FormatException('corrupt image object');
     }
   }
