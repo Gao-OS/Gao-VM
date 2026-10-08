@@ -4,6 +4,53 @@ import 'package:gaovmd/src/image_filesystem.dart';
 import 'package:test/test.dart';
 
 void main() {
+  test(
+    'owned file reads restart at byte zero after pathname replacement',
+    () async {
+      final root = await Directory.systemTemp.createTemp('owned-read-');
+      addTearDown(() => root.delete(recursive: true));
+      final original = await Directory('${root.path}/owned').create();
+      final bytes = List<int>.generate(131079, (index) => index % 256);
+      await File('${original.path}/payload').writeAsBytes(bytes);
+      final held = await OwnedImageDirectory.open(original);
+      addTearDown(held.close);
+      final file = held.file('payload');
+      addTearDown(file.close);
+      expect(await file.openRead().expand((chunk) => chunk).toList(), bytes);
+      await original.rename('${root.path}/moved');
+      await Directory(original.path).create();
+      await File('${original.path}/payload').writeAsString('replacement');
+      expect(await file.openRead().expand((chunk) => chunk).toList(), bytes);
+    },
+  );
+  test(
+    'sealing targets the held output inode after pathname replacement',
+    () async {
+      final root = await Directory.systemTemp.createTemp('owned-seal-');
+      addTearDown(() => root.delete(recursive: true));
+      final original = await Directory('${root.path}/owned').create();
+      final held = await OwnedImageDirectory.open(original);
+      addTearDown(held.close);
+      final output = held.createFile('payload');
+      addTearDown(output.close);
+      final writer = await output.openWrite();
+      await writer.writeFrom([1, 2, 3]);
+      await writer.close();
+      await original.rename('${root.path}/moved');
+      await Directory(original.path).create();
+      final replacement = await File(
+        '${original.path}/payload',
+      ).writeAsString('replacement');
+      imageFileMode(replacement.path, 0x180);
+      await output.seal();
+      final sealed = held.file('payload');
+      addTearDown(sealed.close);
+      expect(sealed.mode & 0x1ff, 0x100);
+      expect(await sealed.readBounded(3), [1, 2, 3]);
+      expect((await replacement.stat()).mode & 0x1ff, 0x180);
+      expect(await replacement.readAsString(), 'replacement');
+    },
+  );
   test('child operations reject invalid basenames including NUL', () async {
     final root = await Directory.systemTemp.createTemp('bundle-names-');
     addTearDown(() => root.delete(recursive: true));

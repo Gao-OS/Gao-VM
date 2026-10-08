@@ -558,6 +558,27 @@ final class OwnedImageOutputFile {
     ).open(mode: FileMode.writeOnly);
   }
 
+  /// Seals this held inode, not a potentially replaced pathname. The caller
+  /// must first finish and close its asynchronous writer.
+  Future<void> seal() async {
+    if (_closed) throw StateError('image output file is closed');
+    final fd = _duplicateDescriptor(_fd);
+    final displayPath = path;
+    try {
+      await Isolate.run(() {
+        if (_fchmod(fd, 0x100) != 0 || _fsync(fd) != 0) {
+          throw FileSystemException(
+            'cannot seal owned output',
+            displayPath,
+            OSError('fchmod/fsync failed', _currentErrno()),
+          );
+        }
+      });
+    } finally {
+      _close(fd);
+    }
+  }
+
   void close() {
     if (_closed) return;
     _closed = true;
@@ -571,6 +592,11 @@ final class OwnedImageFile {
   final String path;
   final int size;
   bool _closed = false;
+
+  int get mode {
+    _requireOpen();
+    return _sourceStat(_fd).mode;
+  }
 
   static Future<OwnedImageFile> open(File file) async {
     final path = await file.resolveSymbolicLinks();
@@ -590,9 +616,27 @@ final class OwnedImageFile {
   /// ends. Linux procfs and Darwin devfs expose the process's descriptor table.
   Stream<List<int>> openRead() {
     if (_closed) throw StateError('image source file is closed');
-    return File(
-      Platform.isMacOS ? '/dev/fd/$_fd' : '/proc/self/fd/$_fd',
-    ).openRead();
+    final descriptorPath = Platform.isMacOS
+        ? '/dev/fd/$_fd'
+        : '/proc/self/fd/$_fd';
+    Stream<List<int>> read() async* {
+      final reader = await File(descriptorPath).open();
+      try {
+        // Darwin devfs duplicates the open file description, including its
+        // current offset. Dart File.openRead skips seeking for a zero start.
+        // These streams are consumed serially by the owner of the descriptor.
+        await reader.setPosition(0);
+        while (true) {
+          final chunk = await reader.read(64 * 1024);
+          if (chunk.isEmpty) break;
+          yield chunk;
+        }
+      } finally {
+        await reader.close();
+      }
+    }
+
+    return read();
   }
 
   Future<Uint8List> readBounded(int maximumBytes) async {
