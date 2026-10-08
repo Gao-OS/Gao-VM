@@ -485,6 +485,8 @@ final class PublicApiServer {
   final RequestId Function() _newRequestId;
   final String Function() _newSocketToken;
   final PublicApiSocketQuarantineHook? _beforeSocketQuarantineRename;
+  // HttpServer.listenOn borrows this listener; closing HTTP does not close it.
+  ServerSocket? _listenerSocket;
   HttpServer? _server;
   StreamSubscription<HttpRequest>? _subscription;
   bool _closing = false;
@@ -507,7 +509,9 @@ final class PublicApiServer {
   /// Reconciles the API socket namespace without publishing a listener, so
   /// startup recovery can inspect the shared run directory before activation.
   Future<void> prepare() => _pathGate.run(socketPath, () async {
-    if (_server != null) throw StateError('public API is already started');
+    if (_server != null || _listenerSocket != null) {
+      throw StateError('public API is already started');
+    }
     await _preparePrivateParent();
     await _removeSocketIfPresent();
     await _cleanupStaleOwnershipArtifacts();
@@ -516,7 +520,7 @@ final class PublicApiServer {
   Future<void> start() => _pathGate.run(socketPath, _startLocked);
 
   Future<void> _startLocked() async {
-    if (_server != null)
+    if (_server != null || _listenerSocket != null)
       throw StateError('public API server is already started');
     _closing = false;
     _listenerTerminated = false;
@@ -586,6 +590,7 @@ final class PublicApiServer {
           unawaited(_finishUnexpectedly(generation));
         },
       );
+      _listenerSocket = socket;
       _server = bound.server;
       _subscription = bound.subscription;
       _activeGeneration = generation;
@@ -611,7 +616,7 @@ final class PublicApiServer {
   Future<void> close() => _pathGate.run(socketPath, _closeLocked);
 
   Future<void> _closeLocked() async {
-    if (_server == null && _subscription == null) {
+    if (_server == null && _subscription == null && _listenerSocket == null) {
       if (_ownsSocket) {
         await _deleteOwnedLinks();
         _ownsSocket = false;
@@ -629,6 +634,8 @@ final class PublicApiServer {
     );
     _activeStreams.removeAll(activeStreams);
     await server?.close(force: false);
+    await _listenerSocket?.close();
+    _listenerSocket = null;
     await _subscription?.cancel();
     _subscription = null;
     if (_ownsSocket) await _deleteOwnedLinks();
@@ -1262,7 +1269,14 @@ final class PublicApiServer {
         var ownershipCleaned = !_ownsSocket;
         try {
           await server?.close(force: true);
+          await _listenerSocket?.close();
+          _listenerSocket = null;
           await subscription?.cancel();
+          final activeStreams = _activeStreams.toList(growable: false);
+          await Future.wait(
+            activeStreams.map((stream) => stream.cancel(abortResponse: true)),
+          );
+          _activeStreams.removeAll(activeStreams);
           if (_ownsSocket) await _deleteOwnedLinks();
           ownershipCleaned = true;
         } catch (error) {

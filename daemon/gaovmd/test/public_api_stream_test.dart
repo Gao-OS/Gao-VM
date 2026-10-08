@@ -156,6 +156,74 @@ void main() {
     },
   );
 
+  for (final (mode, delayedCancel) in [
+    ('error', false),
+    ('eof', false),
+    ('error', true),
+  ]) {
+    test(
+      'listener $mode cancels an open stream (delayed=$delayedCancel)',
+      () async {
+        final listened = Completer<void>();
+        final cancelled = Completer<void>();
+        final finishCancel = Completer<void>();
+        final chunks = StreamController<List<int>>(
+          onListen: listened.complete,
+          onCancel: () {
+            cancelled.complete();
+            if (delayedCancel) return finishCancel.future;
+          },
+        );
+        final listener = _FailingListenerFactory();
+        final failure = StateError('injected listener error');
+        final router = PublicApiRouter()
+          ..add(
+            'GET',
+            '/v1/events',
+            (_) async => PublicApiResponse.stream(
+              body: chunks.stream,
+              contentType: ContentType(
+                'text',
+                'event-stream',
+                charset: 'utf-8',
+              ),
+            ),
+          );
+        final server = PublicApiServer(
+          socketPath: socketPath,
+          openApiDocument: const {},
+          systemHealth: const _HealthService(),
+          router: router,
+          listenerFactory: listener,
+          streamWriteDeadline: const Duration(milliseconds: 20),
+        );
+        addTearDown(server.close);
+        addTearDown(() {
+          finishCancel.complete();
+          return chunks.close();
+        });
+        await server.start();
+        final client = await _connectRequest(socketPath, 'GET', '/v1/events');
+        addTearDown(client.destroy);
+        await listened.future;
+
+        if (mode == 'error') {
+          listener.fail(failure);
+        } else {
+          listener.finish();
+        }
+        await server.done.timeout(const Duration(seconds: 2));
+
+        expect(cancelled.isCompleted, isTrue);
+        expect(server.isRunning, isFalse);
+        expect(
+          server.fatalError,
+          mode == 'error' ? same(failure) : isA<StateError>(),
+        );
+      },
+    );
+  }
+
   test('slow client bounds each write and does not drain the source', () async {
     final cancelled = Completer<void>();
     var pulled = 0;
@@ -199,6 +267,31 @@ void main() {
 }
 
 final _requestId = RequestId('req_01J00000000000000000000000');
+
+final class _FailingListenerFactory implements PublicApiListenerFactory {
+  late PublicApiListenerError _onError;
+  late void Function() _onDone;
+
+  @override
+  PublicApiBoundListener listen({
+    required ServerSocket socket,
+    required void Function(HttpRequest request) onRequest,
+    required PublicApiListenerError onError,
+    required void Function() onDone,
+  }) {
+    _onError = onError;
+    _onDone = onDone;
+    return const DartPublicApiListenerFactory().listen(
+      socket: socket,
+      onRequest: onRequest,
+      onError: onError,
+      onDone: onDone,
+    );
+  }
+
+  void fail(Object error) => _onError(error, StackTrace.current);
+  void finish() => _onDone();
+}
 
 final class _HealthService implements SystemHealthService {
   const _HealthService();
