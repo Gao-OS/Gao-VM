@@ -391,7 +391,7 @@ final class DaemonApplication {
         onError: (error, _) => report('test_run_collection', error),
       );
       final testRunCleanup = TestRunCleanupDispatchLoop(
-        worker: TestRunCleanupWorker(database: database),
+        worker: TestRunCleanupWorker(database: database, registry: registry),
         onDispatch: (results) {
           for (final result in results) {
             if (result.error case final error?) {
