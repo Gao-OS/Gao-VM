@@ -2,11 +2,92 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:gaovm_models/gaovm_models.dart';
 import 'package:gaovmd/gaovmd.dart';
 import 'package:gaovmd/src/image_filesystem.dart' show imageFileMode;
 import 'package:test/test.dart';
 
 void main() {
+  test(
+    'installed daemon collects a pre-cancelled TestRun without client polling',
+    () async {
+      final state = await Directory('/private/tmp').createTemp('gvm-collect-');
+      addTearDown(() => state.delete(recursive: true));
+      final database = await GaoVmDatabase.open('${state.path}/gaovm.db');
+      addTearDown(database.close);
+      final source =
+          await ImageStore(
+            database,
+            Directory('${state.path}/images'),
+          ).importFile(
+            await File('${state.path}/input-kernel').writeAsString('kernel'),
+            type: ImageType.linuxKernel,
+          );
+      final spec = TestRunSpec(
+        source: ImageTestRunSource(source.id),
+        wait: VmWaitSpec(
+          condition: WaitCondition.runtimeRunning,
+          timeoutSeconds: 30,
+        ),
+        steps: [
+          TestStepRequest(argv: ['true'], timeoutSeconds: 30),
+        ],
+        cleanup: CleanupPolicy.retain,
+        retainOnFailure: true,
+      );
+      final service = TestRunApplicationService(database: database);
+      final acceptance = await service.create(
+        TestRunCreateCommand(
+          spec: spec,
+          requestId: RequestId.generate(),
+          idempotencyKey: null,
+          requestBody: utf8.encode(jsonEncode(spec.toJson())),
+        ),
+      );
+      final id = acceptance.resourceId as TestRunId;
+      await service.cancelRun(
+        TestRunCancelCommand(
+          testRunId: id,
+          requestId: RequestId.generate(),
+          idempotencyKey: null,
+          requestBody: const [],
+        ),
+      );
+      final collected = Completer<void>();
+      final subscription = SqliteDurableEventFeed(database)
+          .watch(testRunId: id)
+          .listen((event) {
+            if (event.type == 'test_run.artifacts_collected' &&
+                !collected.isCompleted) {
+              collected.complete();
+            }
+          }, onError: collected.completeError);
+      _Daemon? daemon;
+      try {
+        daemon = await _Daemon.start(state, '/bin/cat');
+        await collected.future.timeout(const Duration(seconds: 5));
+        final response = await daemon.get(
+          '/v1/test-runs/${id.value}/artifacts',
+        );
+        expect(response.$1, HttpStatus.ok);
+        final artifact = ((response.$2['items'] as List).single as Map);
+        expect(artifact['kind'], 'result');
+        expect(artifact['test_run_id'], id.value);
+        expect(artifact['operation_id'], acceptance.operationId.value);
+        final result = await daemon.get(artifact['download_url'] as String);
+        expect(result.$1, HttpStatus.ok);
+        expect(result.$2['execution_outcome'], 'cancelled');
+        expect(result.$2['vm_id'], isNull);
+        expect(await SqliteVmRepository(database).list(), isEmpty);
+      } finally {
+        await subscription.cancel();
+        await daemon?.close();
+        if (daemon != null) expect(await daemon.process.exitCode, 0);
+      }
+    },
+    skip: !Platform.isMacOS,
+  );
+
   test(
     'installed daemon serves the VM catalog over HTTP UDS',
     () async {
@@ -124,11 +205,15 @@ void main() {
 }
 
 final class _Daemon {
-  _Daemon(this.process, this.client, this.output, this.errors);
+  _Daemon(this.process, this.client, this.output, this.errors) {
+    process.exitCode.then((_) => _exited = true);
+  }
   final Process process;
   final HttpClient client;
   final StreamSubscription<String> output;
   final Future<void> errors;
+  bool _exited = false;
+  Future<void>? _closing;
 
   static Future<_Daemon> start(Directory state, String driver) async {
     final socket = '${state.path}/run/api.sock';
@@ -188,13 +273,15 @@ final class _Daemon {
     return (response.statusCode, Map<String, Object?>.from(decoded as Map));
   }
 
-  Future<void> close() async {
+  Future<void> close() => _closing ??= _close();
+
+  Future<void> _close() async {
     client.close(force: true);
-    process.kill(ProcessSignal.sigterm);
+    if (!_exited) process.kill(ProcessSignal.sigterm);
     try {
       await process.exitCode.timeout(const Duration(seconds: 5));
     } on TimeoutException {
-      process.kill(ProcessSignal.sigkill);
+      if (!_exited) process.kill(ProcessSignal.sigkill);
       await process.exitCode;
     }
     await output.cancel();
