@@ -25,7 +25,7 @@ const coreTableNames = <String>{
   'outbox',
 };
 
-const _latestSchemaVersion = 10;
+const _latestSchemaVersion = 11;
 final _transactionContextKey = Object();
 final _savepointScopeKey = Object();
 final _transactionGates = <String, _AsyncGate>{};
@@ -508,6 +508,10 @@ const _migrations = <_Migration>[
       artifact_id TEXT PRIMARY KEY REFERENCES artifacts(id) ON DELETE CASCADE,
       storage_version INTEGER NOT NULL CHECK (storage_version = 1)
     );
+  '''),
+  _Migration(11, '''
+    CREATE INDEX artifacts_vm_created_idx ON artifacts(vm_id, created_at, id);
+    CREATE INDEX artifacts_test_run_created_idx ON artifacts(test_run_id, created_at, id);
   '''),
 ];
 

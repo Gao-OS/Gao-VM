@@ -6,6 +6,28 @@ import 'package:gaovmd/gaovmd.dart';
 import 'package:sqlite3/sqlite3.dart';
 import 'package:test/test.dart';
 
+// Reduced historical fixtures still include the pre-existing artifact table:
+// later additive index migrations must run against a valid legacy catalog.
+Database _legacyDatabase(String path) {
+  final database = sqlite3.open(path);
+  database.execute('''
+    CREATE TABLE artifacts (
+      id TEXT PRIMARY KEY,
+      vm_id TEXT REFERENCES vms(id),
+      operation_id TEXT REFERENCES operations(id),
+      test_run_id TEXT REFERENCES test_runs(id),
+      kind TEXT NOT NULL,
+      content_type TEXT NOT NULL,
+      size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+      digest TEXT NOT NULL,
+      download_url TEXT NOT NULL,
+      retention_until TEXT,
+      created_at TEXT NOT NULL
+    );
+  ''');
+  return database;
+}
+
 void main() {
   late Directory temporaryDirectory;
   late String databasePath;
@@ -26,8 +48,20 @@ void main() {
   test('bootstrap configures SQLite and applies the schema once', () async {
     var database = await GaoVmDatabase.open(databasePath);
 
-    expect(database.schemaVersion, 10);
-    expect(database.appliedMigrationVersions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(database.schemaVersion, 11);
+    expect(database.appliedMigrationVersions, [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+    ]);
     expect(database.journalMode, 'wal');
     expect(database.foreignKeysEnabled, isTrue);
     expect(database.busyTimeout, const Duration(seconds: 5));
@@ -54,15 +88,27 @@ void main() {
     database.close();
 
     database = await GaoVmDatabase.open(databasePath);
-    expect(database.schemaVersion, 10);
-    expect(database.appliedMigrationVersions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(database.schemaVersion, 11);
+    expect(database.appliedMigrationVersions, [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+    ]);
     database.close();
   });
 
   test(
     'v9 preserves v8 TestRun inputs and steps with safe recovery defaults',
     () async {
-      final legacy = sqlite3.open(databasePath);
+      final legacy = _legacyDatabase(databasePath);
       legacy.execute('''
       CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
       CREATE TABLE vms(id TEXT PRIMARY KEY);
@@ -101,7 +147,7 @@ void main() {
       legacy.dispose();
       var database = await GaoVmDatabase.open(databasePath);
       addTearDown(() => database.close());
-      expect(database.schemaVersion, 10);
+      expect(database.schemaVersion, 11);
       await database.read((connection) {
         final row = connection.select('SELECT * FROM test_runs').single;
         for (final entry in original.entries) {
@@ -144,6 +190,7 @@ void main() {
         8,
         9,
         10,
+        11,
       ]);
       await database.read((connection) {
         expect(connection.select('SELECT * FROM test_steps').single, step);
@@ -154,7 +201,7 @@ void main() {
   test(
     'v5 adds an empty provisioning catalog without changing v4 data',
     () async {
-      final legacy = sqlite3.open(databasePath);
+      final legacy = _legacyDatabase(databasePath);
       legacy.execute('''
         CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
         INSERT INTO schema_migrations VALUES(1, 'old'), (2, 'old'), (3, 'old'), (4, 'old');
@@ -170,7 +217,7 @@ void main() {
       legacy.dispose();
       final database = await GaoVmDatabase.open(databasePath);
       try {
-        expect(database.schemaVersion, 10);
+        expect(database.schemaVersion, 11);
         expect(database.appliedMigrationVersions, [
           1,
           2,
@@ -182,6 +229,7 @@ void main() {
           8,
           9,
           10,
+          11,
         ]);
         await database.read((db) {
           expect(db.select('SELECT * FROM vm_provisioning'), isEmpty);
@@ -217,7 +265,7 @@ void main() {
   test(
     'v6 retains v5 pinned jobs and enforces complete immutable outcome fields',
     () async {
-      final legacy = sqlite3.open(databasePath);
+      final legacy = _legacyDatabase(databasePath);
       legacy.execute('''
       CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
       INSERT INTO schema_migrations VALUES(1, 'old'), (2, 'old'), (3, 'old'), (4, 'old'), (5, 'old');
@@ -233,7 +281,7 @@ void main() {
       legacy.dispose();
       final database = await GaoVmDatabase.open(databasePath);
       try {
-        expect(database.schemaVersion, 10);
+        expect(database.schemaVersion, 11);
         await database.read((db) {
           final job = db.select('SELECT * FROM vm_provisioning').single;
           expect(job['plan_json'], '{"pinned":true}');
@@ -275,7 +323,7 @@ void main() {
   );
 
   test('v7 retains v6 jobs and enforces immutable cancellation linkage', () async {
-    final legacy = sqlite3.open(databasePath);
+    final legacy = _legacyDatabase(databasePath);
     legacy.execute('''
         CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
         INSERT INTO schema_migrations VALUES(1, 'old'), (2, 'old'), (3, 'old'), (4, 'old'), (5, 'old'), (6, 'old');
@@ -304,7 +352,7 @@ void main() {
 
     var database = await GaoVmDatabase.open(databasePath);
     try {
-      expect(database.schemaVersion, 10);
+      expect(database.schemaVersion, 11);
       expect(database.appliedMigrationVersions, [
         1,
         2,
@@ -316,6 +364,7 @@ void main() {
         8,
         9,
         10,
+        11,
       ]);
       await database.read((db) {
         expect(
@@ -378,6 +427,7 @@ void main() {
         8,
         9,
         10,
+        11,
       ]);
       await database.read((db) {
         expect(
@@ -402,7 +452,7 @@ void main() {
   test(
     'v4 preserves an existing v3 checkpoint with nullable compatibility fields',
     () async {
-      final legacy = sqlite3.open(databasePath);
+      final legacy = _legacyDatabase(databasePath);
       legacy.execute('''
         CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
         INSERT INTO schema_migrations VALUES(1, 'old'), (2, 'old'), (3, 'old');
@@ -414,7 +464,7 @@ void main() {
       legacy.dispose();
       final database = await GaoVmDatabase.open(databasePath);
       try {
-        expect(database.schemaVersion, 10);
+        expect(database.schemaVersion, 11);
         await database.read((db) {
           final row = db.select('SELECT * FROM vm_runtime').single;
           expect(row['applied_intent_revision'], 7);
@@ -431,7 +481,7 @@ void main() {
   test(
     'v3 adds acceptance checkpoints without changing existing VM state',
     () async {
-      final legacy = sqlite3.open(databasePath);
+      final legacy = _legacyDatabase(databasePath);
       legacy.execute('''
       CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
       INSERT INTO schema_migrations VALUES(1, '2026-09-07T00:00:00.000000Z'), (2, '2026-09-07T00:00:00.000000Z');
@@ -445,7 +495,7 @@ void main() {
       legacy.dispose();
       final database = await GaoVmDatabase.open(databasePath);
       try {
-        expect(database.schemaVersion, 10);
+        expect(database.schemaVersion, 11);
         expect(database.appliedMigrationVersions, [
           1,
           2,
@@ -457,6 +507,7 @@ void main() {
           8,
           9,
           10,
+          11,
         ]);
         await database.read((db) {
           final vm = db.select('SELECT * FROM vms').single;
@@ -502,7 +553,7 @@ void main() {
   test(
     'migration preserves duplicate v1 outbox keys and adds claim fields',
     () async {
-      final legacy = sqlite3.open(databasePath);
+      final legacy = _legacyDatabase(databasePath);
       legacy.execute('''
       CREATE TABLE schema_migrations (
         version INTEGER PRIMARY KEY,
@@ -532,7 +583,7 @@ void main() {
 
       final database = await GaoVmDatabase.open(databasePath);
 
-      expect(database.schemaVersion, 10);
+      expect(database.schemaVersion, 11);
       expect(database.appliedMigrationVersions, [
         1,
         2,
@@ -544,6 +595,7 @@ void main() {
         8,
         9,
         10,
+        11,
       ]);
       await database.read((connection) {
         expect(
@@ -778,7 +830,7 @@ void main() {
     ]);
 
     for (final database in databases) {
-      expect(database.schemaVersion, 10);
+      expect(database.schemaVersion, 11);
       expect(database.appliedMigrationVersions, [
         1,
         2,
@@ -790,6 +842,7 @@ void main() {
         8,
         9,
         10,
+        11,
       ]);
       database.close();
     }
@@ -810,8 +863,8 @@ void main() {
     ]);
 
     for (final result in results) {
-      expect(result.schemaVersion, 10);
-      expect(result.migrations, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+      expect(result.schemaVersion, 11);
+      expect(result.migrations, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
     }
   });
 }

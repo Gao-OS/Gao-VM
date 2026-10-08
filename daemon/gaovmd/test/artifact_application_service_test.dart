@@ -5,8 +5,6 @@ import 'dart:io';
 import 'package:crypto/crypto.dart';
 import 'package:gaovm_models/gaovm_models.dart';
 import 'package:gaovmd/gaovmd.dart';
-import 'package:gaovmd/src/artifact_application_service.dart';
-import 'package:gaovmd/src/artifact_repository.dart';
 import 'package:gaovmd/src/image_filesystem.dart' show imageFileMode;
 import 'package:sqlite3/sqlite3.dart';
 import 'package:test/test.dart';
@@ -528,4 +526,42 @@ void main() {
       expect(await Directory('${root.path}/${id.value}').exists(), isFalse);
     }
   });
+
+  test(
+    'malformed unpublished manifests are retained without aborting recovery',
+    () async {
+      final child = await Process.run(Platform.resolvedExecutable, [
+        'run',
+        'test/helpers/artifact_crash_child.dart',
+        root.path,
+        '${temporary.path}/catalog.db',
+        run.id.value,
+        run.operationId.value,
+        'published',
+      ]);
+      expect(child.exitCode, 73, reason: '${child.stdout}\n${child.stderr}');
+      final proof =
+          jsonDecode(
+                await File(
+                  '${temporary.path}/crash-published.json',
+                ).readAsString(),
+              )
+              as Map;
+      final id = ArtifactId(proof['artifact_id'] as String);
+      final manifest = File('${root.path}/${id.value}/manifest.json');
+      imageFileMode(manifest.path, 0x180);
+      await manifest.writeAsString('[]');
+      imageFileMode(manifest.path, 0x100);
+      final result = await service().reconcile();
+      expect(result.removedNames, isEmpty);
+      expect(result.retainedNames, [id.value]);
+      expect(result.damagedArtifactIds, isEmpty);
+      expect(await File('${root.path}/${id.value}/payload').readAsBytes(), [
+        1,
+        2,
+        3,
+      ]);
+      expect(await ArtifactRepository(database).get(id), isNull);
+    },
+  );
 }

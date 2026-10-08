@@ -17,6 +17,34 @@ final class ArtifactPublicationConflict implements Exception {
   String toString() => 'Artifact $id: $message';
 }
 
+final class ArtifactCatalogCorruption implements Exception {
+  const ArtifactCatalogCorruption();
+
+  @override
+  String toString() => 'Artifact catalog metadata is invalid';
+}
+
+final class ArtifactListQuery {
+  ArtifactListQuery({required this.owner, this.cursor, this.limit = 50}) {
+    if (owner is! VmId && owner is! TestRunId)
+      throw ArgumentError.value(owner, 'owner');
+    if (limit < 1 ||
+        limit > 200 ||
+        cursor != null && (cursor!.isEmpty || cursor!.length > 512)) {
+      throw const FormatException('invalid artifact pagination');
+    }
+  }
+  final ResourceId owner;
+  final String? cursor;
+  final int limit;
+}
+
+final class ArtifactPage {
+  const ArtifactPage(this.items, this.nextCursor);
+  final List<Artifact> items;
+  final String? nextCursor;
+}
+
 final class ArtifactRepository {
   ArtifactRepository(this.database);
   final GaoVmDatabase database;
@@ -131,6 +159,65 @@ final class ArtifactRepository {
     return rows.isEmpty ? null : _decode(rows.single);
   });
 
+  Future<ArtifactPage> list(ArtifactListQuery query) {
+    String? afterTime;
+    ArtifactId? afterId;
+    if (query.cursor case final cursor?) {
+      try {
+        final anchor = jsonDecode(
+          utf8.decode(base64Url.decode(base64Url.normalize(cursor))),
+        );
+        if (anchor is! Map ||
+            anchor.length != 4 ||
+            anchor['version'] != 1 ||
+            anchor['owner'] != query.owner.value ||
+            anchor['created_at'] is! String) {
+          throw const FormatException('invalid artifact cursor');
+        }
+        afterTime = anchor['created_at'] as String;
+        if (afterTime.length > 64 || DateTime.tryParse(afterTime) == null) {
+          throw const FormatException('invalid artifact cursor timestamp');
+        }
+        afterId = ArtifactId(anchor['id'] as String);
+      } catch (_) {
+        throw const FormatException('invalid artifact cursor');
+      }
+    }
+    final column = query.owner is VmId ? 'vm_id' : 'test_run_id';
+    return database.read((db) {
+      final rows = db.select(
+        '''
+        SELECT * FROM artifacts WHERE $column = ?
+          ${afterId == null ? '' : 'AND (created_at, id) > (?, ?)'}
+        ORDER BY created_at, id LIMIT ?
+      ''',
+        [
+          query.owner.value,
+          if (afterId != null) ...[afterTime, afterId.value],
+          query.limit + 1,
+        ],
+      );
+      final items = List<Artifact>.unmodifiable(
+        rows.take(query.limit).map(_decode),
+      );
+      final next = rows.length > query.limit
+          ? base64Url
+                .encode(
+                  utf8.encode(
+                    jsonEncode({
+                      'version': 1,
+                      'owner': query.owner.value,
+                      'id': items.last.id.value,
+                      'created_at': rows[query.limit - 1]['created_at'],
+                    }),
+                  ),
+                )
+                .replaceAll('=', '')
+          : null;
+      return ArtifactPage(items, next);
+    });
+  }
+
   Future<bool> hasManagedPayload(ArtifactId id) => database.read(
     (db) => db.select(
       'SELECT 1 FROM artifact_payloads WHERE artifact_id = ? AND storage_version = 1',
@@ -156,19 +243,29 @@ final class ArtifactRepository {
   }
 }
 
-Artifact _decode(Row row) => Artifact.fromJson({
-  for (final key in const [
-    'id',
-    'vm_id',
-    'operation_id',
-    'test_run_id',
-    'kind',
-    'content_type',
-    'size_bytes',
-    'digest',
-    'download_url',
-    'retention_until',
-    'created_at',
-  ])
-    key: row[key],
-});
+Artifact _decode(Row row) {
+  try {
+    return Artifact.fromJson({
+      for (final key in const [
+        'id',
+        'vm_id',
+        'operation_id',
+        'test_run_id',
+        'kind',
+        'content_type',
+        'size_bytes',
+        'digest',
+        'download_url',
+        'retention_until',
+        'created_at',
+      ])
+        key: row[key],
+    });
+  } on FormatException {
+    throw const ArtifactCatalogCorruption();
+  } on ArgumentError {
+    throw const ArtifactCatalogCorruption();
+  } on TypeError {
+    throw const ArtifactCatalogCorruption();
+  }
+}

@@ -3,7 +3,6 @@ import 'dart:io';
 
 import 'package:gaovm_models/gaovm_models.dart';
 import 'package:gaovmd/gaovmd.dart';
-import 'package:gaovmd/src/artifact_application_service.dart';
 
 Future<void> main(List<String> args) async {
   final directory = await OwnedImageDirectory.open(Directory(args[0]));

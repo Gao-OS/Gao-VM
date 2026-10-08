@@ -121,7 +121,12 @@ final class SqliteVmManagedFileEffectAdapter
             AND o.resource_type = 'virtual_machine' AND o.resource_id = v.id
             AND o.state = 'running'
             AND NOT EXISTS (SELECT 1 FROM resource_leases l WHERE l.resource_id = v.id)
-            AND NOT EXISTS (SELECT 1 FROM artifacts a WHERE a.vm_id = v.id)
+            AND NOT EXISTS (
+              SELECT 1 FROM artifacts a WHERE a.vm_id = v.id AND NOT EXISTS (
+                SELECT 1 FROM artifact_payloads p
+                WHERE p.artifact_id = a.id AND p.storage_version = 1
+              )
+            )
         ''',
       [
         state.vmId.value,

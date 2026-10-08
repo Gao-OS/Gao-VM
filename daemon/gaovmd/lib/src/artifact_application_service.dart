@@ -8,6 +8,8 @@ import 'artifact_repository.dart';
 import 'event_repository.dart';
 import 'image_filesystem.dart';
 import 'sqlite_database.dart';
+import 'test_run_repository.dart';
+import 'vm_repository.dart';
 
 const maxManagedArtifactBytes = 256 * 1024 * 1024;
 const _artifactFormat = 'gaovm.artifact.v1';
@@ -70,6 +72,32 @@ final class ArtifactApplicationService {
   final ArtifactRepository repository;
   final DateTime Function() _now;
   final void Function(ArtifactPublicationCheckpoint, ArtifactId)? _onCheckpoint;
+
+  Future<ArtifactPage> listForVm(
+    VmId id, {
+    String? cursor,
+    int limit = 50,
+  }) async {
+    final query = ArtifactListQuery(owner: id, cursor: cursor, limit: limit);
+    // Artifacts outlive ephemeral VMs; their retained catalog tombstone remains
+    // a valid owner even though ordinary VM GET hides deleted resources.
+    if (await SqliteVmRepository(database).get(id, includeDeleted: true) ==
+        null) {
+      throw VmNotFoundException(id);
+    }
+    return repository.list(query);
+  }
+
+  Future<ArtifactPage> listForTestRun(
+    TestRunId id, {
+    String? cursor,
+    int limit = 50,
+  }) async {
+    final query = ArtifactListQuery(owner: id, cursor: cursor, limit: limit);
+    if (await SqliteTestRunRepository(database).get(id) == null)
+      throw TestRunNotFoundException(id);
+    return repository.list(query);
+  }
 
   Future<Artifact> publish({
     required Stream<List<int>> bytes,
@@ -258,12 +286,10 @@ final class ArtifactApplicationService {
                   payload.close();
                   final file = child.file('manifest.json');
                   try {
-                    final json =
-                        jsonDecode(
-                              utf8.decode(await file.readBounded(64 * 1024)),
-                            )
-                            as Map;
-                    if (json['format'] != _artifactFormat)
+                    final json = jsonDecode(
+                      utf8.decode(await file.readBounded(64 * 1024)),
+                    );
+                    if (json is! Map || json['format'] != _artifactFormat)
                       throw const FormatException('unknown artifact format');
                     manifest = Artifact.fromJson(json['artifact']);
                     if (manifest.id != id)

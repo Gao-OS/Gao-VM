@@ -2,7 +2,6 @@ import 'dart:io';
 
 import 'package:gaovm_models/gaovm_models.dart';
 import 'package:gaovmd/gaovmd.dart';
-import 'package:gaovmd/src/artifact_repository.dart';
 import 'package:sqlite3/sqlite3.dart';
 import 'package:test/test.dart';
 
@@ -231,12 +230,14 @@ void main() {
       final artifact = await repository().publish(_artifact(run));
       database.close();
       final legacy = sqlite3.open('${temporary.path}/catalog.db');
+      legacy.execute('DROP INDEX IF EXISTS artifacts_vm_created_idx');
+      legacy.execute('DROP INDEX IF EXISTS artifacts_test_run_created_idx');
       legacy.execute('DROP TABLE IF EXISTS artifact_payloads');
       legacy.execute('DELETE FROM schema_migrations WHERE version > 9');
       legacy.userVersion = 9;
       legacy.dispose();
       database = await GaoVmDatabase.open('${temporary.path}/catalog.db');
-      expect(database.schemaVersion, 10);
+      expect(database.schemaVersion, 11);
       expect(await repository().get(artifact.id), artifact);
       expect(
         (await SqliteTestRunRepository(database).get(run.id))!.artifactIds,
@@ -251,6 +252,118 @@ void main() {
           throwsA(isA<SqliteException>()),
         );
       });
+    },
+  );
+  test(
+    'v11 indexes preserve v10 managed ownership and paginated metadata',
+    () async {
+      final vm = await SqliteVmRepository(
+        database,
+      ).create(name: 'retained', spec: _vmSpec());
+      final id = ArtifactId.generate();
+      final artifact = Artifact(
+        id: id,
+        vmId: vm.metadata.id,
+        kind: ArtifactKind.stdout,
+        contentType: 'text/plain',
+        sizeBytes: 2,
+        digest: contentDigest('{}'),
+        downloadUrl: '/v1/artifacts/${id.value}',
+        createdAt: DateTime.utc(2026, 10, 8),
+      );
+      await repository().publish(artifact, managedPayload: true);
+      database.close();
+      final legacy = sqlite3.open('${temporary.path}/catalog.db');
+      legacy.execute('DROP INDEX IF EXISTS artifacts_vm_created_idx');
+      legacy.execute('DROP INDEX IF EXISTS artifacts_test_run_created_idx');
+      legacy.execute('DELETE FROM schema_migrations WHERE version > 10');
+      legacy.userVersion = 10;
+      legacy.dispose();
+      database = await GaoVmDatabase.open('${temporary.path}/catalog.db');
+      expect(database.schemaVersion, 11);
+      expect(await repository().get(id), artifact);
+      expect(await repository().hasManagedPayload(id), isTrue);
+      expect(
+        (await repository().list(
+          ArtifactListQuery(owner: vm.metadata.id),
+        )).items,
+        [artifact],
+      );
+      await database.read((db) {
+        final indexes = db
+            .select(
+              "SELECT name FROM sqlite_schema WHERE tbl_name = 'artifacts' AND type = 'index'",
+            )
+            .map((row) => row['name']);
+        expect(
+          indexes,
+          containsAll([
+            'artifacts_vm_created_idx',
+            'artifacts_test_run_created_idx',
+          ]),
+        );
+      });
+    },
+  );
+  test(
+    'default and maximum pages resume after reopen without shifting on earlier inserts',
+    () async {
+      final vm = await SqliteVmRepository(
+        database,
+      ).create(name: 'pages', spec: _vmSpec());
+      final values = <Artifact>[];
+      final time = DateTime.utc(2026, 10, 8);
+      Future<Artifact> publish(DateTime createdAt) {
+        final id = ArtifactId.generate();
+        return repository().publish(
+          Artifact(
+            id: id,
+            vmId: vm.metadata.id,
+            kind: ArtifactKind.result,
+            contentType: 'application/json',
+            sizeBytes: 2,
+            digest: contentDigest('{}'),
+            downloadUrl: '/v1/artifacts/${id.value}',
+            createdAt: createdAt,
+          ),
+        );
+      }
+
+      for (var index = 0; index < 201; index++) {
+        values.add(await publish(time.add(Duration(microseconds: index))));
+      }
+      final first = await repository().list(
+        ArtifactListQuery(owner: vm.metadata.id),
+      );
+      expect(first.items, values.take(50));
+      expect(first.nextCursor, isNotNull);
+      final maximum = await repository().list(
+        ArtifactListQuery(owner: vm.metadata.id, limit: 200),
+      );
+      expect(maximum.items, values.take(200));
+      await publish(time.subtract(const Duration(microseconds: 1)));
+      database.close();
+      database = await GaoVmDatabase.open('${temporary.path}/catalog.db');
+      final after = await repository().list(
+        ArtifactListQuery(
+          owner: vm.metadata.id,
+          cursor: first.nextCursor,
+          limit: 200,
+        ),
+      );
+      expect(after.items, values.skip(50));
+      expect(after.nextCursor, isNull);
+      final last = await repository().list(
+        ArtifactListQuery(owner: vm.metadata.id, cursor: maximum.nextCursor),
+      );
+      expect(last.items, [values.last]);
+      expect(last.nextCursor, isNull);
+      await expectLater(
+        () => repository().list(
+          ArtifactListQuery(owner: run.id, cursor: first.nextCursor),
+        ),
+        throwsFormatException,
+      );
     },
   );
 }

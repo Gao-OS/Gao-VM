@@ -1,5 +1,8 @@
 library gaovmd;
 
+export 'src/artifact_api_handlers.dart';
+export 'src/artifact_application_service.dart';
+export 'src/artifact_repository.dart';
 export 'src/atomic_json_file.dart';
 export 'src/daemon_server.dart';
 export 'src/daemon_application.dart';

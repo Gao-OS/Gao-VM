@@ -1,9 +1,18 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:gaovm_models/gaovm_models.dart';
 import 'package:gaovmd/gaovmd.dart';
 import 'package:gaovmd/src/image_filesystem.dart' show imageFileMode;
 import 'package:test/test.dart';
+
+final class _ArtifactHealth implements SystemHealthService {
+  @override
+  Future<SystemHealthStatus> liveness() async =>
+      SystemHealthStatus(healthy: true, checks: const {});
+  @override
+  Future<SystemHealthStatus> readiness() => liveness();
+}
 
 void main() {
   late Directory root;
@@ -146,6 +155,122 @@ void main() {
         throwsStateError,
       );
       expect(await File('${bundlePath()}/disks/root.raw').exists(), isTrue);
+    },
+  );
+
+  test(
+    'independently managed artifacts survive bundle removal and VM tombstoning',
+    () async {
+      imageFileMode(root.path, 0x1c0);
+      final directory = await Directory(
+        '${root.path}/retained-artifacts',
+      ).create();
+      imageFileMode(directory.path, 0x1c0);
+      final retained = await OwnedImageDirectory.open(directory);
+      addTearDown(retained.close);
+      var artifacts = ArtifactApplicationService(
+        database: database,
+        directory: retained,
+      );
+      final runs = SqliteTestRunRepository(database);
+      final run = await runs.create(
+        requestId: RequestId.generate(),
+        spec: TestRunSpec(
+          source: ImageTestRunSource(diskImage.id),
+          wait: VmWaitSpec(
+            condition: WaitCondition.guestAgentReady,
+            timeoutSeconds: 30,
+          ),
+          steps: [
+            TestStepRequest(argv: ['true'], timeoutSeconds: 30),
+          ],
+          cleanup: CleanupPolicy.deleteOnSuccess,
+          retainOnFailure: true,
+        ),
+      );
+      await runs.transition(
+        run.id,
+        expectedState: TestRunState.pending,
+        nextState: TestRunState.provisioning,
+      );
+      await runs.transition(
+        run.id,
+        expectedState: TestRunState.provisioning,
+        nextState: TestRunState.startingVm,
+        vmId: state.vmId,
+      );
+      final artifact = await artifacts.publish(
+        bytes: Stream.value([1, 2, 3]),
+        kind: ArtifactKind.stdout,
+        contentType: 'text/plain',
+        maxBytes: 16,
+        vmId: state.vmId,
+        testRunId: run.id,
+        operationId: run.operationId,
+        retentionUntil: DateTime.now().toUtc().add(const Duration(days: 7)),
+      );
+      await adapter().remove(state, operationId);
+      expect(await Directory(bundlePath()).exists(), isFalse);
+      final completed = reduce(state, ManagedFilesRemoved(operationId)).state;
+      await SqliteVmStateEffectAdapter(database).persistVm(completed);
+      await SqliteVmStateEffectAdapter(database).persistRuntime(completed);
+      database.close();
+      database = await GaoVmDatabase.open('${root.path}/catalog.db');
+      artifacts = ArtifactApplicationService(
+        database: database,
+        directory: retained,
+      );
+      expect(await SqliteVmRepository(database).get(state.vmId), isNull);
+      expect((await artifacts.listForVm(state.vmId)).items, [artifact]);
+      expect((await artifacts.listForTestRun(run.id)).items, [artifact]);
+      expect(
+        (await SqliteTestRunRepository(database).get(run.id))!.artifactIds,
+        [artifact.id],
+      );
+      expect(
+        await (await artifacts.download(
+          artifact.id,
+        )).bytes.expand((chunk) => chunk).toList(),
+        [1, 2, 3],
+      );
+      expect(await external.readAsString(), 'external');
+      final router = PublicApiRouter();
+      ArtifactApiHandlers(artifacts: artifacts).register(router);
+      final server = PublicApiServer(
+        socketPath: '${root.path}/api.sock',
+        openApiDocument: const {},
+        systemHealth: _ArtifactHealth(),
+        router: router,
+      );
+      await server.start();
+      final client = HttpClient()
+        ..findProxy = ((_) => 'DIRECT')
+        ..connectionFactory = (_, _, _) => Socket.startConnect(
+          InternetAddress(server.socketPath, type: InternetAddressType.unix),
+          0,
+        );
+      try {
+        for (final path in [
+          '/v1/vms/${state.vmId.value}/artifacts',
+          '/v1/test-runs/${run.id.value}/artifacts',
+        ]) {
+          final response = await (await client.getUrl(
+            Uri.parse('http://localhost$path'),
+          )).close();
+          expect(response.statusCode, 200);
+          final page =
+              jsonDecode(await utf8.decoder.bind(response).join()) as Map;
+          expect((page['items'] as List).map(Artifact.fromJson), [artifact]);
+        }
+        final response = await (await client.getUrl(
+          Uri.parse('http://localhost${artifact.downloadUrl}'),
+        )).close();
+        expect(response.statusCode, 200);
+        expect(await response.expand((chunk) => chunk).toList(), [1, 2, 3]);
+      } finally {
+        client.close(force: true);
+        await server.close();
+      }
     },
   );
 

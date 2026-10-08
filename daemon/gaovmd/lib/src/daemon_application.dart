@@ -4,6 +4,8 @@ import 'dart:io';
 
 import 'package:gaovm_models/gaovm_models.dart';
 
+import 'artifact_api_handlers.dart';
+import 'artifact_application_service.dart';
 import 'daemon_ownership.dart';
 import 'driver_process_manager.dart';
 import 'driver_runtime_discovery.dart';
@@ -111,6 +113,8 @@ final class DaemonApplication {
       roots.add(bundles);
       final images = await _privateChild(state, 'images');
       roots.add(images);
+      final artifacts = await _privateChild(state, 'artifacts');
+      roots.add(artifacts);
       final logs = await _privateChild(state, 'logs');
       roots.add(logs);
       final existingDatabase = state.fileOrNull('gaovm.db');
@@ -171,6 +175,14 @@ final class DaemonApplication {
         database: database,
         store: imageStore,
       );
+      final artifactService = ArtifactApplicationService(
+        database: database,
+        directory: artifacts,
+      );
+      final artifactRecovery = await artifactService.reconcile();
+      health.artifactStoreHealthy =
+          artifactRecovery.damagedArtifactIds.isEmpty &&
+          artifactRecovery.retainedNames.isEmpty;
       final metrics = MacOsHostMetricsSource(
         storage: state,
         countUnmanagedDrivers: () async => (await inventory.snapshot())
@@ -343,6 +355,7 @@ final class DaemonApplication {
         ),
       ).register(router);
       ImageApiHandlers(images: imageService).register(router);
+      ArtifactApiHandlers(artifacts: artifactService).register(router);
       TestRunApiHandlers(runs: testRuns).register(router);
       EventApiHandlers(feed: feed).register(router);
       final ownedDatabase = database;
@@ -428,6 +441,7 @@ final class _DaemonHealth implements SystemHealthService {
   final GaoVmDatabase database;
   bool ready = false;
   bool imageStoreHealthy = true;
+  bool artifactStoreHealthy = true;
 
   @override
   Future<SystemHealthStatus> liveness() async =>
@@ -438,10 +452,11 @@ final class _DaemonHealth implements SystemHealthService {
     await ownership.verify();
     await database.read((db) => db.select('SELECT 1'));
     return SystemHealthStatus(
-      healthy: ready && imageStoreHealthy,
+      healthy: ready && imageStoreHealthy && artifactStoreHealthy,
       checks: {
         'catalog': 'ready',
         'image_store': imageStoreHealthy ? 'ready' : 'damaged',
+        'artifact_store': artifactStoreHealthy ? 'ready' : 'damaged',
         'runtime_recovery': ready ? 'ready' : 'stopping',
       },
     );

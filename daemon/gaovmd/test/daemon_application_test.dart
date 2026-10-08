@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:gaovmd/gaovmd.dart';
+import 'package:gaovmd/src/image_filesystem.dart' show imageFileMode;
 import 'package:test/test.dart';
 
 void main() {
@@ -80,6 +81,41 @@ void main() {
         owner.close();
         state.close();
       } finally {
+        await temporary.delete(recursive: true);
+      }
+    },
+    skip: !Platform.isMacOS,
+  );
+
+  test(
+    'linked artifact stores are rejected without touching their target',
+    () async {
+      final temporary = await Directory(
+        '/private/tmp',
+      ).createTemp('gvm-art-link-');
+      final state = await Directory('${temporary.path}/state').create();
+      imageFileMode(state.path, 0x1c0);
+      final outside = await Directory('${temporary.path}/outside').create();
+      final proof = await File(
+        '${outside.path}/proof',
+      ).writeAsString('preserve');
+      await Link('${state.path}/artifacts').create(outside.path);
+      DaemonApplication? daemon;
+      try {
+        await expectLater(() async {
+          daemon = await DaemonApplication.start(
+            stateDirectory: state,
+            driverBinary: '/bin/cat',
+            openApiDocument: const {},
+          );
+        }(), throwsA(isA<FileSystemException>()));
+        expect(await proof.readAsString(), 'preserve');
+        final held = await OwnedImageDirectory.open(state);
+        final owner = (await DaemonOwnership.tryAcquire(held))!;
+        owner.close();
+        held.close();
+      } finally {
+        await daemon?.close();
         await temporary.delete(recursive: true);
       }
     },

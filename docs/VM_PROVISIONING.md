@@ -265,12 +265,17 @@ quarantine, and removes only proven managed disks, logs, and managed EFI state.
 Mutable guest disk bytes are not compared with the original image hash. Retries
 can resume partial cleanup, including under a later delete operation.
 
-External paths and base images remain untouched. Unknown content, linked
-artifacts, and missing successful provisioning proof fail closed. Artifact
-retention and deletion of unbound legacy bundles remain integration work. The
-adapter does not establish driver exit: runtime composition must confirm exit
-before releasing leases and invoking this effect. Thirteen focused tests cover
-proof, leases, symlinks, unknown content, mutable disks, EFI, and retry behavior.
+External paths and base images remain untouched. Unknown bundle content, linked
+files, legacy/unbacked artifact references, and missing successful provisioning
+proof fail closed. An artifact with a version-1 managed-payload attestation lives
+in the independent artifact store and does not block bundle deletion: its SQLite
+reference and payload remain retained after VM tombstoning. The deletion test
+covers database reopen and HTTP list/download access after real bundle cleanup.
+See [ARTIFACTS.md](ARTIFACTS.md) for ownership and retention boundaries. Deletion
+of unbound legacy bundles remains integration work. The adapter does not establish
+driver exit: runtime composition must confirm exit before releasing leases and
+invoking this effect. Tests also cover leases, symlinks, unknown content, mutable
+disks, EFI, and retry behavior.
 
 ## Daemon dispatch and admission prerequisites
 

@@ -700,6 +700,11 @@ schema_migrations
 │   └── sha256-<digest>/
 │       ├── manifest.json
 │       └── objects/
+├── artifacts/
+│   └── <artifact-id>/
+│       ├── owner.json
+│       ├── manifest.json
+│       └── payload
 ├── vms/
 │   └── <vm-id>.gaovm/
 │       ├── manifest.json
@@ -726,6 +731,13 @@ schema_migrations
 - driver runtime directory：临时数据，可在 crash 后清理。
 
 bundle manifest 用于导出和诊断，不得与数据库形成两个可独立修改的 source of truth。
+
+已发布 artifact 的 metadata、关联与 retention 以 SQLite 为准；不可变 payload
+使用独立的 managed artifact root，不能随临时 VM bundle 一起删除。这样
+`delete_on_success` 可以删除 VM，同时保留 TestRun 结果的稳定下载引用。
+VM bundle 中的 `artifacts/` 可作为采集暂存位置；未知内容或没有独立 managed
+payload 所有权证明的 legacy 引用必须阻止 bundle 清理，不能被静默认领或删除。
+存储格式、恢复边界与现有 API 实现见 [ARTIFACTS.md](ARTIFACTS.md)。
 
 ---
 
