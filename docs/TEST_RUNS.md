@@ -19,17 +19,56 @@ Background workers currently implement:
 2. VM start acceptance and observation through durable lifecycle intents and
    `test_run_vm_start`. Driver generation and intent revision are checked before
    advancing to `waiting_ready`; start aborts have durable stop checkpoints.
-3. Host artifact collection for runs in `collecting`.
-4. Terminal completion for collected failures/cancellations which never allocated
+3. Bounded readiness observation with a persisted deadline, runtime-only success,
+   cancellation, timeout, and lifecycle/spec/generation conflict handling.
+4. Host artifact collection for runs in `collecting`.
+5. Terminal completion for collected failures/cancellations which never allocated
    a VM, including cancellation or an overall deadline before provisioning.
-5. Terminal completion of collected failures with `retain` or `delete_on_success`,
+6. Terminal completion of collected failures with `retain` or `delete_on_success`,
    preserving the allocated VM's current runtime state for manual debugging.
-6. Allocated-VM cleanup through durable stop/delete child operations. The parent
+7. Allocated-VM cleanup through durable stop/delete child operations. The parent
    remains active until the selected lifecycle operation has finished and its
    generation, intent, resource, and lease checks prove cleanup completed.
 
-Readiness and ordered guest execution are still unfinished. An allocated run
-reaching `waiting_ready` is not evidence of a successful guest test.
+Authenticated guest readiness and ordered guest execution are still unfinished.
+Neither `waiting_ready` nor `running_steps` is evidence of a successful guest test.
+
+## Readiness observation
+
+Schema v16 adds an immutable, nullable readiness start/deadline pair on `test_runs`
+and a bounded-scan index, without changing public DTOs. Normal entry into
+`waiting_ready` commits the pair with its phase event/outbox. The deadline is the
+earlier of entry plus the configured readiness timeout and the overall parent
+deadline; fractional-second precision is preserved. Reopening the catalog does
+not restart either budget.
+
+For upgraded catalogs with a run already in `waiting_ready`, the repository
+restores this pair once from the original committed phase event and immutable
+spec/parent deadline, with a `test_run.readiness_restored` event. A missing original
+timestamp is an infrastructure failure, not permission to begin another timeout.
+The stored pair cannot subsequently be changed or cleared.
+
+`TestRunReadinessWorker` observes committed catalog state without driver/guest IO
+or VM mutations. It requires the exact provisioning and succeeded start children,
+VM binding, start intent revision, driver generation, and applied spec generation.
+An accepted deletion fence, newer lifecycle intent, or spec change is a durable
+`VM_OPERATION_CONFLICT` even before runtime teardown/adoption begins. Missing or
+stopped VMs produce typed failures. Missing/mismatched ownership blocks that run
+as an infrastructure error; bounded keyset scans still service its peers.
+
+Within one SQLite transaction, runtime readiness advances to `running_steps` and
+records `test_run.readiness_reached`. No step is claimed or executed. Cancellation
+instead skips pending steps and advances to collection; an expired deadline does
+the same with `WAIT_TIMEOUT`, the original deadline, condition, and timeout scope.
+The parent remains active until existing collection/cleanup finishes. Failed runs
+retain their current runtime under the policies described below; cancellation
+stops/deletes only through the existing owned lifecycle cleanup.
+
+VZ `running` never implies guest readiness. The agent condition reads the stored
+guest state, but its authenticated host Guest Session producer is not implemented
+yet (PR024). Service readiness has no persisted service proof yet and cannot
+advance a run. Positive guest-agent/service readiness and guest exec are remaining
+integration work; this observer does not invent either proof or guest output.
 
 ## Host artifact collection
 
@@ -158,9 +197,9 @@ with the temporary VM bundle.
 
 ## Daemon lifecycle
 
-The daemon starts provisioning, VM-start, collection, and cleanup loops only after
-native previous-owner recovery, store reconciliation, scheduler recovery, and
-ownership verification. Each loop has bounded, non-overlapping passes, per-run
+The daemon starts provisioning, VM-start, readiness, collection, and cleanup loops
+only after native previous-owner recovery, store reconciliation, scheduler recovery,
+and ownership verification. Each loop has bounded, non-overlapping passes, per-run
 failure reporting with available correlation IDs, and a fenced/drained close.
 Shutdown closes public requests/streams, fences the producers, and drains them
 alongside controller/scheduler shutdown before closing shared SQLite and roots.
@@ -171,6 +210,7 @@ These workers are not activated by status requests or client polling.
 | Requirement | Current component evidence | Still required |
 | --- | --- | --- |
 | TST-001/002/010 | Durable acceptance, isolated provisioning and start checkpoint tests | Full parallel guest-test transactions |
+| TST-003, AC-05 | Runtime-only readiness, persistent/capped deadlines, legacy restoration, cancellation, generation/spec/delete fencing, atomic rollback and background dispatch tests | Authenticated guest-agent/service readiness through PR024 and real GaoOS readiness |
 | TST-006 | Real host log/result bytes, stable-ID replay, crash and corruption tests | Guest stdout/stderr/system info and real GaoOS collection |
 | TST-009, OP-002/004/006 | Pre-allocation abort completion, cancellation actions, retained-VM stop before cancellation completion, rollback/reopen and background dispatch tests | Active-step cancellation and full guest-to-cleanup transactions |
 | TST-007/008, UC-03 | Failed-runtime retention, deletion/stop child completion, independent artifact survival, schema upgrade and checkpoint replay tests | Complete policy/fault matrix, accepted failure-override precedence, successful-artifact retention, and real guest failure retention |
@@ -199,9 +239,11 @@ not an installed-daemon, launchd, or VZ transaction. The installed-daemon regres
 in `daemon_application_test.dart` waits for durable completion before checking
 TestRun/operation state and downloading the result through HTTP over UDS.
 
-Allocated fixtures supply upstream success/failure/cancellation through the durable
-repository because readiness and guest execution are not yet wired. Their
-provisioning, image store, artifacts, lifecycle dispatcher/controller, scheduler,
+Cleanup-focused allocated fixtures supply upstream success/failure/cancellation
+through the durable repository because guest execution is not yet implemented.
+Readiness fixtures use the actual provisioning/start pipeline and verify timeout,
+conflict, runtime-only advancement, and cancellation through collection/stop.
+Their provisioning, image store, artifacts, lifecycle dispatcher/controller, scheduler,
 and managed deletion are real components; only the VZ boundary, clock, and host
 metrics are simulated.
 They prove retention/cleanup behavior, not native guest execution or GaoOS AC-06/07.

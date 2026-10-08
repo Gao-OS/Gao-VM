@@ -6,8 +6,12 @@ import 'package:crypto/crypto.dart';
 import 'package:gaovm_models/gaovm_models.dart';
 import 'package:gaovmd/gaovmd.dart';
 import 'package:gaovmd/src/image_filesystem.dart' show imageFileMode;
+import 'package:gaovmd/src/test_run_cleanup_worker.dart';
+import 'package:gaovmd/src/test_run_collection_worker.dart';
 import 'package:gaovmd/src/test_run_provisioning_worker.dart';
 import 'package:gaovmd/src/test_run_provisioning_dispatch_loop.dart';
+import 'package:gaovmd/src/test_run_readiness_dispatch_loop.dart';
+import 'package:gaovmd/src/test_run_readiness_worker.dart';
 import 'package:gaovmd/src/test_run_vm_start_dispatch_loop.dart';
 import 'package:gaovmd/src/test_run_vm_start_worker.dart';
 import 'package:sqlite3/sqlite3.dart';
@@ -78,14 +82,17 @@ void main() {
     Image? from,
     num? timeoutSeconds,
     DateTime Function()? now,
+    VmWaitSpec? wait,
   }) async {
     final spec = TestRunSpec(
       source: ImageTestRunSource((from ?? source).id),
       vmOverrides: overrides,
-      wait: VmWaitSpec(
-        condition: WaitCondition.guestAgentReady,
-        timeoutSeconds: 30,
-      ),
+      wait:
+          wait ??
+          VmWaitSpec(
+            condition: WaitCondition.guestAgentReady,
+            timeoutSeconds: 30,
+          ),
       steps: [
         TestStepRequest(argv: ['true'], timeoutSeconds: 30),
       ],
@@ -206,8 +213,11 @@ void main() {
     );
   }
 
-  Future<void> provision() async {
-    await TestRunProvisioningWorker(database: database).dispatchOnce();
+  Future<void> provision({DateTime Function()? now}) async {
+    await TestRunProvisioningWorker(
+      database: database,
+      now: now,
+    ).dispatchOnce();
     await VmProvisioningWorker(
       work: SqliteVmProvisioningWorkRepository(database),
       bundles: VmBundleStore(
@@ -217,7 +227,10 @@ void main() {
       ),
       owner: 'test',
     ).dispatchOnce();
-    await TestRunProvisioningWorker(database: database).dispatchOnce();
+    await TestRunProvisioningWorker(
+      database: database,
+      now: now,
+    ).dispatchOnce();
   }
 
   Future<Operation> waitOperation(OperationId id) =>
@@ -252,6 +265,818 @@ void main() {
           action: action,
         ),
       );
+
+  Future<TestRun> startWaiting(
+    TestRunId id, {
+    required VmRegistry registry,
+    required VmCommandDispatcher commands,
+    required ManualRuntimeScheduler clock,
+    DateTime Function()? now,
+  }) async {
+    final worker = TestRunVmStartWorker(
+      database: database,
+      registry: registry,
+      now: now,
+    );
+    expect(
+      (await worker.dispatchOnce()).every((result) => result.error == null),
+      isTrue,
+    );
+    expect(
+      (await commands.dispatchOnce()).every((result) => result.error == null),
+      isTrue,
+    );
+    final run = (await SqliteTestRunRepository(database).get(id))!;
+    await (await registry.get(run.vmId!))!.waitUntilIdle();
+    clock.runUntilIdle();
+    final start = (await SqliteOperationRepository(database).list(
+      resourceType: ResourceType.virtualMachine,
+      resourceId: run.vmId!,
+    )).singleWhere((operation) => operation.type == 'vm.start');
+    expect((await waitOperation(start.id)).state, OperationState.succeeded);
+    expect(
+      (await worker.dispatchOnce()).every((result) => result.error == null),
+      isTrue,
+    );
+    final waiting = (await SqliteTestRunRepository(database).get(id))!;
+    expect(waiting.state, TestRunState.waitingReady);
+    return waiting;
+  }
+
+  test(
+    'runtime readiness advances its owned TestRun once without executing a step',
+    () async {
+      final id = await accept(
+        wait: VmWaitSpec(
+          condition: WaitCondition.runtimeRunning,
+          timeoutSeconds: 30,
+        ),
+      );
+      await provision();
+      final runtime = await openRuntime();
+      final run = await startWaiting(
+        id,
+        registry: runtime.registry,
+        commands: runtime.commands,
+        clock: runtime.clock,
+      );
+      final vm = await SqliteVmRepository(database).get(run.vmId!);
+      final parent = (await SqliteOperationRepository(
+        database,
+      ).get(run.operationId))!;
+      final result = (await TestRunReadinessWorker(
+        database: database,
+      ).dispatchOnce()).single;
+      expect(result.error, isNull);
+      expect(result.ready, isTrue);
+      expect(result.testRunId, id);
+      expect(result.vmId, run.vmId);
+      expect(result.operationId, run.operationId);
+      expect(result.requestId, parent.requestId);
+      expect(result.driverGeneration, vm!.status.driverGeneration);
+      final ready = (await SqliteTestRunRepository(database).get(id))!;
+      expect(ready.state, TestRunState.runningSteps);
+      expect(
+        ready.steps.every((step) => step.state == TestStepState.pending),
+        isTrue,
+      );
+      expect(
+        (await SqliteOperationRepository(database).get(run.operationId))!.state,
+        OperationState.running,
+      );
+      expect(await SqliteVmRepository(database).get(run.vmId!), vm);
+      expect(
+        await TestRunReadinessWorker(database: database).dispatchOnce(),
+        isEmpty,
+      );
+      final changes =
+          (await SqliteEventRepository(database).list(testRunId: id)).where(
+            (event) =>
+                event.type == 'test_run.state_changed' &&
+                event.payload.toJson()['state'] == 'running_steps',
+          );
+      expect(changes, hasLength(1));
+    },
+  );
+
+  for (final wait in [
+    VmWaitSpec(condition: WaitCondition.guestAgentReady, timeoutSeconds: 30),
+    VmWaitSpec(
+      condition: WaitCondition.guestServiceReady,
+      serviceName: 'test-service',
+      timeoutSeconds: 30,
+    ),
+  ]) {
+    test(
+      '${wait.toJson()['condition']} timeout survives reopen and does not treat running as ready',
+      () async {
+        final entered = DateTime.utc(2026, 10, 9, 12);
+        final id = await accept(wait: wait);
+        await provision();
+        final runtime = await openRuntime();
+        final run = await startWaiting(
+          id,
+          registry: runtime.registry,
+          commands: runtime.commands,
+          clock: runtime.clock,
+          now: () => entered,
+        );
+        final running = (await SqliteVmRepository(database).get(run.vmId!))!;
+        expect(running.status.phase, VmPhase.running);
+        expect(running.status.guestAgent, isNot(GuestAgentState.ready));
+        final waiting = (await TestRunReadinessWorker(
+          database: database,
+          now: () => entered.add(const Duration(seconds: 29)),
+        ).dispatchOnce()).single;
+        expect(waiting.error, isNull);
+        expect(waiting.ready, isFalse);
+        expect(
+          (await SqliteTestRunRepository(database).get(id))!.state,
+          TestRunState.waitingReady,
+        );
+        expect(await SqliteVmRepository(database).get(run.vmId!), running);
+        await runtime.close();
+        database.close();
+        database = await GaoVmDatabase.open('${temporary.path}/catalog.db');
+        final before = await SqliteVmRepository(database).get(run.vmId!);
+        final timedOut = (await TestRunReadinessWorker(
+          database: database,
+          now: () => entered.add(const Duration(seconds: 30)),
+        ).dispatchOnce()).single;
+        expect(timedOut.error, isNull);
+        final failed = (await SqliteTestRunRepository(database).get(id))!;
+        expect(failed.state, TestRunState.collecting);
+        expect(failed.error!.code, ErrorCode.waitTimeout);
+        expect(
+          DateTime.parse(
+            failed.error!.details.toJson()['deadline_at'] as String,
+          ),
+          entered.add(const Duration(seconds: 30)),
+        );
+        expect(
+          failed.error!.details.toJson()['condition'],
+          wait.toJson()['condition'],
+        );
+        if (wait.serviceName != null)
+          expect(
+            failed.error!.details.toJson()['service_name'],
+            wait.serviceName,
+          );
+        expect(
+          failed.steps.every((step) => step.state == TestStepState.skipped),
+          isTrue,
+        );
+        expect(
+          (await SqliteOperationRepository(
+            database,
+          ).get(run.operationId))!.state,
+          OperationState.running,
+        );
+        expect(await SqliteVmRepository(database).get(run.vmId!), before);
+        expect(
+          await TestRunReadinessWorker(database: database).dispatchOnce(),
+          isEmpty,
+        );
+      },
+    );
+  }
+
+  test(
+    'the overall deadline caps readiness at its original fractional boundary',
+    () async {
+      final created = DateTime.utc(2040);
+      final entered = created.add(const Duration(seconds: 4));
+      final deadline = created.add(const Duration(milliseconds: 5250));
+      final id = await accept(timeoutSeconds: 5.25, now: () => created);
+      await provision(now: () => created);
+      final runtime = await openRuntime();
+      final run = await startWaiting(
+        id,
+        registry: runtime.registry,
+        commands: runtime.commands,
+        clock: runtime.clock,
+        now: () => entered,
+      );
+      final window = await SqliteTestRunRepository(
+        database,
+      ).readinessWindow(id);
+      expect(window.startedAt, entered);
+      expect(window.deadlineAt, deadline);
+      final vm = await SqliteVmRepository(database).get(run.vmId!);
+      expect(
+        (await TestRunReadinessWorker(
+          database: database,
+          now: () => deadline.subtract(const Duration(microseconds: 1)),
+        ).dispatchOnce()).single.ready,
+        isFalse,
+      );
+      expect(
+        (await SqliteTestRunRepository(database).get(id))!.state,
+        TestRunState.waitingReady,
+      );
+      expect(
+        (await TestRunReadinessWorker(
+          database: database,
+          now: () => deadline,
+        ).dispatchOnce()).single.error,
+        isNull,
+      );
+      final failed = (await SqliteTestRunRepository(database).get(id))!;
+      expect(failed.state, TestRunState.collecting);
+      expect(failed.error!.code, ErrorCode.waitTimeout);
+      expect(failed.error!.details.toJson()['timeout_scope'], 'overall');
+      expect(
+        DateTime.parse(failed.error!.details.toJson()['deadline_at'] as String),
+        deadline,
+      );
+      expect(await SqliteVmRepository(database).get(run.vmId!), vm);
+      expect(
+        (await SqliteOperationRepository(database).get(run.operationId))!.state,
+        OperationState.running,
+      );
+    },
+  );
+
+  test(
+    'readiness cancellation skips execution and drains its owned VM through cleanup',
+    () async {
+      final entered = DateTime.utc(2026, 10, 9, 12);
+      final id = await accept();
+      await provision();
+      final runtime = await openRuntime();
+      final run = await startWaiting(
+        id,
+        registry: runtime.registry,
+        commands: runtime.commands,
+        clock: runtime.clock,
+        now: () => entered,
+      );
+      final before = await SqliteVmRepository(database).get(run.vmId!);
+      final cancel = await TestRunApplicationService(database: database)
+          .cancelRun(
+            TestRunCancelCommand(
+              testRunId: id,
+              requestId: RequestId.generate(),
+              idempotencyKey: null,
+              requestBody: const [],
+            ),
+          );
+      final result = (await TestRunReadinessWorker(
+        database: database,
+        now: () => entered.add(const Duration(seconds: 30)),
+      ).dispatchOnce()).single;
+      expect(result.error, isNull);
+      final collecting = (await SqliteTestRunRepository(database).get(id))!;
+      expect(collecting.state, TestRunState.collecting);
+      expect(collecting.error, isNull);
+      expect(
+        collecting.steps.every((step) => step.state == TestStepState.skipped),
+        isTrue,
+      );
+      expect(await SqliteVmRepository(database).get(run.vmId!), before);
+      expect(
+        (await SqliteOperationRepository(
+          database,
+        ).get(cancel.operationId))!.state,
+        OperationState.pending,
+      );
+      final root = await Directory('${temporary.path}/artifacts').create();
+      imageFileMode(root.path, 0x1c0);
+      final owned = await OwnedImageDirectory.open(root);
+      addTearDown(owned.close);
+      final artifacts = ArtifactApplicationService(
+        database: database,
+        directory: owned,
+      );
+      expect(
+        (await TestRunCollectionWorker(
+          database: database,
+          bundles: bundles,
+          artifacts: artifacts,
+        ).dispatchOnce()).single.collected,
+        isTrue,
+      );
+      final cleanup = TestRunCleanupWorker(
+        database: database,
+        registry: runtime.registry,
+      );
+      expect((await cleanup.dispatchOnce()).single.error, isNull);
+      expect((await runtime.commands.dispatchOnce()).single.error, isNull);
+      await (await runtime.registry.get(run.vmId!))!.waitUntilIdle();
+      runtime.clock.runUntilIdle();
+      final stop = (await SqliteOperationRepository(database).list(
+        resourceType: ResourceType.virtualMachine,
+        resourceId: run.vmId!,
+      )).singleWhere((operation) => operation.type == 'vm.stop');
+      expect((await waitOperation(stop.id)).state, OperationState.succeeded);
+      expect((await cleanup.dispatchOnce()).single.completed, isTrue);
+      expect(
+        (await SqliteTestRunRepository(database).get(id))!.state,
+        TestRunState.cancelled,
+      );
+      expect(
+        (await SqliteOperationRepository(
+          database,
+        ).get(cancel.operationId))!.state,
+        OperationState.succeeded,
+      );
+      expect(
+        (await SqliteVmRepository(database).get(run.vmId!))!.status.phase,
+        VmPhase.stopped,
+      );
+      expect((await artifacts.listForTestRun(id)).items, hasLength(1));
+      expect(runtime.drivers.activeSessionCount, 0);
+      expect(await SqliteHostLeaseRepository(database).list(), isEmpty);
+    },
+  );
+
+  test(
+    'readiness rejects a newer user generation without changing that runtime',
+    () async {
+      final entered = DateTime.utc(2026, 10, 9, 12);
+      final id = await accept();
+      await provision();
+      final runtime = await openRuntime();
+      final run = await startWaiting(
+        id,
+        registry: runtime.registry,
+        commands: runtime.commands,
+        clock: runtime.clock,
+        now: () => entered,
+      );
+      final old = (await SqliteVmRepository(database).get(run.vmId!))!;
+      final restart = await acceptLifecycle(
+        runtime.registry,
+        run.vmId!,
+        VmLifecycleAction.restart,
+      );
+      expect((await runtime.commands.dispatchOnce()).single.error, isNull);
+      await runtime.drivers.waitUntilEventsDispatched();
+      await (await runtime.registry.get(run.vmId!))!.waitUntilIdle();
+      runtime.clock.runUntilIdle();
+      final restarted = await waitOperation(restart.operationId);
+      expect(
+        restarted.state,
+        OperationState.succeeded,
+        reason: '${restarted.error?.toJson()}',
+      );
+      final newer = (await SqliteVmRepository(database).get(run.vmId!))!;
+      expect(
+        newer.status.driverGeneration,
+        greaterThan(old.status.driverGeneration),
+      );
+      final result = (await TestRunReadinessWorker(
+        database: database,
+        now: () => entered.add(const Duration(seconds: 1)),
+      ).dispatchOnce()).single;
+      expect(result.error, isNull);
+      expect(result.ready, isFalse);
+      expect(result.driverGeneration, old.status.driverGeneration);
+      final failed = (await SqliteTestRunRepository(database).get(id))!;
+      expect(failed.state, TestRunState.collecting);
+      expect(failed.error!.code, ErrorCode.vmOperationConflict);
+      expect(
+        failed.error!.details.toJson()['driver_generation'],
+        old.status.driverGeneration,
+      );
+      expect(
+        failed.error!.details.toJson()['observed_driver_generation'],
+        newer.status.driverGeneration,
+      );
+      expect(await SqliteVmRepository(database).get(run.vmId!), newer);
+      expect(runtime.drivers.activeSessionCount, 1);
+      expect(
+        failed.steps.every((step) => step.state == TestStepState.skipped),
+        isTrue,
+      );
+    },
+  );
+
+  test(
+    'readiness refuses accepted deletion and spec changes before runtime adoption',
+    () async {
+      final entered = DateTime.utc(2040);
+      final ids = [
+        for (var i = 0; i < 2; i++)
+          await accept(
+            wait: VmWaitSpec(
+              condition: WaitCondition.runtimeRunning,
+              timeoutSeconds: 30,
+            ),
+          ),
+      ];
+      await provision();
+      final runtime = await openRuntime();
+      final runs = [
+        for (final id in ids)
+          await startWaiting(
+            id,
+            registry: runtime.registry,
+            commands: runtime.commands,
+            clock: runtime.clock,
+            now: () => entered,
+          ),
+      ];
+      final deleted = await acceptLifecycle(
+        runtime.registry,
+        runs.first.vmId!,
+        VmLifecycleAction.delete,
+      );
+      final beforePatch = (await SqliteVmRepository(
+        database,
+      ).get(runs.last.vmId!))!;
+      final patched =
+          await SqliteVmPatchAcceptor(
+            database: database,
+            registry: runtime.registry,
+            idempotencyRetention: const Duration(days: 1),
+          ).patch(
+            VmPatchCommand(
+              requestId: RequestId.generate(),
+              idempotencyKey: null,
+              requestBody: const [],
+              vmId: runs.last.vmId!,
+              expectedRevision: beforePatch.metadata.revision,
+              spec: VmSpecPatch.fromJson({'cpu': beforePatch.spec.cpu + 1}),
+            ),
+          );
+      final vms = [
+        for (final run in runs)
+          await SqliteVmRepository(database).get(run.vmId!),
+      ];
+      expect(vms.every((vm) => vm!.status.phase == VmPhase.running), isTrue);
+      expect(
+        vms.last!.status.specGeneration,
+        greaterThan(vms.last!.status.observedGeneration),
+      );
+      final outcomes = await TestRunReadinessWorker(
+        database: database,
+        now: () => entered.add(const Duration(seconds: 1)),
+      ).dispatchOnce();
+      expect(outcomes, hasLength(2));
+      expect(
+        outcomes.every((item) => item.error == null && !item.ready),
+        isTrue,
+      );
+      for (var i = 0; i < runs.length; i++) {
+        final failed = (await SqliteTestRunRepository(
+          database,
+        ).get(runs[i].id))!;
+        expect(failed.state, TestRunState.collecting);
+        expect(failed.error!.code, ErrorCode.vmOperationConflict);
+        expect(failed.steps.single.state, TestStepState.skipped);
+        expect(await SqliteVmRepository(database).get(runs[i].vmId!), vms[i]);
+      }
+      for (final action in [deleted, patched]) {
+        expect(
+          (await SqliteOperationRepository(
+            database,
+          ).get(action.operationId))!.state,
+          OperationState.pending,
+        );
+      }
+      expect(runtime.drivers.activeSessionCount, 2);
+    },
+  );
+
+  test(
+    'v15 readiness restores its original phase deadline without resetting the budget',
+    () async {
+      final entered = DateTime.utc(2026, 10, 9, 12);
+      final id = await accept();
+      await provision();
+      final runtime = await openRuntime();
+      final run = await startWaiting(
+        id,
+        registry: runtime.registry,
+        commands: runtime.commands,
+        clock: runtime.clock,
+        now: () => entered,
+      );
+      final original = await SqliteTestRunRepository(
+        database,
+      ).readinessWindow(id);
+      expect(original.startedAt, entered);
+      expect(original.deadlineAt, entered.add(const Duration(seconds: 30)));
+      await runtime.close();
+      final before = (await SqliteTestRunRepository(database).get(id))!;
+      database.close();
+      final legacy = sqlite3.open('${temporary.path}/catalog.db');
+      legacy.execute('DROP TRIGGER test_run_readiness_window_immutable');
+      legacy.execute('DROP INDEX test_runs_waiting_ready_idx');
+      legacy.execute('ALTER TABLE test_runs DROP COLUMN readiness_deadline_at');
+      legacy.execute('ALTER TABLE test_runs DROP COLUMN readiness_started_at');
+      legacy.execute('DELETE FROM schema_migrations WHERE version = 16');
+      legacy.userVersion = 15;
+      legacy.dispose();
+      database = await GaoVmDatabase.open('${temporary.path}/catalog.db');
+      expect(database.schemaVersion, 16);
+      final runs = SqliteTestRunRepository(database);
+      expect(await runs.get(id), before);
+      expect(await runs.readinessWindow(id), original);
+      expect(await runs.readinessWindow(id), original);
+      await database.read((db) {
+        for (final update in [
+          "readiness_started_at = '2040-01-01T00:00:00.000000Z'",
+          "readiness_deadline_at = '2040-01-01T00:00:00.000000Z'",
+          'readiness_started_at = NULL, readiness_deadline_at = NULL',
+        ]) {
+          expect(
+            () => db.execute('UPDATE test_runs SET $update WHERE id = ?', [
+              id.value,
+            ]),
+            throwsA(isA<SqliteException>()),
+          );
+        }
+      });
+      expect(
+        (await SqliteEventRepository(database).list(
+          testRunId: id,
+        )).where((event) => event.type == 'test_run.readiness_restored'),
+        hasLength(1),
+      );
+      final vm = await SqliteVmRepository(database).get(run.vmId!);
+      expect(
+        (await TestRunReadinessWorker(
+          database: database,
+          now: () => entered.add(const Duration(seconds: 30)),
+        ).dispatchOnce()).single.error,
+        isNull,
+      );
+      final failed = (await runs.get(id))!;
+      expect(failed.state, TestRunState.collecting);
+      expect(failed.error!.code, ErrorCode.waitTimeout);
+      expect(
+        DateTime.parse(failed.error!.details.toJson()['deadline_at'] as String),
+        original.deadlineAt,
+      );
+      expect(await SqliteVmRepository(database).get(run.vmId!), vm);
+      expect(
+        (await SqliteOperationRepository(database).get(run.operationId))!.state,
+        OperationState.running,
+      );
+    },
+  );
+
+  test(
+    'a readiness commit fault rolls back one run without starving a bounded peer',
+    () async {
+      final entered = DateTime.utc(2026, 10, 9, 12);
+      final ids = [
+        await accept(
+          wait: VmWaitSpec(
+            condition: WaitCondition.runtimeRunning,
+            timeoutSeconds: 30,
+          ),
+        ),
+        await accept(
+          wait: VmWaitSpec(
+            condition: WaitCondition.runtimeRunning,
+            timeoutSeconds: 30,
+          ),
+        ),
+      ]..sort((a, b) => a.value.compareTo(b.value));
+      await provision();
+      final runtime = await openRuntime();
+      for (final id in ids) {
+        await startWaiting(
+          id,
+          registry: runtime.registry,
+          commands: runtime.commands,
+          clock: runtime.clock,
+          now: () => entered,
+        );
+      }
+      final runs = SqliteTestRunRepository(database);
+      final before = (await runs.get(ids.first))!;
+      final vm = await SqliteVmRepository(database).get(before.vmId!);
+      final window = await runs.readinessWindow(ids.first);
+      final events = await SqliteEventRepository(database).list();
+      final outbox = await SqliteEventRepository(
+        database,
+      ).readUnpublishedOutbox();
+      await database.transaction(
+        (db) => db.execute('''
+        CREATE TRIGGER reject_readiness BEFORE INSERT ON events
+        WHEN NEW.type = 'test_run.readiness_reached' AND NEW.test_run_id = '${ids.first.value}'
+        BEGIN SELECT RAISE(ABORT, 'readiness commit fault'); END
+      '''),
+      );
+      final worker = TestRunReadinessWorker(
+        database: database,
+        now: () => entered.add(const Duration(seconds: 1)),
+      );
+      for (final limit in [-1, 0, 201]) {
+        await expectLater(worker.dispatchOnce(limit: limit), throwsRangeError);
+      }
+      await database.transaction((_) async {
+        await expectLater(worker.dispatchOnce(), throwsStateError);
+      });
+      final failed = (await worker.dispatchOnce(limit: 1)).single;
+      expect(failed.testRunId, ids.first);
+      expect(failed.error, isA<SqliteException>());
+      expect(failed.ready, isFalse);
+      expect(await runs.get(ids.first), before);
+      expect(await runs.readinessWindow(ids.first), window);
+      expect(await SqliteVmRepository(database).get(before.vmId!), vm);
+      expect(await SqliteEventRepository(database).list(), events);
+      expect(
+        (await SqliteEventRepository(
+          database,
+        ).readUnpublishedOutbox()).map((row) => row.key),
+        outbox.map((row) => row.key),
+      );
+      final peer = (await worker.dispatchOnce(limit: 1)).single;
+      expect(peer.testRunId, ids.last);
+      expect(peer.error, isNull);
+      expect(peer.ready, isTrue);
+      await database.transaction(
+        (db) => db.execute('DROP TRIGGER reject_readiness'),
+      );
+      expect((await worker.dispatchOnce(limit: 1)).single.ready, isTrue);
+      expect(await worker.dispatchOnce(limit: 1), isEmpty);
+      for (final id in ids) {
+        expect((await runs.get(id))!.state, TestRunState.runningSteps);
+        expect(
+          (await SqliteEventRepository(database).list(
+            testRunId: id,
+          )).where((event) => event.type == 'test_run.readiness_reached'),
+          hasLength(1),
+        );
+      }
+    },
+  );
+
+  test(
+    'background readiness advances bounded isolated runs without client polling',
+    () async {
+      final ids = [
+        for (var i = 0; i < 2; i++)
+          await accept(
+            wait: VmWaitSpec(
+              condition: WaitCondition.runtimeRunning,
+              timeoutSeconds: 30,
+            ),
+          ),
+      ];
+      await provision();
+      final runtime = await openRuntime();
+      for (final id in ids) {
+        await startWaiting(
+          id,
+          registry: runtime.registry,
+          commands: runtime.commands,
+          clock: runtime.clock,
+        );
+      }
+      final ready = Completer<void>();
+      final reached = <Event>[];
+      final subscription =
+          SqliteDurableEventFeed(
+                database,
+                pollInterval: const Duration(milliseconds: 1),
+              )
+              .watch()
+              .where(
+                (event) =>
+                    event.type == 'test_run.readiness_reached' &&
+                    ids.contains(event.testRunId),
+              )
+              .listen((event) {
+                reached.add(event);
+                if (reached.length == ids.length && !ready.isCompleted)
+                  ready.complete();
+              }, onError: ready.completeError);
+      final passes = <List<TestRunReadinessOutcome>>[];
+      final loop = TestRunReadinessDispatchLoop(
+        worker: TestRunReadinessWorker(database: database),
+        batchLimit: 1,
+        interval: const Duration(milliseconds: 1),
+        onDispatch: passes.add,
+        onError: ready.completeError,
+      );
+      try {
+        loop.start();
+        await ready.future.timeout(const Duration(seconds: 5));
+        await loop.close();
+        expect(passes.every((pass) => pass.length <= 1), isTrue);
+        expect(
+          passes.expand((pass) => pass).every((item) => item.error == null),
+          isTrue,
+        );
+        expect(reached.map((event) => event.testRunId).toSet(), ids.toSet());
+        expect(reached.map((event) => event.vmId).toSet(), hasLength(2));
+        for (final id in ids) {
+          final run = (await SqliteTestRunRepository(database).get(id))!;
+          expect(run.state, TestRunState.runningSteps);
+          expect(run.steps.single.state, TestStepState.pending);
+          expect(
+            (await SqliteOperationRepository(
+              database,
+            ).get(run.operationId))!.state,
+            OperationState.running,
+          );
+        }
+        expect(runtime.drivers.activeSessionCount, 2);
+      } finally {
+        await loop.close();
+        await subscription.cancel();
+      }
+    },
+  );
+
+  test('readiness dispatch rejects invalid limits before scheduling work', () {
+    final worker = TestRunReadinessWorker(database: database);
+    final scheduler = _StartTimerScheduler();
+    for (final limit in [-1, 0, 201]) {
+      expect(
+        () => TestRunReadinessDispatchLoop(
+          worker: worker,
+          scheduler: scheduler,
+          batchLimit: limit,
+          onDispatch: (_) {},
+          onError: (_, _) {},
+        ),
+        throwsArgumentError,
+      );
+    }
+    for (final interval in [Duration.zero, const Duration(milliseconds: -1)]) {
+      expect(
+        () => TestRunReadinessDispatchLoop(
+          worker: worker,
+          scheduler: scheduler,
+          interval: interval,
+          onDispatch: (_) {},
+          onError: (_, _) {},
+        ),
+        throwsArgumentError,
+      );
+    }
+    expect(scheduler.activeCount, 0);
+  });
+
+  test(
+    'readiness dispatch shutdown drains an in-flight catalog pass',
+    () async {
+      final id = await accept(
+        wait: VmWaitSpec(
+          condition: WaitCondition.runtimeRunning,
+          timeoutSeconds: 30,
+        ),
+      );
+      await provision();
+      final runtime = await openRuntime();
+      await startWaiting(
+        id,
+        registry: runtime.registry,
+        commands: runtime.commands,
+        clock: runtime.clock,
+      );
+      final scheduler = _StartTimerScheduler();
+      final entered = Completer<void>();
+      final release = Completer<void>();
+      final held = database.transaction((_) async {
+        entered.complete();
+        await release.future;
+      });
+      await entered.future;
+      final passes = <List<TestRunReadinessOutcome>>[];
+      final loop = TestRunReadinessDispatchLoop(
+        worker: TestRunReadinessWorker(database: database),
+        scheduler: scheduler,
+        onDispatch: passes.add,
+        onError: (error, _) => fail('$error'),
+      );
+      try {
+        loop.start();
+        loop.start();
+        scheduler.fire();
+        var closed = false;
+        final closing = loop.close().then((_) => closed = true);
+        await Future<void>.value();
+        expect(closed, isFalse);
+        release.complete();
+        await held;
+        await closing;
+        expect(passes, hasLength(1));
+        expect(passes.single.single.testRunId, id);
+        expect(passes.single.single.ready, isTrue);
+        expect(passes.single.single.error, isNull);
+        expect(scheduler.activeCount, 0);
+        scheduler.fire();
+        expect(passes, hasLength(1));
+        expect(loop.start, throwsStateError);
+        expect(
+          (await SqliteTestRunRepository(database).get(id))!.state,
+          TestRunState.runningSteps,
+        );
+      } finally {
+        if (!release.isCompleted) release.complete();
+        await held;
+        await loop.close();
+      }
+    },
+  );
 
   test(
     'start dispatch rejects invalid limits before scheduling work',
@@ -849,6 +1674,11 @@ void main() {
       final original = (await SqliteTestRunRepository(database).get(id))!;
       database.close();
       final legacy = sqlite3.open('${temporary.path}/catalog.db');
+      legacy.execute('DROP TRIGGER test_run_readiness_window_immutable');
+      legacy.execute('DROP INDEX test_runs_waiting_ready_idx');
+      legacy.execute('ALTER TABLE test_runs DROP COLUMN readiness_deadline_at');
+      legacy.execute('ALTER TABLE test_runs DROP COLUMN readiness_started_at');
+      legacy.execute('DELETE FROM schema_migrations WHERE version = 16');
       legacy.execute('DROP INDEX test_runs_cleaning_up_idx');
       legacy.execute('DROP TABLE test_run_vm_cleanup');
       legacy.execute('DELETE FROM schema_migrations WHERE version = 15');
@@ -862,7 +1692,7 @@ void main() {
       legacy.userVersion = 12;
       legacy.dispose();
       database = await GaoVmDatabase.open('${temporary.path}/catalog.db');
-      expect(database.schemaVersion, 15);
+      expect(database.schemaVersion, 16);
       final restored = (await SqliteTestRunRepository(database).get(id))!;
       expect(restored.toJson()['spec'], original.toJson()['spec']);
       expect(restored.vmId, original.vmId);

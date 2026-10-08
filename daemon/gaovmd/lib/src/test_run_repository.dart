@@ -26,6 +26,12 @@ abstract interface class TestRunRepository {
 
   Future<TestRun> requestCancel(TestRunId id);
 
+  /// Fixed at entry to waiting_ready, capped by the parent deadline. Legacy
+  /// catalogs restore it from their committed phase event, never from restart.
+  Future<({DateTime startedAt, DateTime deadlineAt})> readinessWindow(
+    TestRunId id,
+  );
+
   /// Retains the first failure as primary and journals subsequent failures.
   Future<TestRun> recordFailure(TestRunId id, {required OperationError error});
 
@@ -237,6 +243,77 @@ final class SqliteTestRunRepository implements TestRunRepository {
         id.value,
       ]).single['cancel_requested'] ==
       1;
+
+  @override
+  Future<({DateTime startedAt, DateTime deadlineAt})> readinessWindow(
+    TestRunId id,
+  ) => _database.transaction((connection) async {
+    final run = _require(connection, id);
+    if (run.state != TestRunState.waitingReady)
+      throw TestRunConflictException(id, 'readiness requires waiting_ready');
+    await _requireLiveOperation(run);
+    final row = connection.select(
+      'SELECT readiness_started_at, readiness_deadline_at FROM test_runs WHERE id = ?',
+      [id.value],
+    ).single;
+    if (row['readiness_started_at'] != null) {
+      return (
+        startedAt: DateTime.parse(row['readiness_started_at'] as String),
+        deadlineAt: DateTime.parse(row['readiness_deadline_at'] as String),
+      );
+    }
+    final entries = connection.select(
+      '''
+          SELECT occurred_at FROM events WHERE type = 'test_run.state_changed'
+          AND resource_id = ? AND test_run_id = ? AND operation_id = ? AND vm_id = ?
+          AND json_extract(payload_json, '\$.state') = 'waiting_ready'
+          ORDER BY sequence DESC LIMIT 1
+        ''',
+      [id.value, id.value, run.operationId.value, run.vmId?.value],
+    );
+    if (entries.isEmpty)
+      throw StateError(
+        'Legacy TestRun readiness entry has no committed timestamp',
+      );
+    final startedAt = DateTime.parse(entries.single['occurred_at'] as String);
+    final parent = (await _operations.get(run.operationId))!;
+    final deadlineAt = _readinessDeadline(
+      run.spec,
+      startedAt,
+      parent.deadlineAt,
+    );
+    _writeReadinessWindow(connection, id, startedAt, deadlineAt);
+    await _append(run, 'test_run.readiness_restored', _now().toUtc());
+    return (startedAt: startedAt, deadlineAt: deadlineAt);
+  });
+
+  DateTime _readinessDeadline(
+    TestRunSpec spec,
+    DateTime startedAt,
+    DateTime? overall,
+  ) {
+    final deadline = startedAt.add(
+      Duration(
+        microseconds:
+            (spec.wait.timeoutSeconds * Duration.microsecondsPerSecond).ceil(),
+      ),
+    );
+    return overall != null && overall.isBefore(deadline) ? overall : deadline;
+  }
+
+  void _writeReadinessWindow(
+    Database connection,
+    TestRunId id,
+    DateTime startedAt,
+    DateTime deadlineAt,
+  ) => connection.execute(
+    '''UPDATE test_runs SET readiness_started_at = ?, readiness_deadline_at = ? WHERE id = ?''',
+    [
+      formatPersistenceTimestamp(startedAt),
+      formatPersistenceTimestamp(deadlineAt),
+      id.value,
+    ],
+  );
 
   @override
   Future<TestRun> recordFailure(
@@ -579,6 +656,15 @@ final class SqliteTestRunRepository implements TestRunRepository {
       );
     }
     final now = _now().toUtc();
+    if (nextState == TestRunState.waitingReady) {
+      final parent = (await _operations.get(current.operationId))!;
+      _writeReadinessWindow(
+        connection,
+        id,
+        now,
+        _readinessDeadline(current.spec, now, parent.deadlineAt),
+      );
+    }
     connection.execute(
       '''UPDATE test_runs SET state = ?, vm_id = COALESCE(?, vm_id),
          cleanup_decision = COALESCE(?, cleanup_decision) WHERE id = ?''',
@@ -659,7 +745,7 @@ final class SqliteTestRunRepository implements TestRunRepository {
   }) async {
     final metadata = await _database.read(
       (connection) => connection.select(
-        'SELECT cancel_requested, planned_outcome FROM test_runs WHERE id = ?',
+        'SELECT cancel_requested, planned_outcome, readiness_started_at, readiness_deadline_at FROM test_runs WHERE id = ?',
         [run.id.value],
       ).single,
     );
@@ -677,6 +763,10 @@ final class SqliteTestRunRepository implements TestRunRepository {
         'cleanup_decision': run.cleanupDecision,
         'result': run.result?.toJson(),
         'error': run.error?.toJson(),
+        if (metadata['readiness_started_at'] != null) ...{
+          'readiness_started_at': metadata['readiness_started_at'],
+          'readiness_deadline_at': metadata['readiness_deadline_at'],
+        },
         if (failure != null) 'failure': failure.toJson(),
       }),
       occurredAt: occurredAt,

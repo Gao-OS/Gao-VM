@@ -51,6 +51,8 @@ import 'test_run_collection_dispatch_loop.dart';
 import 'test_run_collection_worker.dart';
 import 'test_run_provisioning_dispatch_loop.dart';
 import 'test_run_provisioning_worker.dart';
+import 'test_run_readiness_dispatch_loop.dart';
+import 'test_run_readiness_worker.dart';
 import 'test_run_vm_start_dispatch_loop.dart';
 import 'test_run_vm_start_worker.dart';
 import 'vm_application_service.dart';
@@ -367,6 +369,25 @@ final class DaemonApplication {
         },
         onError: (error, _) => report('test_run_vm_start', error),
       );
+      final testRunReadiness = TestRunReadinessDispatchLoop(
+        worker: TestRunReadinessWorker(database: database),
+        onDispatch: (results) {
+          for (final result in results) {
+            if (result.error case final error?) {
+              report(
+                'test_run_readiness',
+                error,
+                vm: result.vmId,
+                operation: result.operationId,
+                testRun: result.testRunId,
+                request: result.requestId,
+                driverGeneration: result.driverGeneration,
+              );
+            }
+          }
+        },
+        onError: (error, _) => report('test_run_readiness', error),
+      );
       final testRunCollection = TestRunCollectionDispatchLoop(
         worker: TestRunCollectionWorker(
           database: database,
@@ -459,6 +480,7 @@ final class DaemonApplication {
           provisioning.close(),
           testRunProvisioning.close(),
           testRunVmStart.close(),
+          testRunReadiness.close(),
           testRunCollection.close(),
           testRunCleanup.close(),
           imageWork.close(),
@@ -483,6 +505,7 @@ final class DaemonApplication {
       provisioning.start();
       testRunProvisioning.start();
       testRunVmStart.start();
+      testRunReadiness.start();
       testRunCollection.start();
       testRunCleanup.start();
       imageWork.start();

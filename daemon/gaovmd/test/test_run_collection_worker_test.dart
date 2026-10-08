@@ -803,13 +803,18 @@ void main() {
       final artifacts = (await artifactService().listForTestRun(run.id)).items;
       database.close();
       final legacy = sqlite3.open('${temporary.path}/catalog.db');
+      legacy.execute('DROP TRIGGER test_run_readiness_window_immutable');
+      legacy.execute('DROP INDEX test_runs_waiting_ready_idx');
+      legacy.execute('ALTER TABLE test_runs DROP COLUMN readiness_deadline_at');
+      legacy.execute('ALTER TABLE test_runs DROP COLUMN readiness_started_at');
+      legacy.execute('DELETE FROM schema_migrations WHERE version = 16');
       legacy.execute('DROP INDEX test_runs_cleaning_up_idx');
       legacy.execute('DROP TABLE test_run_vm_cleanup');
       legacy.execute('DELETE FROM schema_migrations WHERE version = 15');
       legacy.userVersion = 14;
       legacy.dispose();
       database = await GaoVmDatabase.open('${temporary.path}/catalog.db');
-      expect(database.schemaVersion, 15);
+      expect(database.schemaVersion, 16);
       expect(
         await TestRunApplicationService(database: database).get(run.id),
         before,

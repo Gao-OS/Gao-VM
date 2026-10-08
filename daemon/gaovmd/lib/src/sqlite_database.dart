@@ -30,7 +30,7 @@ const coreTableNames = <String>{
   'outbox',
 };
 
-const _latestSchemaVersion = 15;
+const _latestSchemaVersion = 16;
 final _transactionContextKey = Object();
 final _savepointScopeKey = Object();
 final _transactionGates = <String, _AsyncGate>{};
@@ -577,6 +577,20 @@ const _migrations = <_Migration>[
         SELECT RAISE(ABORT, 'TestRun cleanup identity is immutable');
       END;
     CREATE INDEX test_runs_cleaning_up_idx ON test_runs(id) WHERE state = 'cleaning_up';
+  '''),
+  _Migration(16, '''
+    ALTER TABLE test_runs ADD COLUMN readiness_started_at TEXT;
+    ALTER TABLE test_runs ADD COLUMN readiness_deadline_at TEXT
+      CHECK ((readiness_started_at IS NULL) = (readiness_deadline_at IS NULL));
+    CREATE TRIGGER test_run_readiness_window_immutable
+      BEFORE UPDATE OF readiness_started_at, readiness_deadline_at ON test_runs
+      WHEN OLD.readiness_started_at IS NOT NULL AND (
+        NEW.readiness_started_at IS NOT OLD.readiness_started_at OR
+        NEW.readiness_deadline_at IS NOT OLD.readiness_deadline_at)
+      BEGIN
+        SELECT RAISE(ABORT, 'TestRun readiness window is immutable');
+      END;
+    CREATE INDEX test_runs_waiting_ready_idx ON test_runs(id) WHERE state = 'waiting_ready';
   '''),
 ];
 
