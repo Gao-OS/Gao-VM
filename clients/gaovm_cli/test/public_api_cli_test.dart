@@ -226,10 +226,19 @@ void main() {
         'operation list',
         'operation cancel OP_ID',
         'operation wait OP_ID',
+        'events',
       ]),
     );
     expect(help['options'], contains('--label-selector SELECTOR'));
     expect(help['options'], contains('--cursor CURSOR'));
+    expect(help['options'], contains('--after-sequence N'));
+    expect(help['options'], contains('--vm-id VM_ID'));
+    expect(help['options'], contains('--operation-id OP_ID'));
+    expect(help['options'], contains('--test-run-id TR_ID'));
+    expect(
+      help['options']['--service-name NAME'],
+      'guest_service_ready VM wait target',
+    );
   });
 
   test(

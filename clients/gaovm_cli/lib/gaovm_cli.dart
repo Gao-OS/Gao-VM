@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
@@ -6,13 +7,14 @@ import 'package:gaovm_api_client/gaovm_api_client.dart';
 import 'package:gaovm_models/gaovm_models.dart';
 
 /// Exit codes: 0 success, 1 API/action failure, 2 usage, 3 transport,
-/// 4 invalid server response, 124 deadline. All diagnostic output is JSON.
+/// 4 invalid server response, 124 deadline, 130 SIGINT, 143 SIGTERM.
+/// All diagnostic output is JSON.
 Future<int> runCli(
   List<String> args, {
   void Function(String)? output,
   void Function(String)? error,
 }) async {
-  final write = output ?? stdout.writeln;
+  final void Function(String) write = output ?? stdout.writeln;
   final writeError = error ?? stderr.writeln;
   final compact = args.contains('--json');
   String encode(Object? value) => compact
@@ -45,8 +47,14 @@ Future<int> runCli(
             'operation list',
             'operation cancel OP_ID',
             'operation wait OP_ID',
+            'events',
           ],
           'options': {
+            '--after-sequence N':
+                'events: exclusive sequence cursor; default 0',
+            '--vm-id VM_ID': 'events: VM filter',
+            '--operation-id OP_ID': 'events: Operation filter',
+            '--test-run-id TR_ID': 'events: TestRun filter',
             '--label-selector SELECTOR':
                 'vm list: comma-separated label filters',
             '--sort FIELD':
@@ -59,7 +67,7 @@ Future<int> runCli(
             '--body-json JSON': 'required by vm create and vm patch',
             '--if-match REVISION': 'required by vm patch',
             '--condition CONDITION': 'required by vm wait',
-            '--service-name NAME': 'service_ready VM wait target',
+            '--service-name NAME': 'guest_service_ready VM wait target',
             '--timeout-seconds N': '1-86400; required by waits, otherwise 30',
             '--idempotency-key KEY':
                 'reuse the same key when retrying a mutation',
@@ -68,8 +76,33 @@ Future<int> runCli(
       );
       return 0;
     }
+    final client = GaoVmApiClient(socketPath: options.socket);
+    if (options.command.length == 1 && options.command.single == 'events') {
+      final vmId = options.query['vm_id'];
+      final operationId = options.query['operation_id'];
+      final testRunId = options.query['test_run_id'];
+      final signal = await _consumeEvents(
+        client.watchEvents(
+          afterSequence: int.parse(options.query['after_sequence'] ?? '0'),
+          vmId: vmId == null ? null : VmId(_id(vmId, 'vm_')),
+          operationId: operationId == null
+              ? null
+              : OperationId(_id(operationId, 'op_')),
+          testRunId: testRunId == null
+              ? null
+              : TestRunId(_id(testRunId, 'tr_')),
+          timeout: options.timeout,
+        ),
+        write,
+      );
+      return fail(
+        signal == ProcessSignal.sigint ? 130 : 143,
+        'CLI_INTERRUPTED',
+        'event stream interrupted by $signal',
+      );
+    }
     final route = _route(options);
-    final response = await GaoVmApiClient(socketPath: options.socket).request(
+    final response = await client.request(
       route.method,
       route.path,
       query: route.query,
@@ -115,6 +148,51 @@ Future<int> runCli(
     return fail(3, 'CLI_TRANSPORT', exception);
   } on ApiProtocolException catch (exception) {
     return fail(4, 'CLI_PROTOCOL', exception);
+  }
+}
+
+Future<ProcessSignal> _consumeEvents(
+  Stream<Event> source,
+  void Function(String) write,
+) async {
+  final done = Completer<ProcessSignal>();
+  final signals = <StreamSubscription<ProcessSignal>>[];
+  StreamSubscription<Event>? events;
+  void fail(Object error, [StackTrace? stack]) {
+    if (!done.isCompleted) done.completeError(error, stack);
+  }
+
+  try {
+    for (final signal in [ProcessSignal.sigint, ProcessSignal.sigterm]) {
+      signals.add(
+        signal.watch().listen((received) {
+          if (!done.isCompleted) done.complete(received);
+        }, onError: fail),
+      );
+    }
+    events = source.listen(
+      (event) {
+        if (done.isCompleted) return;
+        try {
+          write(jsonEncode(event.toJson()));
+        } catch (error, stack) {
+          fail(error, stack);
+        }
+      },
+      onError: fail,
+      onDone: () => fail(
+        const ApiTransportException(
+          'event stream closed; resume from the last consumed sequence',
+        ),
+      ),
+      cancelOnError: true,
+    );
+    return await done.future;
+  } finally {
+    await events?.cancel();
+    for (final signal in signals) {
+      await signal.cancel();
+    }
   }
 }
 
@@ -335,7 +413,11 @@ final class _Options {
           condition = value();
         case '--service-name':
           serviceName = value();
-        case '--label-selector' ||
+        case '--after-sequence' ||
+            '--vm-id' ||
+            '--operation-id' ||
+            '--test-run-id' ||
+            '--label-selector' ||
             '--limit' ||
             '--cursor' ||
             '--sort' ||
@@ -369,6 +451,12 @@ final class _Options {
     }
     final verb = command.take(2).join(' ');
     final allowedQuery = switch (verb) {
+      'events' => const {
+        'after_sequence',
+        'vm_id',
+        'operation_id',
+        'test_run_id',
+      },
       'vm list' => const {'label_selector', 'limit', 'cursor', 'sort'},
       'operation list' => const {
         'limit',
@@ -384,6 +472,13 @@ final class _Options {
         throw FormatException(
           '--${key.replaceAll('_', '-')} not supported by $verb',
         );
+    }
+    if (query['after_sequence'] case final value?) {
+      if (!RegExp(r'^[0-9]+$').hasMatch(value) || int.tryParse(value) == null) {
+        throw const FormatException(
+          '--after-sequence must be a nonnegative decimal integer',
+        );
+      }
     }
     if (query['limit'] case final value?) {
       final limit = int.tryParse(value);

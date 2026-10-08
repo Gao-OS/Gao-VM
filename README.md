@@ -177,9 +177,10 @@ Implemented commands at this checkpoint:
 - `vm patch VM_ID --body-json JSON --if-match REVISION`
 - `vm delete VM_ID`
 - `vm start/stop/restart/kill VM_ID`
-- `vm wait VM_ID --condition CONDITION --timeout-seconds N` (add `--service-name NAME` for `service_ready`)
+- `vm wait VM_ID --condition CONDITION --timeout-seconds N` (add `--service-name NAME` for `guest_service_ready`)
 - `operation get/cancel OP_ID`, `operation wait OP_ID --timeout-seconds N`
 - `operation list`
+- `events [--after-sequence N] [--vm-id VM_ID] [--operation-id OP_ID] [--test-run-id TR_ID]`
 
 `vm list` accepts `--label-selector`, `--sort`, `--limit`, and `--cursor`.
 `operation list` accepts `--resource-type`, `--resource-id`, `--state`, `--limit`,
@@ -187,21 +188,28 @@ and `--cursor`. Page sizes are 1–200; pass the returned `next_cursor` unchange
 with the same filters and sort to resume. Filtering and cursor validation remain
 owned by the public API.
 
-Targets must be real server-generated `vm_`/`op_` ULIDs. There is no implicit or name-based `default` VM. Create accepts the public `api_version`, `kind`, `metadata`, and `spec` object; patch accepts the public metadata/spec patch object, not the legacy config format below.
+Targets must be real server-generated `vm_`/`op_`/`tr_` ULIDs. There is no implicit or name-based `default` VM. Create accepts the public `api_version`, `kind`, `metadata`, and `spec` object; patch accepts the public metadata/spec patch object, not the legacy config format below.
 
-All output is JSON; `--json` selects compact output. Successful results go to stdout and Problems/local diagnostics to stderr. Exit codes are `0` for success or accepted work, `1` for API failure or a failed/cancelled waited Operation, `2` for usage errors, `3` for transport failure, `4` for invalid server responses, and `124` for a deadline or `WAIT_TIMEOUT`.
+All output is JSON; `--json` selects compact output for ordinary results and diagnostics. Events always use one compact Event JSON object per line, with SSE comments omitted. Successful results go to stdout and Problems/local diagnostics to stderr. Exit codes are `0` for success or accepted work, `1` for API failure or a failed/cancelled waited Operation, `2` for usage errors, `3` for transport failure, `4` for invalid server responses, `124` for a deadline or `WAIT_TIMEOUT`, `130` for event-stream SIGINT, and `143` for event-stream SIGTERM.
 
 Requests default to a 30-second local deadline; waits require an explicit `--timeout-seconds` and allow five additional seconds for transport. Mutations return accepted Operations without waiting for completion. Use `--idempotency-key KEY` and reuse it for explicit retries; the client does not automatically retry writes. Patch also requires an explicit revision/ETag through `--if-match`.
+
+The event deadline bounds the entire subscription, including heartbeats. On a
+disconnect (`3`), timeout (`124`), or interruption (`130`/`143`), resume explicitly
+with `--after-sequence` set to the last consumed Event's `sequence` and the same
+filters. Filters are combined with AND. There is no automatic reconnect.
+Interrupting the stream cancels its subscription, not any VM or Operation.
 
 ```bash
 cd clients/gaovm_cli
 dart pub get --enforce-lockfile
 dart run bin/gaovm_cli.dart --help --json
 dart run bin/gaovm_cli.dart --socket-path /absolute/state/run/api.sock vm list --json
+dart run bin/gaovm_cli.dart --socket-path /absolute/state/run/api.sock events --after-sequence 42 --timeout-seconds 30 --json
 dart test
 ```
 
-Coverage includes real public-socket requests, the deletion request contract, SQLite-backed filtered/paginated catalog queries, and create/replay/query/cancellation with durable Operation waits. This is a partial M7 checkpoint: image, guest, TestRun/artifact, the CLI events command, doctor, and the legacy alias adapter remain pending. It does not establish installed-daemon or Apple Silicon VM boot/display acceptance.
+Coverage includes real public-socket requests, the deletion request contract, SQLite-backed filtered/paginated catalog queries, create/replay/query/cancellation with durable Operation waits, and resumable/live event streaming. Executable signal tests verify idle subscription cleanup and stable JSON/exit codes. This is a partial M7 checkpoint: image, guest, TestRun/artifact commands, doctor, and the legacy alias adapter remain pending. It does not establish installed-daemon or Apple Silicon VM boot/display acceptance.
 
 ## Legacy Prototype CLI Reference (Not Supported)
 
