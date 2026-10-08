@@ -19,6 +19,8 @@ const coreTableNames = <String>{
   'test_runs',
   'test_run_vm_provisioning',
   'test_run_vm_start',
+  'test_run_collection',
+  'test_run_collection_items',
   'test_steps',
   'artifacts',
   'artifact_payloads',
@@ -27,7 +29,7 @@ const coreTableNames = <String>{
   'outbox',
 };
 
-const _latestSchemaVersion = 13;
+const _latestSchemaVersion = 14;
 final _transactionContextKey = Object();
 final _savepointScopeKey = Object();
 final _transactionGates = <String, _AsyncGate>{};
@@ -539,6 +541,24 @@ const _migrations = <_Migration>[
     );
     CREATE INDEX test_runs_starting_idx ON test_runs(id)
       WHERE state = 'starting_vm';
+  '''),
+  _Migration(14, '''
+    CREATE TABLE test_run_collection (
+      test_run_id TEXT PRIMARY KEY REFERENCES test_runs(id),
+      snapshot_json TEXT NOT NULL CHECK (json_valid(snapshot_json) AND json_type(snapshot_json) = 'object'),
+      retention_until TEXT NOT NULL,
+      completed_at TEXT
+    );
+    CREATE TABLE test_run_collection_items (
+      test_run_id TEXT NOT NULL REFERENCES test_run_collection(test_run_id),
+      kind TEXT NOT NULL CHECK (kind IN ('driver', 'serial', 'result')),
+      artifact_id TEXT NOT NULL UNIQUE,
+      state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'published', 'absent', 'failed')),
+      error_json TEXT CHECK (error_json IS NULL OR (json_valid(error_json) AND json_type(error_json) = 'object')),
+      PRIMARY KEY (test_run_id, kind),
+      CHECK ((state = 'failed' AND error_json IS NOT NULL) OR (state <> 'failed' AND error_json IS NULL))
+    );
+    CREATE INDEX test_runs_collecting_idx ON test_runs(id) WHERE state = 'collecting';
   '''),
 ];
 

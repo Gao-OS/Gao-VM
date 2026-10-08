@@ -230,6 +230,9 @@ void main() {
       final artifact = await repository().publish(_artifact(run));
       database.close();
       final legacy = sqlite3.open('${temporary.path}/catalog.db');
+      legacy.execute('DROP INDEX IF EXISTS test_runs_collecting_idx');
+      legacy.execute('DROP TABLE IF EXISTS test_run_collection_items');
+      legacy.execute('DROP TABLE IF EXISTS test_run_collection');
       legacy.execute('DROP INDEX IF EXISTS test_runs_starting_idx');
       legacy.execute('DROP TABLE IF EXISTS test_run_vm_start');
       legacy.execute('DROP INDEX IF EXISTS test_runs_provisioning_idx');
@@ -241,7 +244,7 @@ void main() {
       legacy.userVersion = 9;
       legacy.dispose();
       database = await GaoVmDatabase.open('${temporary.path}/catalog.db');
-      expect(database.schemaVersion, 13);
+      expect(database.schemaVersion, 14);
       expect(await repository().get(artifact.id), artifact);
       expect(
         (await SqliteTestRunRepository(database).get(run.id))!.artifactIds,
@@ -278,6 +281,9 @@ void main() {
       await repository().publish(artifact, managedPayload: true);
       database.close();
       final legacy = sqlite3.open('${temporary.path}/catalog.db');
+      legacy.execute('DROP INDEX IF EXISTS test_runs_collecting_idx');
+      legacy.execute('DROP TABLE IF EXISTS test_run_collection_items');
+      legacy.execute('DROP TABLE IF EXISTS test_run_collection');
       legacy.execute('DROP INDEX IF EXISTS test_runs_starting_idx');
       legacy.execute('DROP TABLE IF EXISTS test_run_vm_start');
       legacy.execute('DROP INDEX IF EXISTS test_runs_provisioning_idx');
@@ -288,7 +294,7 @@ void main() {
       legacy.userVersion = 10;
       legacy.dispose();
       database = await GaoVmDatabase.open('${temporary.path}/catalog.db');
-      expect(database.schemaVersion, 13);
+      expect(database.schemaVersion, 14);
       expect(await repository().get(id), artifact);
       expect(await repository().hasManagedPayload(id), isTrue);
       expect(
