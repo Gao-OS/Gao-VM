@@ -6,6 +6,9 @@ GST-006, TST-006/007/008, and retention in section 11. It does not by itself
 complete guest output spill, automatic collection, TestRun orchestration, or the
 real GaoOS acceptance scenarios AC-06/07.
 
+The TestRun host collection and completion boundaries are documented separately
+in [TEST_RUNS.md](TEST_RUNS.md).
+
 ## Public reads
 
 - `GET /v1/vms/{vm_id}/artifacts`

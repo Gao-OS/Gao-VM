@@ -1131,6 +1131,9 @@ TestRun 必须产生：
 - cleanup decision；
 - failure classification。
 
+当前实现的持久化阶段、host artifact 采集、无 VM abort completion 与仍未完成的
+边界见 [TEST_RUNS.md](TEST_RUNS.md)；组件证据不能替代完整 GaoOS E2E 验收。
+
 ---
 
 ## 16. 一致性与事务
