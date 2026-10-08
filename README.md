@@ -175,9 +175,17 @@ Implemented commands at this checkpoint:
 
 - `vm create --body-json JSON`, `vm list`, `vm get VM_ID`
 - `vm patch VM_ID --body-json JSON --if-match REVISION`
+- `vm delete VM_ID`
 - `vm start/stop/restart/kill VM_ID`
 - `vm wait VM_ID --condition CONDITION --timeout-seconds N` (add `--service-name NAME` for `service_ready`)
 - `operation get/cancel OP_ID`, `operation wait OP_ID --timeout-seconds N`
+- `operation list`
+
+`vm list` accepts `--label-selector`, `--sort`, `--limit`, and `--cursor`.
+`operation list` accepts `--resource-type`, `--resource-id`, `--state`, `--limit`,
+and `--cursor`. Page sizes are 1–200; pass the returned `next_cursor` unchanged
+with the same filters and sort to resume. Filtering and cursor validation remain
+owned by the public API.
 
 Targets must be real server-generated `vm_`/`op_` ULIDs. There is no implicit or name-based `default` VM. Create accepts the public `api_version`, `kind`, `metadata`, and `spec` object; patch accepts the public metadata/spec patch object, not the legacy config format below.
 
@@ -193,7 +201,7 @@ dart run bin/gaovm_cli.dart --socket-path /absolute/state/run/api.sock vm list -
 dart test
 ```
 
-Coverage includes real public-socket requests and SQLite-backed create/replay/query/cancellation with durable Operation waits. This is a partial M7 checkpoint: VM deletion, image, guest, TestRun/artifact, events, doctor, list filtering/pagination, and the legacy alias adapter remain pending. It does not establish installed-daemon or Apple Silicon VM boot/display acceptance.
+Coverage includes real public-socket requests, the deletion request contract, SQLite-backed filtered/paginated catalog queries, and create/replay/query/cancellation with durable Operation waits. This is a partial M7 checkpoint: image, guest, TestRun/artifact, the CLI events command, doctor, and the legacy alias adapter remain pending. It does not establish installed-daemon or Apple Silicon VM boot/display acceptance.
 
 ## Legacy Prototype CLI Reference (Not Supported)
 

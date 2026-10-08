@@ -35,16 +35,27 @@ Future<int> runCli(
             'vm create',
             'vm get VM_ID',
             'vm patch VM_ID',
+            'vm delete VM_ID',
             'vm start VM_ID',
             'vm stop VM_ID',
             'vm restart VM_ID',
             'vm kill VM_ID',
             'vm wait VM_ID',
             'operation get OP_ID',
+            'operation list',
             'operation cancel OP_ID',
             'operation wait OP_ID',
           ],
           'options': {
+            '--label-selector SELECTOR':
+                'vm list: comma-separated label filters',
+            '--sort FIELD':
+                'vm list: created_at, name, id; prefix - to descend',
+            '--limit N': 'vm/operation list: 1-200 items per page',
+            '--cursor CURSOR': 'vm/operation list: unchanged next_cursor value',
+            '--resource-type TYPE': 'operation list: resource type filter',
+            '--resource-id ID': 'operation list: resource ID filter',
+            '--state STATE': 'operation list: operation state filter',
             '--body-json JSON': 'required by vm create and vm patch',
             '--if-match REVISION': 'required by vm patch',
             '--condition CONDITION': 'required by vm wait',
@@ -61,6 +72,7 @@ Future<int> runCli(
     final response = await GaoVmApiClient(socketPath: options.socket).request(
       route.method,
       route.path,
+      query: route.query,
       timeout:
           options.timeout +
           (route.path.endsWith('/wait')
@@ -109,7 +121,12 @@ Future<int> runCli(
 _Request _route(_Options options) {
   final command = options.command;
   if (command.length == 2 && command[0] == 'vm' && command[1] == 'list') {
-    return _Request('GET', '/v1/vms');
+    return _Request('GET', '/v1/vms', query: options.query);
+  }
+  if (command.length == 2 &&
+      command[0] == 'operation' &&
+      command[1] == 'list') {
+    return _Request('GET', '/v1/operations', query: options.query);
   }
   if (command.length == 2 && command[0] == 'vm' && command[1] == 'create') {
     if (options.bodyJson == null)
@@ -130,7 +147,13 @@ _Request _route(_Options options) {
   }
   if (command.length == 3 &&
       command[0] == 'vm' &&
-      const {'start', 'stop', 'restart', 'kill'}.contains(command[1])) {
+      const {
+        'start',
+        'stop',
+        'restart',
+        'kill',
+        'delete',
+      }.contains(command[1])) {
     late VmId id;
     try {
       id = VmId(command[2]);
@@ -138,8 +161,10 @@ _Request _route(_Options options) {
       throw const FormatException('VM target must be a real vm_ ULID');
     }
     return _Request(
-      'POST',
-      '/v1/vms/${id.value}/actions/${command[1]}',
+      command[1] == 'delete' ? 'DELETE' : 'POST',
+      command[1] == 'delete'
+          ? '/v1/vms/${id.value}'
+          : '/v1/vms/${id.value}/actions/${command[1]}',
       body: JsonObjectValue.empty,
     );
   }
@@ -202,12 +227,14 @@ final class _Request {
     this.body,
     this.ifMatch,
     this.terminalOperation = false,
+    this.query = const {},
   });
   final String method;
   final String path;
   final JsonObjectValue? body;
   final String? ifMatch;
   final bool terminalOperation;
+  final Map<String, String> query;
 }
 
 String _etag(String value) {
@@ -257,6 +284,7 @@ final class _Options {
     this.timeoutExplicit = false,
     this.condition,
     this.serviceName,
+    this.query = const {},
   });
   final String socket;
   final Duration timeout;
@@ -268,6 +296,7 @@ final class _Options {
   final bool timeoutExplicit;
   final String? condition;
   final String? serviceName;
+  final Map<String, String> query;
 
   static _Options parse(List<String> args) {
     var socket = File('state/run/api.sock').absolute.path;
@@ -280,6 +309,7 @@ final class _Options {
     String? condition;
     String? serviceName;
     final command = <String>[];
+    final query = <String, String>{};
     final seenOptions = <String>{};
     for (var i = 0; i < args.length; i++) {
       String value() {
@@ -305,6 +335,15 @@ final class _Options {
           condition = value();
         case '--service-name':
           serviceName = value();
+        case '--label-selector' ||
+            '--limit' ||
+            '--cursor' ||
+            '--sort' ||
+            '--resource-type' ||
+            '--resource-id' ||
+            '--state':
+          final key = args[i].substring(2).replaceAll('-', '_');
+          query[key] = value();
         case '--idempotency-key':
           idempotencyKey = value();
           if (!RegExp(r'^[\x21-\x7e]{1,255}$').hasMatch(idempotencyKey)) {
@@ -329,6 +368,43 @@ final class _Options {
       }
     }
     final verb = command.take(2).join(' ');
+    final allowedQuery = switch (verb) {
+      'vm list' => const {'label_selector', 'limit', 'cursor', 'sort'},
+      'operation list' => const {
+        'limit',
+        'cursor',
+        'resource_type',
+        'resource_id',
+        'state',
+      },
+      _ => const <String>{},
+    };
+    for (final key in query.keys) {
+      if (!allowedQuery.contains(key))
+        throw FormatException(
+          '--${key.replaceAll('_', '-')} not supported by $verb',
+        );
+    }
+    if (query['limit'] case final value?) {
+      final limit = int.tryParse(value);
+      if (limit == null || limit < 1 || limit > 200)
+        throw const FormatException('--limit must be 1-200');
+    }
+    if (query['cursor'] case final value?) {
+      if (value.isEmpty || value.length > 512)
+        throw const FormatException('--cursor must contain 1-512 characters');
+    }
+    if (query['sort'] case final value?) {
+      if (!const {
+        'created_at',
+        '-created_at',
+        'name',
+        '-name',
+        'id',
+        '-id',
+      }.contains(value))
+        throw const FormatException('unsupported --sort');
+    }
     final unsupported = [
       if (bodyJson != null && !const {'vm create', 'vm patch'}.contains(verb))
         '--body-json',
@@ -343,6 +419,7 @@ final class _Options {
             'vm stop',
             'vm restart',
             'vm kill',
+            'vm delete',
             'operation cancel',
           }.contains(verb))
         '--idempotency-key',
@@ -361,6 +438,7 @@ final class _Options {
       timeoutExplicit: timeoutExplicit,
       condition: condition,
       serviceName: serviceName,
+      query: Map.unmodifiable(query),
     );
   }
 }

@@ -8,10 +8,48 @@ import 'package:gaovmd/gaovmd.dart';
 import 'package:test/test.dart';
 
 void main() {
+  test(
+    'VM delete uses DELETE with an explicit target and idempotency key',
+    () async {
+      final vm = VmId.generate();
+      final operation = OperationId.generate();
+      String? target;
+      List<String>? key;
+      final router = PublicApiRouter()
+        ..add('DELETE', '/v1/vms/{vm_id}', (request) async {
+          target = request.pathParameters['vm_id'];
+          key = request.headers['idempotency-key'];
+          return PublicApiResponse.json(
+            status: 202,
+            body: {
+              'operation_id': operation.value,
+              'resource_id': vm.value,
+              'resource_type': 'virtual_machine',
+              'state': 'pending',
+            },
+          );
+        });
+      await _withServer(router, (server) async {
+        final result = await _invoke(server, [
+          'vm',
+          'delete',
+          vm.value,
+          '--idempotency-key',
+          'delete-once',
+        ]);
+        expect(result.code, 0, reason: result.error);
+        expect(target, vm.value);
+        expect(key, ['delete-once']);
+        expect(jsonDecode(result.output)['operation_id'], operation.value);
+      });
+    },
+  );
+
   test('legacy passthrough and non-VM targets are JSON usage errors', () async {
     for (final args in [
       ['driver-exec'],
       ['vm', 'start', 'default'],
+      ['vm', 'delete', 'default'],
       ['vm', 'start', OperationId.generate().value],
       ['operation', 'get', VmId.generate().value],
     ]) {
@@ -145,6 +183,17 @@ void main() {
           ['vm', 'list', '--idempotency-key', 'ignored-key'],
           ['vm', 'list', '--socket-path', '--json'],
           ['vm', 'list', '--timeout-seconds', '1', '--timeout-seconds', '2'],
+          ['vm', 'list', '--limit', '0'],
+          ['vm', 'list', '--limit', '201'],
+          ['vm', 'list', '--limit', 'invalid'],
+          ['vm', 'list', '--limit', '1', '--limit', '2'],
+          ['vm', 'list', '--cursor', ''],
+          ['vm', 'list', '--cursor', 'x' * 513],
+          ['vm', 'list', '--sort', 'invalid'],
+          ['vm', 'list', '--state', 'pending'],
+          ['operation', 'list', '--label-selector', 'channel=nightly'],
+          ['operation', 'list', '--sort', 'name'],
+          ['vm', 'get', VmId.generate().value, '--limit', '1'],
         ]) {
           final result = await _invoke(server, args);
           expect(result.code, 2, reason: args.join(' '));
@@ -172,11 +221,15 @@ void main() {
         'vm list',
         'vm create',
         'vm patch VM_ID',
+        'vm delete VM_ID',
         'vm wait VM_ID',
+        'operation list',
         'operation cancel OP_ID',
         'operation wait OP_ID',
       ]),
     );
+    expect(help['options'], contains('--label-selector SELECTOR'));
+    expect(help['options'], contains('--cursor CURSOR'));
   });
 
   test(
