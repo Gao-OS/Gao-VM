@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:gaovm_models/gaovm_models.dart';
 import 'package:gaovmd/gaovmd.dart';
+import 'package:gaovmd/src/image_filesystem.dart' show imageFileMode;
 import 'package:test/test.dart';
 
 void main() {
@@ -11,6 +12,7 @@ void main() {
                 ? Directory('/private/tmp')
                 : Directory.systemTemp)
             .createTemp('gvm-binding-');
+    imageFileMode(temporary.path, 0x1c0);
     final state = await OwnedImageDirectory.open(temporary);
     final owner = (await DaemonOwnership.tryAcquire(state))!;
     final unrelated = state.createDirectory('unrelated');

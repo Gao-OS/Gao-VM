@@ -16,6 +16,7 @@ void main() {
     temporaryDirectory = await Directory.systemTemp.createTemp(
       'gaovmd-public-api-',
     );
+    _TestPermissions.chmod(temporaryDirectory.path, 0x1c0);
     socketPath = '${temporaryDirectory.path}/api.sock';
   });
 
@@ -1359,9 +1360,9 @@ final class _ControllableListenerFactory implements PublicApiListenerFactory {
 }
 
 final class _TestPermissions {
-  static final ffi.DynamicLibrary _libc = ffi.DynamicLibrary.open(
-    '/usr/lib/libSystem.B.dylib',
-  );
+  static final ffi.DynamicLibrary _libc = Platform.isMacOS
+      ? ffi.DynamicLibrary.open('/usr/lib/libSystem.B.dylib')
+      : ffi.DynamicLibrary.open('libc.so.6');
   static final int Function(ffi.Pointer<Utf8>, int) _chmod = _libc
       .lookupFunction<
         ffi.Int32 Function(ffi.Pointer<Utf8>, ffi.Uint32),

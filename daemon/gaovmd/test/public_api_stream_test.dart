@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:gaovm_models/gaovm_models.dart';
+import 'package:gaovmd/src/image_filesystem.dart' show imageFileMode;
 import 'package:gaovmd/src/public_api_server.dart';
 import 'package:test/test.dart';
 
@@ -15,6 +16,7 @@ void main() {
     temporaryDirectory = await Directory.systemTemp.createTemp(
       'gaovmd-public-api-stream-',
     );
+    imageFileMode(temporaryDirectory.path, 0x1c0);
     socketPath = '${temporaryDirectory.path}/api.sock';
   });
 

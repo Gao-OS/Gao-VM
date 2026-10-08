@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:gaovm_models/gaovm_models.dart';
 import 'package:gaovmd/gaovmd.dart';
+import 'package:gaovmd/src/image_filesystem.dart' show imageFileMode;
 import 'package:test/test.dart';
 
 void main() {
@@ -13,6 +14,7 @@ void main() {
                   ? Directory('/private/tmp')
                   : Directory.systemTemp)
               .createTemp('gvm-scan-');
+      imageFileMode(temp.path, 0x1c0);
       final root = await OwnedImageDirectory.open(temp);
       const vm = 'vm_01J00000000000000000000000';
       root.createDirectory(vm).close();
@@ -48,6 +50,7 @@ void main() {
                 ? Directory('/private/tmp')
                 : Directory.systemTemp)
             .createTemp('gvm-scan-');
+    imageFileMode(temp.path, 0x1c0);
     final root = await OwnedImageDirectory.open(temp);
     final vm = VmId('vm_01J00000000000000000000000');
     final other = VmId('vm_01J00000000000000000000001');

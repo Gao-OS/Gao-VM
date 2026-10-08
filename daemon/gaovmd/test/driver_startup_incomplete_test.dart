@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:gaovm_models/gaovm_models.dart';
 import 'package:gaovmd/gaovmd.dart';
+import 'package:gaovmd/src/image_filesystem.dart' show imageFileMode;
 import 'package:test/test.dart';
 
 void main() {
@@ -251,6 +252,7 @@ void main() {
                   ? Directory('/private/tmp')
                   : Directory.systemTemp)
               .createTemp('gvm-crash-');
+      imageFileMode(temporary.path, 0x1c0);
       final child = await Process.start(Platform.resolvedExecutable, [
         '--packages=${Directory.current.path}/.dart_tool/package_config.json',
         '${Directory.current.path}/test/fixtures/crash_driver_runtime.dart',
@@ -333,6 +335,7 @@ final class _Harness {
                 ? Directory('/private/tmp')
                 : Directory.systemTemp)
             .createTemp('gvm-empty-');
+    imageFileMode(temporary.path, 0x1c0);
     final state = await OwnedImageDirectory.open(temporary);
     final owner = (await DaemonOwnership.tryAcquire(state))!;
     final layout = DriverRuntimeLayout('${state.path}/run');

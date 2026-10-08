@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:gaovm_models/gaovm_models.dart';
 import 'package:gaovmd/src/image_api_handlers.dart';
 import 'package:gaovmd/src/image_application_service.dart';
+import 'package:gaovmd/src/image_filesystem.dart' show imageFileMode;
 import 'package:gaovmd/src/image_store.dart';
 import 'package:gaovmd/src/operation_repository.dart';
 import 'package:gaovmd/src/public_api_server.dart';
@@ -19,6 +20,7 @@ void main() {
   late HttpClient client;
   setUp(() async {
     directory = await Directory.systemTemp.createTemp('gvm-image-api-');
+    imageFileMode(directory.path, 0x1c0);
     database = await GaoVmDatabase.open('${directory.path}/catalog.db');
     images = ImageApplicationService(
       database: database,

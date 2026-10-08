@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:gaovm_cli/gaovm_cli.dart';
 import 'package:gaovm_models/gaovm_models.dart';
 import 'package:gaovmd/gaovmd.dart';
+import 'package:gaovmd/src/image_filesystem.dart' show imageFileMode;
 import 'package:test/test.dart';
 
 void main() {
@@ -14,6 +15,7 @@ void main() {
   late SqliteOperationRepository operations;
   setUp(() async {
     directory = await Directory.systemTemp.createTemp('gaovm-cli-catalog-');
+    imageFileMode(directory.path, 0x1c0);
     database = await GaoVmDatabase.open('${directory.path}/catalog.db');
     vms = SqliteVmRepository(database);
     operations = SqliteOperationRepository(database);

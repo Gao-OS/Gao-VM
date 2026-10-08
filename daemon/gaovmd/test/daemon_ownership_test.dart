@@ -10,6 +10,7 @@ void main() {
     'ownership verification rejects a state directory made public',
     () async {
       final temp = await Directory.systemTemp.createTemp('daemon-owner-');
+      imageFileMode(temp.path, 0x1c0);
       final root = await OwnedImageDirectory.open(temp);
       final owner = (await DaemonOwnership.tryAcquire(root))!;
       try {
@@ -26,6 +27,7 @@ void main() {
 
   test('ownership verification rejects a replaced lock pathname', () async {
     final temp = await Directory.systemTemp.createTemp('daemon-owner-');
+    imageFileMode(temp.path, 0x1c0);
     final root = await OwnedImageDirectory.open(temp);
     final owner = (await DaemonOwnership.tryAcquire(root))!;
     try {
@@ -42,6 +44,7 @@ void main() {
 
   test('kernel releases ownership after the owning process crashes', () async {
     final temp = await Directory.systemTemp.createTemp('daemon-owner-');
+    imageFileMode(temp.path, 0x1c0);
     final root = await OwnedImageDirectory.open(temp);
     final child = await Process.start(Platform.resolvedExecutable, [
       '--packages=${Directory.current.path}/.dart_tool/package_config.json',
@@ -77,6 +80,7 @@ void main() {
 
   test('one state directory has one owner until release', () async {
     final temp = await Directory.systemTemp.createTemp('daemon-owner-');
+    imageFileMode(temp.path, 0x1c0);
     final firstRoot = await OwnedImageDirectory.open(temp);
     final secondRoot = await OwnedImageDirectory.open(temp);
     DaemonOwnership? first;

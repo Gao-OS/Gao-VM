@@ -20,7 +20,10 @@ void main() {
   late DriverProcessManager manager;
 
   setUp(() async {
-    temporaryDirectory = await Directory('/private/tmp').createTemp('gvm-');
+    final temporaryRoot = Platform.isMacOS
+        ? Directory('/private/tmp')
+        : Directory.systemTemp;
+    temporaryDirectory = await temporaryRoot.createTemp('gvm-');
     manager = _manager(temporaryDirectory);
   });
 

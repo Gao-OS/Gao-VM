@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:gaovm_models/gaovm_models.dart';
 import 'package:gaovmd/gaovmd.dart';
+import 'package:gaovmd/src/image_filesystem.dart' show imageFileMode;
 import 'package:test/test.dart';
 
 // Public acceptance only: no dispatcher or runtime is installed in this fixture.
@@ -98,6 +99,7 @@ void main() {
 
   setUp(() async {
     directory = await Directory.systemTemp.createTemp('vm-http-lifecycle-');
+    imageFileMode(directory.path, 0x1c0);
     database = await GaoVmDatabase.open('${directory.path}/catalog.db');
     vm = await SqliteVmRepository(
       database,

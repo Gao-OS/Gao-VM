@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:gaovmd/src/image_filesystem.dart' show imageFileMode;
 import 'package:test/test.dart';
 
 void main() {
@@ -17,6 +18,7 @@ void main() {
         final directory = await Directory.systemTemp.createTemp(
           'gaovm-api-exit-',
         );
+        imageFileMode(directory.path, 0x1c0);
         Process? process;
         StreamSubscription<String>? output;
         Future<int>? exited;

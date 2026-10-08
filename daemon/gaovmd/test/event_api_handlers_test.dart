@@ -6,6 +6,7 @@ import 'package:gaovm_models/gaovm_models.dart';
 import 'package:gaovmd/src/durable_event_feed.dart';
 import 'package:gaovmd/src/event_api_handlers.dart';
 import 'package:gaovmd/src/event_repository.dart';
+import 'package:gaovmd/src/image_filesystem.dart' show imageFileMode;
 import 'package:gaovmd/src/public_api_server.dart';
 import 'package:gaovmd/src/sqlite_database.dart';
 import 'package:gaovmd/src/sqlite_durable_event_feed.dart';
@@ -17,6 +18,7 @@ void main() {
     'real UDS resumes SQLite events gaplessly with header precedence and filters',
     () async {
       final directory = await Directory.systemTemp.createTemp('event-api-');
+      imageFileMode(directory.path, 0x1c0);
       final database = await GaoVmDatabase.open('${directory.path}/catalog.db');
       final socketPath = '${directory.path}/api.sock';
       final events = SqliteEventRepository(database);

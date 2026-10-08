@@ -18,6 +18,7 @@ void main() {
                   ? Directory('/private/tmp')
                   : Directory.systemTemp)
               .createTemp('gvm-http-');
+      imageFileMode(root.path, 0x1c0);
       final stateRoot = await OwnedImageDirectory.open(root);
       final ownership = (await DaemonOwnership.tryAcquire(stateRoot))!;
       addTearDown(() {

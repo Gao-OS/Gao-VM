@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:gaovm_models/gaovm_models.dart';
 import 'package:gaovmd/gaovmd.dart';
+import 'package:gaovmd/src/image_filesystem.dart' show imageFileMode;
 import 'package:test/test.dart';
 
 // This slice composes real create and provisioning cancellation. Patch, lifecycle and wait
@@ -104,6 +105,7 @@ void main() {
 
   setUp(() async {
     directory = await Directory.systemTemp.createTemp('vm-http-');
+    imageFileMode(directory.path, 0x1c0);
     database = await GaoVmDatabase.open('${directory.path}/catalog.db');
     final spec = VmSpec(
       cpu: 2,

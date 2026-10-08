@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:gaovm_cli/gaovm_cli.dart';
 import 'package:gaovm_models/gaovm_models.dart';
 import 'package:gaovmd/gaovmd.dart';
+import 'package:gaovmd/src/image_filesystem.dart' show imageFileMode;
 import 'package:test/test.dart';
 
 void main() {
@@ -430,6 +431,7 @@ void main() {
     'CLI entrypoint lists VMs using HTTP over the public Unix socket',
     () async {
       final directory = await Directory.systemTemp.createTemp('gaovm-cli-');
+      imageFileMode(directory.path, 0x1c0);
       var calls = 0;
       final router = PublicApiRouter()
         ..add('GET', '/v1/vms', (request) async {
@@ -482,6 +484,7 @@ Future<void> _withServer(
   Future<void> Function(PublicApiServer) action,
 ) async {
   final directory = await Directory.systemTemp.createTemp('gaovm-cli-wire-');
+  imageFileMode(directory.path, 0x1c0);
   final server = PublicApiServer(
     socketPath: '${directory.path}/api.sock',
     openApiDocument: const {},

@@ -333,13 +333,23 @@ dart run bin/gaovm_cli.dart events
 
 All unit tests and integration tests can be run across the modules:
 
+Run permission-sensitive tests as a non-root user. Fixtures that supply an
+existing state directory or public socket parent explicitly set mode `0700`;
+do not rely on temporary-directory permissions being identical across platforms.
+Socket fixtures use `/private/tmp` only on macOS and `Directory.systemTemp` on
+Linux, and POSIX test helpers select the platform's C library. Production
+permission, ownership, and inode-replacement checks remain enforced.
+
+Linux control-plane/fake-driver results do not establish installed-daemon,
+Apple Silicon VZ, signing, launchd, or GaoOS Guest Agent/TestRun acceptance.
+
 ### RPC Library Tests
 ```bash
 cd libs/gaovm_rpc
 dart test
 ```
 
-### Daemon Tests (99+ unit and integration tests)
+### Daemon Tests
 ```bash
 cd daemon/gaovmd
 dart test
