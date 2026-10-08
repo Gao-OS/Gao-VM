@@ -512,13 +512,27 @@ final class SqliteTestRunRepository implements TestRunRepository {
       throw TestRunConflictException(id, 'starting requires an explicit VM');
     }
     if (vmId != null &&
-        connection.select(
-          'SELECT id FROM vms WHERE id = ? AND deleted_at IS NULL',
-          [vmId.value],
-        ).isEmpty) {
+        connection
+            .select(
+              '''SELECT v.id FROM vms v WHERE v.id = ? AND (
+            v.deleted_at IS NULL OR (? = 1 AND EXISTS (
+              SELECT 1 FROM test_run_vm_provisioning p
+              JOIN operations o ON o.id = p.operation_id
+              WHERE p.test_run_id = ? AND p.vm_id = v.id
+                AND o.type = 'vm.create' AND o.resource_type = 'virtual_machine'
+                AND o.resource_id = v.id AND o.state IN ('failed', 'cancelled')
+            ))
+          )''',
+              [
+                vmId.value,
+                nextState == TestRunState.collecting ? 1 : 0,
+                id.value,
+              ],
+            )
+            .isEmpty) {
       throw TestRunConflictException(
         id,
-        'VM binding does not identify a live catalog resource',
+        'VM binding does not identify an eligible catalog resource',
       );
     }
     if (vmId != null &&

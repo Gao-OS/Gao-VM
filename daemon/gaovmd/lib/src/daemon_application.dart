@@ -45,6 +45,8 @@ import 'sqlite_vm_runtime_assets.dart';
 import 'sqlite_vm_state_effect_adapter.dart';
 import 'test_run_api_handlers.dart';
 import 'test_run_application_service.dart';
+import 'test_run_provisioning_dispatch_loop.dart';
+import 'test_run_provisioning_worker.dart';
 import 'vm_application_service.dart';
 import 'vm_bundle_store.dart';
 import 'vm_command_dispatch_loop.dart';
@@ -321,6 +323,22 @@ final class DaemonApplication {
         database: database,
         idempotencyRetention: retention,
       );
+      final testRunProvisioning = TestRunProvisioningDispatchLoop(
+        worker: TestRunProvisioningWorker(database: database),
+        onDispatch: (results) {
+          for (final result in results) {
+            if (result.error case final error?) {
+              report(
+                'test_run_provisioning',
+                error,
+                vm: result.vmId,
+                operation: result.operationId,
+              );
+            }
+          }
+        },
+        onError: (error, _) => report('test_run_provisioning', error),
+      );
       ResourceApiHandlers(
         vms: VmApplicationService.composed(
           repository: catalog,
@@ -366,6 +384,7 @@ final class DaemonApplication {
         await Future.wait([
           commands.close(),
           provisioning.close(),
+          testRunProvisioning.close(),
           imageWork.close(),
           reconcile.close(),
           registry.shutdown(),
@@ -386,6 +405,7 @@ final class DaemonApplication {
       await ownership.verify();
       commands.start();
       provisioning.start();
+      testRunProvisioning.start();
       imageWork.start();
       reconcile.start();
       health.ready = true;

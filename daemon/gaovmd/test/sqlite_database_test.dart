@@ -48,7 +48,7 @@ void main() {
   test('bootstrap configures SQLite and applies the schema once', () async {
     var database = await GaoVmDatabase.open(databasePath);
 
-    expect(database.schemaVersion, 11);
+    expect(database.schemaVersion, 12);
     expect(database.appliedMigrationVersions, [
       1,
       2,
@@ -61,6 +61,7 @@ void main() {
       9,
       10,
       11,
+      12,
     ]);
     expect(database.journalMode, 'wal');
     expect(database.foreignKeysEnabled, isTrue);
@@ -88,7 +89,7 @@ void main() {
     database.close();
 
     database = await GaoVmDatabase.open(databasePath);
-    expect(database.schemaVersion, 11);
+    expect(database.schemaVersion, 12);
     expect(database.appliedMigrationVersions, [
       1,
       2,
@@ -101,6 +102,7 @@ void main() {
       9,
       10,
       11,
+      12,
     ]);
     database.close();
   });
@@ -147,7 +149,7 @@ void main() {
       legacy.dispose();
       var database = await GaoVmDatabase.open(databasePath);
       addTearDown(() => database.close());
-      expect(database.schemaVersion, 11);
+      expect(database.schemaVersion, 12);
       await database.read((connection) {
         final row = connection.select('SELECT * FROM test_runs').single;
         for (final entry in original.entries) {
@@ -191,6 +193,7 @@ void main() {
         9,
         10,
         11,
+        12,
       ]);
       await database.read((connection) {
         expect(connection.select('SELECT * FROM test_steps').single, step);
@@ -217,7 +220,7 @@ void main() {
       legacy.dispose();
       final database = await GaoVmDatabase.open(databasePath);
       try {
-        expect(database.schemaVersion, 11);
+        expect(database.schemaVersion, 12);
         expect(database.appliedMigrationVersions, [
           1,
           2,
@@ -230,6 +233,7 @@ void main() {
           9,
           10,
           11,
+          12,
         ]);
         await database.read((db) {
           expect(db.select('SELECT * FROM vm_provisioning'), isEmpty);
@@ -281,7 +285,7 @@ void main() {
       legacy.dispose();
       final database = await GaoVmDatabase.open(databasePath);
       try {
-        expect(database.schemaVersion, 11);
+        expect(database.schemaVersion, 12);
         await database.read((db) {
           final job = db.select('SELECT * FROM vm_provisioning').single;
           expect(job['plan_json'], '{"pinned":true}');
@@ -352,7 +356,7 @@ void main() {
 
     var database = await GaoVmDatabase.open(databasePath);
     try {
-      expect(database.schemaVersion, 11);
+      expect(database.schemaVersion, 12);
       expect(database.appliedMigrationVersions, [
         1,
         2,
@@ -365,6 +369,7 @@ void main() {
         9,
         10,
         11,
+        12,
       ]);
       await database.read((db) {
         expect(
@@ -428,6 +433,7 @@ void main() {
         9,
         10,
         11,
+        12,
       ]);
       await database.read((db) {
         expect(
@@ -464,7 +470,7 @@ void main() {
       legacy.dispose();
       final database = await GaoVmDatabase.open(databasePath);
       try {
-        expect(database.schemaVersion, 11);
+        expect(database.schemaVersion, 12);
         await database.read((db) {
           final row = db.select('SELECT * FROM vm_runtime').single;
           expect(row['applied_intent_revision'], 7);
@@ -495,7 +501,7 @@ void main() {
       legacy.dispose();
       final database = await GaoVmDatabase.open(databasePath);
       try {
-        expect(database.schemaVersion, 11);
+        expect(database.schemaVersion, 12);
         expect(database.appliedMigrationVersions, [
           1,
           2,
@@ -508,6 +514,7 @@ void main() {
           9,
           10,
           11,
+          12,
         ]);
         await database.read((db) {
           final vm = db.select('SELECT * FROM vms').single;
@@ -583,7 +590,7 @@ void main() {
 
       final database = await GaoVmDatabase.open(databasePath);
 
-      expect(database.schemaVersion, 11);
+      expect(database.schemaVersion, 12);
       expect(database.appliedMigrationVersions, [
         1,
         2,
@@ -596,6 +603,7 @@ void main() {
         9,
         10,
         11,
+        12,
       ]);
       await database.read((connection) {
         expect(
@@ -830,7 +838,7 @@ void main() {
     ]);
 
     for (final database in databases) {
-      expect(database.schemaVersion, 11);
+      expect(database.schemaVersion, 12);
       expect(database.appliedMigrationVersions, [
         1,
         2,
@@ -843,6 +851,7 @@ void main() {
         9,
         10,
         11,
+        12,
       ]);
       database.close();
     }
@@ -863,8 +872,8 @@ void main() {
     ]);
 
     for (final result in results) {
-      expect(result.schemaVersion, 11);
-      expect(result.migrations, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+      expect(result.schemaVersion, 12);
+      expect(result.migrations, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
     }
   });
 }

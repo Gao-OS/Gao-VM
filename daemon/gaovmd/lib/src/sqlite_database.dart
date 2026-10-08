@@ -25,7 +25,7 @@ const coreTableNames = <String>{
   'outbox',
 };
 
-const _latestSchemaVersion = 11;
+const _latestSchemaVersion = 12;
 final _transactionContextKey = Object();
 final _savepointScopeKey = Object();
 final _transactionGates = <String, _AsyncGate>{};
@@ -512,6 +512,15 @@ const _migrations = <_Migration>[
   _Migration(11, '''
     CREATE INDEX artifacts_vm_created_idx ON artifacts(vm_id, created_at, id);
     CREATE INDEX artifacts_test_run_created_idx ON artifacts(test_run_id, created_at, id);
+  '''),
+  _Migration(12, '''
+    CREATE TABLE test_run_vm_provisioning (
+      test_run_id TEXT PRIMARY KEY REFERENCES test_runs(id),
+      vm_id TEXT NOT NULL UNIQUE REFERENCES vms(id),
+      operation_id TEXT NOT NULL UNIQUE REFERENCES operations(id)
+    );
+    CREATE INDEX test_runs_provisioning_idx ON test_runs(id)
+      WHERE state IN ('pending', 'provisioning');
   '''),
 ];
 
