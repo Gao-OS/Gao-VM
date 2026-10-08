@@ -15,6 +15,10 @@ import 'host_lease_repository.dart';
 import 'host_scheduler.dart';
 import 'host_scheduler_models.dart';
 import 'image_filesystem.dart';
+import 'image_api_handlers.dart';
+import 'image_application_service.dart';
+import 'image_store.dart';
+import 'image_work_dispatch_loop.dart';
 import 'legacy_vm_migration.dart';
 import 'macos_driver_inventory.dart';
 import 'macos_host_metrics.dart';
@@ -158,6 +162,13 @@ final class DaemonApplication {
         images: images,
         ownership: ownership,
       ).migrate();
+      final imageStore = ImageStore(database, Directory(images.path));
+      final imageRecovery = await imageStore.reconcile();
+      health.imageStoreHealthy = imageRecovery.damagedImageIds.isEmpty;
+      final imageService = ImageApplicationService(
+        database: database,
+        store: imageStore,
+      );
       final metrics = MacOsHostMetricsSource(
         storage: state,
         countUnmanagedDrivers: () async => (await inventory.snapshot())
@@ -240,6 +251,10 @@ final class DaemonApplication {
       }
 
       final workerOwner = RequestId.generate().value;
+      final imageWork = ImageWorkDispatchLoop(
+        images: imageService,
+        onError: (error, _) => report('images', error),
+      );
       final commands = VmCommandDispatchLoop(
         dispatcher: VmCommandDispatcher(
           commands: SqliteVmCommandRepository(database),
@@ -309,13 +324,18 @@ final class DaemonApplication {
         ),
         operations: OperationApplicationService(
           repository: operations,
-          mutations: SqliteVmProvisioningCancellation(
-            database: database,
-            idempotencyRetention: retention,
+          mutations: _DaemonOperationCancellation(
+            operations: operations,
+            images: imageService,
+            provisioning: SqliteVmProvisioningCancellation(
+              database: database,
+              idempotencyRetention: retention,
+            ),
           ),
           waiter: SqliteOperationWaiter(operations: operations, events: feed),
         ),
       ).register(router);
+      ImageApiHandlers(images: imageService).register(router);
       EventApiHandlers(feed: feed).register(router);
       final ownedDatabase = database;
       final ownedLock = ownership;
@@ -325,6 +345,7 @@ final class DaemonApplication {
         await Future.wait([
           commands.close(),
           provisioning.close(),
+          imageWork.close(),
           reconcile.close(),
           registry.shutdown(),
           scheduler.shutdown(),
@@ -344,6 +365,7 @@ final class DaemonApplication {
       await ownership.verify();
       commands.start();
       provisioning.start();
+      imageWork.start();
       reconcile.start();
       health.ready = true;
       await server.start();
@@ -397,6 +419,7 @@ final class _DaemonHealth implements SystemHealthService {
   final DaemonOwnership ownership;
   final GaoVmDatabase database;
   bool ready = false;
+  bool imageStoreHealthy = true;
 
   @override
   Future<SystemHealthStatus> liveness() async =>
@@ -407,11 +430,30 @@ final class _DaemonHealth implements SystemHealthService {
     await ownership.verify();
     await database.read((db) => db.select('SELECT 1'));
     return SystemHealthStatus(
-      healthy: ready,
+      healthy: ready && imageStoreHealthy,
       checks: {
         'catalog': 'ready',
+        'image_store': imageStoreHealthy ? 'ready' : 'damaged',
         'runtime_recovery': ready ? 'ready' : 'stopping',
       },
     );
+  }
+}
+
+final class _DaemonOperationCancellation implements OperationMutationAcceptor {
+  const _DaemonOperationCancellation({
+    required this.operations,
+    required this.images,
+    required this.provisioning,
+  });
+  final OperationRepository operations;
+  final ImageApplicationService images;
+  final OperationMutationAcceptor provisioning;
+  @override
+  Future<OperationAcceptance> cancel(OperationCancelCommand command) async {
+    final target = await operations.get(command.operationId);
+    return target?.type == 'image.import'
+        ? images.cancel(command)
+        : provisioning.cancel(command);
   }
 }

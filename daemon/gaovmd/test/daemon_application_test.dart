@@ -16,6 +16,9 @@ void main() {
         final response = await daemon.get('/v1/vms');
         expect(response.$1, HttpStatus.ok);
         expect(response.$2['items'], isEmpty);
+        final images = await daemon.get('/v1/images');
+        expect(images.$1, HttpStatus.ok);
+        expect(images.$2['items'], isEmpty);
         final health = await daemon.get('/v1/system/live');
         expect(health.$1, HttpStatus.ok);
       } finally {

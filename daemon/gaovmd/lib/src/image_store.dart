@@ -8,6 +8,7 @@ import 'package:gaovm_models/gaovm_models.dart';
 import 'image_manifest.dart';
 import 'image_filesystem.dart';
 import 'image_repository.dart';
+import 'image_operation_commit.dart';
 import 'event_repository.dart';
 import 'sqlite_database.dart';
 
@@ -42,6 +43,7 @@ final class ImageStore {
     String? expectedObjectDigest,
     bool Function()? isCancelled,
     void Function(int)? onProgress,
+    ImageOperationCommit? operation,
   }) => _locked(() async {
     if (type == ImageType.gaoosBundle)
       throw ArgumentError('use importBundle for GaoOS bundles');
@@ -76,7 +78,13 @@ final class ImageStore {
           channel: channel,
         );
         _checkCancelled(isCancelled);
-        return await _publish(stage, manifest, labels: labels);
+        return await _publish(
+          stage,
+          manifest,
+          labels: labels,
+          operation: operation,
+          isCancelled: isCancelled,
+        );
       } finally {
         if (await stage.exists()) await stage.delete(recursive: true);
       }
@@ -87,9 +95,14 @@ final class ImageStore {
 
   Future<Image> importBundle(
     Directory source, {
+    String? guestProfile,
+    String? version,
+    String? buildId,
+    String? channel,
     Map<String, String> labels = const {},
     bool Function()? isCancelled,
     void Function(int)? onProgress,
+    ImageOperationCommit? operation,
   }) => _locked(() async {
     _checkCancelled(isCancelled);
     final bundle = await OwnedImageDirectory.open(source);
@@ -105,6 +118,12 @@ final class ImageStore {
       }
       if (manifest.type != ImageType.gaoosBundle)
         throw FormatException('bundle must have gaoos-bundle type');
+      if (guestProfile != null &&
+              manifest.metadata('guest_profile') != guestProfile ||
+          version != null && manifest.metadata('version') != version ||
+          buildId != null && manifest.metadata('build_id') != buildId ||
+          channel != null && manifest.metadata('channel') != channel)
+        throw FormatException('bundle metadata disagrees with import request');
       await directory.create(recursive: true);
       await _checkSpace(
         manifest.objects.values.fold<int>(
@@ -141,7 +160,13 @@ final class ImageStore {
             }
           }
           _checkCancelled(isCancelled);
-          return await _publish(stage, manifest, labels: labels);
+          return await _publish(
+            stage,
+            manifest,
+            labels: labels,
+            operation: operation,
+            isCancelled: isCancelled,
+          );
         } finally {
           sourceObjects.close();
         }
@@ -198,8 +223,20 @@ final class ImageStore {
     }
   }
 
-  Future<bool> delete(ImageId id) => _locked(() async {
-    final image = await repository.delete(id);
+  Future<bool> delete(
+    ImageId id, {
+    ImageOperationCommit? operation,
+  }) => _locked(() async {
+    final image = await database.transaction((_) async {
+      await operation?.verify();
+      final image = await repository.delete(
+        id,
+        operationId: operation?.operationId,
+      );
+      if (image == null && operation != null) throw ImageNotFound(id);
+      if (image != null) await operation?.complete(image);
+      return image;
+    });
     if (image == null) return false;
     // Catalog deletion commits first. A crash leaves an unreferenced directory
     // for reconcile; it never leaves a visible image without its objects.
@@ -215,11 +252,47 @@ final class ImageStore {
 
   Future<ImageReconciliation> reconcile() => _locked(() async {
     final images = await list();
+    final removed = await _removeUnregistered(images);
+    final damaged = <ImageId>[];
+    for (final image in images) {
+      try {
+        await _validatePublished(image);
+      } catch (_) {
+        damaged.add(image.id);
+      }
+    }
+    return ImageReconciliation(
+      List.unmodifiable(removed),
+      List.unmodifiable(damaged),
+    );
+  });
+
+  /// Drain any previous filesystem owner and reconcile its unpublished files
+  /// before making a failure or cancellation visible to clients.
+  Future<void> finishUnpublished(
+    ImageOperationCommit operation, {
+    required OperationError error,
+  }) => _locked(() async {
+    if (!identical(operation.database, database))
+      throw ArgumentError('image operation catalog mismatch');
+    await operation.verify(allowCancellation: true);
+    await _removeUnregistered(await list());
+    if (await operation.cancellationRequested()) {
+      await operation.cancel();
+    } else {
+      try {
+        await operation.fail(error);
+      } on ImageOperationCancellationRequested {
+        await operation.cancel();
+      }
+    }
+  });
+
+  Future<List<String>> _removeUnregistered(List<Image> images) async {
     final liveNames = {
       for (final image in images) 'sha256-${image.digest.substring(7)}',
     };
     final removed = <String>[];
-    final damaged = <ImageId>[];
     await for (final entry in directory.list(followLinks: false)) {
       final name = entry.path.split(Platform.pathSeparator).last;
       if (entry is Directory &&
@@ -230,13 +303,6 @@ final class ImageStore {
         removed.add(entry.path);
       }
     }
-    for (final image in images) {
-      try {
-        await _validatePublished(image);
-      } catch (_) {
-        damaged.add(image.id);
-      }
-    }
     if (removed.isNotEmpty) {
       syncImageDirectory(directory.path);
       await SqliteEventRepository(database).append(
@@ -245,11 +311,8 @@ final class ImageStore {
         payload: JsonObjectValue.fromJson({'removed_paths': removed}),
       );
     }
-    return ImageReconciliation(
-      List.unmodifiable(removed),
-      List.unmodifiable(damaged),
-    );
-  });
+    return removed;
+  }
 
   Future<void> _checkSpace(int bytes) async {
     if (bytes <= 0) throw FormatException('image objects must not be empty');
@@ -289,6 +352,8 @@ final class ImageStore {
     Directory stage,
     ImageManifest manifest, {
     Map<String, String> labels = const {},
+    ImageOperationCommit? operation,
+    bool Function()? isCancelled,
   }) async {
     await File(
       '${stage.path}/manifest.json',
@@ -298,7 +363,7 @@ final class ImageStore {
     syncImageDirectory(stage.path);
     _onCheckpoint?.call(ImageImportCheckpoint.staged);
     final image = Image(
-      id: ImageId.generate(),
+      id: operation?.imageId ?? ImageId.generate(),
       digest: manifest.digest,
       type: manifest.type,
       architecture: Architecture.arm64,
@@ -313,37 +378,63 @@ final class ImageStore {
     final published = Directory(
       '${directory.path}/sha256-${manifest.digest.substring(7)}',
     );
-    final result = await database.transaction((_) async {
-      final existing = await repository.findDigest(manifest.digest);
-      if (existing != null) {
-        await _validatePublished(existing);
-        return existing;
-      }
-      // A prior process may have crashed after publication, before commit.
-      // No catalog reference exists, so this complete new staging copy replaces
-      // the orphan. Never overwrite a registered immutable image.
-      final type = await FileSystemEntity.type(
-        published.path,
-        followLinks: false,
-      );
-      if (type == FileSystemEntityType.directory)
-        await published.delete(recursive: true);
-      else if (type != FileSystemEntityType.notFound)
-        throw FileSystemException(
-          'unexpected image publication entry',
+    // Hashing a duplicate must not hold SQLite's writer transaction or block
+    // cancellation/API readers. The image filesystem lock still excludes IO.
+    final validated = await repository.findDigest(manifest.digest);
+    if (validated != null)
+      await _validatePublished(validated, isCancelled: isCancelled);
+    _checkCancelled(isCancelled);
+    var publishedByThisAttempt = false;
+    late Image result;
+    try {
+      result = await database.transaction((_) async {
+        if (operation != null && !identical(operation.database, database))
+          throw ArgumentError('image operation catalog mismatch');
+        await operation?.verify();
+        final existing = await repository.findDigest(manifest.digest);
+        if (existing != null) {
+          if (existing.id != validated?.id)
+            throw StateError(
+              'image catalog changed outside its filesystem lock',
+            );
+          await operation?.complete(existing);
+          return existing;
+        }
+        // A prior process may have crashed after publication, before commit.
+        // No catalog reference exists, so this complete new staging copy replaces
+        // the orphan. Never overwrite a registered immutable image.
+        final type = await FileSystemEntity.type(
           published.path,
+          followLinks: false,
         );
-      await stage.rename(published.path);
-      syncImageDirectory(directory.path);
-      try {
+        if (type == FileSystemEntityType.directory)
+          await published.delete(recursive: true);
+        else if (type != FileSystemEntityType.notFound)
+          throw FileSystemException(
+            'unexpected image publication entry',
+            published.path,
+          );
+        await stage.rename(published.path);
+        publishedByThisAttempt = true;
+        syncImageDirectory(directory.path);
         _onCheckpoint?.call(ImageImportCheckpoint.published);
-        return await repository.insert(image);
-      } catch (_) {
+        final stored = await repository.insert(
+          image,
+          operationId: operation?.operationId,
+        );
+        await operation?.complete(stored);
+        return stored;
+      });
+    } catch (_) {
+      // A deferred constraint or COMMIT failure happens outside the transaction
+      // callback. Keep the filesystem lock until that rollback is reconciled.
+      if (publishedByThisAttempt &&
+          await repository.findDigest(manifest.digest) == null) {
         await published.delete(recursive: true);
         syncImageDirectory(directory.path);
-        rethrow;
       }
-    });
+      rethrow;
+    }
     // Observability cannot turn a committed import into an apparent failure.
     try {
       _onCheckpoint?.call(ImageImportCheckpoint.committed);
@@ -385,7 +476,10 @@ final class ImageStore {
       );
   }
 
-  Future<void> _validatePublished(Image image) async {
+  Future<void> _validatePublished(
+    Image image, {
+    bool Function()? isCancelled,
+  }) async {
     final root = '${directory.path}/sha256-${image.digest.substring(7)}';
     if (await FileSystemEntity.type(root, followLinks: false) !=
         FileSystemEntityType.directory)
@@ -406,7 +500,8 @@ final class ImageStore {
       final file = File('$root/objects/${object.key}');
       await _checkManagedObjectPath(file);
       if (await file.length() != object.value['size_bytes'] ||
-          await _fileDigest(file) != object.value['digest'])
+          await _fileDigest(file, isCancelled: isCancelled) !=
+              object.value['digest'])
         throw FormatException('corrupt image object');
     }
   }

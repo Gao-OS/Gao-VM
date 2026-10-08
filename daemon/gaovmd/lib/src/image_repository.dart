@@ -17,6 +17,11 @@ final class ImageInUse implements Exception {
       'image.in_use: $imageId is referenced by ${vmIds.join(', ')}';
 }
 
+final class ImageNotFound implements Exception {
+  const ImageNotFound(this.imageId);
+  final ImageId imageId;
+}
+
 /// Catalog access. File publication and removal must go through ImageStore.
 final class ImageRepository {
   ImageRepository(this.database);
@@ -46,7 +51,10 @@ final class ImageRepository {
         .toList(),
   );
 
-  Future<Image> insert(Image image) => database.transaction((db) async {
+  Future<Image> insert(
+    Image image, {
+    OperationId? operationId,
+  }) => database.transaction((db) async {
     final manifest = ImageManifest.fromJson(image.manifest.toJson());
     if (manifest.digest != image.digest ||
         manifest.type != image.type ||
@@ -79,6 +87,7 @@ final class ImageRepository {
       type: 'image.imported',
       resourceType: ResourceType.image,
       resourceId: image.id,
+      operationId: operationId,
       payload: JsonObjectValue.fromJson({'digest': image.digest}),
     );
     return image;
@@ -96,20 +105,22 @@ final class ImageRepository {
     ].toSet().toList();
   });
 
-  Future<Image?> delete(ImageId id) => database.transaction((db) async {
-    final image = await get(id);
-    if (image == null) return null;
-    final users = await references(id);
-    if (users.isNotEmpty) throw ImageInUse(id, users);
-    db.execute('DELETE FROM images WHERE id = ?', [id.value]);
-    await SqliteEventRepository(database).append(
-      type: 'image.deleted',
-      resourceType: ResourceType.image,
-      resourceId: id,
-      payload: JsonObjectValue.fromJson({'digest': image.digest}),
-    );
-    return image;
-  });
+  Future<Image?> delete(ImageId id, {OperationId? operationId}) =>
+      database.transaction((db) async {
+        final image = await get(id);
+        if (image == null) return null;
+        final users = await references(id);
+        if (users.isNotEmpty) throw ImageInUse(id, users);
+        db.execute('DELETE FROM images WHERE id = ?', [id.value]);
+        await SqliteEventRepository(database).append(
+          type: 'image.deleted',
+          resourceType: ResourceType.image,
+          resourceId: id,
+          operationId: operationId,
+          payload: JsonObjectValue.fromJson({'digest': image.digest}),
+        );
+        return image;
+      });
 }
 
 bool _references(Object? value, String id) {

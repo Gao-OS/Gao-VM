@@ -43,6 +43,8 @@ The three names describe boot roles; their objects remain part of the bundle's
 single immutable image resource. PR021 provisioning resolves these roles when
 creating isolated VM disks. Import checks hashes and declared byte sizes; it
 does not attempt to boot or certify an operating system.
+If an import request supplies bundle metadata, it must match the source manifest;
+the importer never silently ignores or rewrites immutable build metadata.
 
 ## Identity and canonical encoding
 
@@ -72,14 +74,18 @@ An actual write error still fails safely if capacity changes during the copy.
 2. Check object sizes/digests, write the immutable manifest, flush files and directories.
 3. Rename staging to `images/sha256-<hex>/` and flush the image root directory.
 4. Commit the image catalog row, `image.imported` event, and event outbox atomically.
+   For a durable import, the same transaction completes its Operation and
+   acknowledges the fenced image-work outbox delivery.
 
 The root has mode 0700 and published files have mode 0400. Failed imports remove
-their staging directories. Catalog insert failure removes the publication.
+their staging directories. Catalog insert or final SQLite commit failure removes
+the publication while retaining the filesystem lock.
 A process crash before catalog commit may leave staging or an unregistered
 complete directory; these are invisible to catalog clients. `reconcile()` removes
 them. A crash after commit preserves the image and its complete objects.
 
-Filesystem mutations (`importFile`, `importBundle`, `delete`, and `reconcile`)
+Filesystem mutations (including import, delete, reconciliation, and unpublished
+operation completion)
 reject calls made inside an active caller transaction on the same SQLite catalog,
 including a second connection to that catalog, before changing the filesystem.
 A nested savepoint is not a durable commit and therefore cannot authorize file
@@ -100,7 +106,26 @@ referenced content. It removes only recognized unregistered image directories
 and staging directories, then emits `image.store_cleaned`. Unknown entries and
 symlinks are preserved. The application service must validate image existence
 in the same database transaction that adds a VM reference; PR020 supplies the
-reference query and deletion side, while VM creation composition is a later slice.
+reference query and deletion side. VM provisioning supplies reference creation
+validation in its own application transaction.
+
+## Durable public operations
+
+`ImageApplicationService` and `ImageApiHandlers` expose the frozen import, list,
+and delete routes over the public Unix HTTP socket. Acceptance is database-only
+and returns `202` with a pending Operation and Location. Import acceptance reserves
+an image ID. Deduplication resolves the completed Operation's resource ID and
+`result.image_id` to the original image; idempotency retries preserve the exact
+original acceptance response, including its reserved ID and pending state.
+
+The daemon owns a recoverable image-work loop with expiring, renewed claims.
+Publication and terminal Operation commits verify the claim token and expiry;
+an old worker cannot overwrite a replacement's result. Cancellation is accepted
+through the Operation API and completes only after the store lock is acquired and
+unpublished staging/orphans are cleaned, including files from a previous worker.
+Image deletion rechecks references and atomically commits catalog deletion, its
+Operation, events, and work acknowledgement before removing managed files.
+Shutdown drains in-flight image work before closing SQLite.
 
 ## Verification and scope
 
@@ -109,17 +134,16 @@ concurrent deduplication in both one isolate and simultaneous child processes,
 cancellation, capacity rejection, reference protection,
 rollback, caller-transaction rejection, descriptor ownership across pathname
 replacement, bounded manifest growth, and child-process exit at all three
-publication checkpoints.
+publication checkpoints. Application, public HTTP, work-loop, and operation
+recovery tests additionally cover durable acceptance/replay, cancellation across
+lease replacement, final-commit rollback, reference races, pagination, metadata
+validation, and process exits before and after the terminal Operation commit.
 `image_manifest_test.dart` verifies canonicalization, immutability, and malformed
 manifest rejection. POSIX durability and ownership behavior is exercised on
 macOS; Linux uses descriptor `statx`, procfs descriptor IO, and its corresponding
 `stat`/`df` interfaces and needs Linux CI. Missing descriptor-validation interfaces
 fail closed.
 
-Managed disk cloning, VM bundle creation, public Image/Operation API composition,
-and VM reference creation validation are PR021/later integration work.
-In particular, this foundation emits image resource events atomically with its
-catalog changes, but does not complete a caller's durable Operation. The Image
-application service must supply that operation/resource transaction composition
-before the public import/delete workflow is considered complete. No arbitrary
-future transaction callback or public API handler is introduced by PR020.
+The public composition uses a concrete fenced `ImageOperationCommit`, not an
+arbitrary future transaction callback. These checks do not establish CLI image
+command coverage, installed daemon startup, native VM boot, or full MVP completion.
