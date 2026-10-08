@@ -1,0 +1,11 @@
+[package]
+name = "gaovm_guestd"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+publish = false
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+jsonschema = { version = "0.58.6", default-features = false }

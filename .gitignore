@@ -4,3 +4,6 @@
 # Swift Package Manager build output (generated)
 **/.build/
 .pi/
+
+# Rust guest agent build output (generated)
+guest/gaovm_guestd/target/

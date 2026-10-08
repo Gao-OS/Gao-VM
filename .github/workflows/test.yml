@@ -59,6 +59,30 @@ jobs:
       - name: Run tests
         run: dart test
 
+  rust-guest-test:
+    name: Rust guest protocol tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: guest/gaovm_guestd
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        run: rustup toolchain install 1.96.1 --profile minimal
+
+      - name: Cache Cargo packages and build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            guest/gaovm_guestd/target
+          key: cargo-${{ runner.os }}-1.96.1-${{ hashFiles('guest/gaovm_guestd/Cargo.lock') }}
+
+      - name: Run tests
+        run: cargo +1.96.1 test --locked
+
   swift-test:
     name: Swift tests
     runs-on: macos-14

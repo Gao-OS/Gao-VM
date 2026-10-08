@@ -361,6 +361,17 @@ cd drivers/vz_macos
 swift test
 ```
 
+### Guest Protocol Foundation (Rust)
+
+```bash
+cd guest/gaovm_guestd
+cargo test --locked
+```
+
+This currently tests the framed control protocol and bidirectional negotiation,
+not an installed guest daemon or native vsock execution. See the
+[guest package scope](guest/gaovm_guestd/README.md) before using it.
+
 ---
 
 ## End-to-End Automated Run
