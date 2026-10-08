@@ -40,13 +40,17 @@ jobs:
             directory: libs/gaovm_rpc
             paths: lib test
             entrypoint: ''
+          - package: gaovm_api_client
+            directory: libs/gaovm_api_client
+            paths: lib test
+            entrypoint: ''
           - package: gaovmd
             directory: daemon/gaovmd
             paths: bin lib test
             entrypoint: bin/gaovmd.dart
           - package: gaovm_cli
             directory: clients/gaovm_cli
-            paths: bin
+            paths: bin lib test
             entrypoint: bin/gaovm_cli.dart
     defaults:
       run:

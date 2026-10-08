@@ -1,9 +1,15 @@
 name: gaovm_cli
-description: GaoVM CLI (stub)
+description: GaoVM public API command-line client
 version: 0.1.0
 publish_to: none
 environment:
   sdk: ^3.9.0
 dependencies:
-  gaovm_rpc:
-    path: ../../libs/gaovm_rpc
+  gaovm_api_client:
+    path: ../../libs/gaovm_api_client
+  gaovm_models:
+    path: ../../libs/gaovm_models
+dev_dependencies:
+  gaovmd:
+    path: ../../daemon/gaovmd
+  test: ^1.25.0

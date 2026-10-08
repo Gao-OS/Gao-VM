@@ -27,6 +27,10 @@ jobs:
             directory: libs/gaovm_models
           - package: gaovm_rpc
             directory: libs/gaovm_rpc
+          - package: gaovm_api_client
+            directory: libs/gaovm_api_client
+          - package: gaovm_cli
+            directory: clients/gaovm_cli
           - package: gaovmd
             directory: daemon/gaovmd
     defaults:

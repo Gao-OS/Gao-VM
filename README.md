@@ -11,7 +11,7 @@ The checked-in code is a working single-VM prototype being migrated to the accep
 - [Development plan](docs/DEVELOPMENT_PLAN.md)
 - [Non-negotiable implementation rules](AGENTS.md)
 
-Those documents are frozen for M0. Prototype commands and JSON state paths documented below describe current behavior only; they are not alternatives to the SQLite/public-API target.
+Those documents are frozen for M0. Legacy prototype commands and JSON state paths documented below are historical references, not alternatives to the SQLite/public-API target. The current CLI migration checkpoint is described below.
 
 ---
 
@@ -167,9 +167,37 @@ The prototype organizes its state directory as follows. M1 migrates these inputs
 
 ---
 
-## Using the Current Prototype CLI (`gaovm_cli`)
+## Public API CLI (`gaovm_cli`)
 
-The CLI communicates with `gaovmd` over the Unix socket.
+The CLI now uses `gaovm_api_client` for HTTP/1.1 over the daemon's public Unix socket (`state/run/api.sock` relative to the CLI's working directory by default). It has no driver RPC or daemon business-logic path. Use `--socket-path` explicitly when running from another directory.
+
+Implemented commands at this checkpoint:
+
+- `vm create --body-json JSON`, `vm list`, `vm get VM_ID`
+- `vm patch VM_ID --body-json JSON --if-match REVISION`
+- `vm start/stop/restart/kill VM_ID`
+- `vm wait VM_ID --condition CONDITION --timeout-seconds N` (add `--service-name NAME` for `service_ready`)
+- `operation get/cancel OP_ID`, `operation wait OP_ID --timeout-seconds N`
+
+Targets must be real server-generated `vm_`/`op_` ULIDs. There is no implicit or name-based `default` VM. Create accepts the public `api_version`, `kind`, `metadata`, and `spec` object; patch accepts the public metadata/spec patch object, not the legacy config format below.
+
+All output is JSON; `--json` selects compact output. Successful results go to stdout and Problems/local diagnostics to stderr. Exit codes are `0` for success or accepted work, `1` for API failure or a failed/cancelled waited Operation, `2` for usage errors, `3` for transport failure, `4` for invalid server responses, and `124` for a deadline or `WAIT_TIMEOUT`.
+
+Requests default to a 30-second local deadline; waits require an explicit `--timeout-seconds` and allow five additional seconds for transport. Mutations return accepted Operations without waiting for completion. Use `--idempotency-key KEY` and reuse it for explicit retries; the client does not automatically retry writes. Patch also requires an explicit revision/ETag through `--if-match`.
+
+```bash
+cd clients/gaovm_cli
+dart pub get --enforce-lockfile
+dart run bin/gaovm_cli.dart --help --json
+dart run bin/gaovm_cli.dart --socket-path /absolute/state/run/api.sock vm list --json
+dart test
+```
+
+Coverage includes real public-socket requests and SQLite-backed create/replay/query/cancellation with durable Operation waits. This is a partial M7 checkpoint: VM deletion, image, guest, TestRun/artifact, events, doctor, list filtering/pagination, and the legacy alias adapter remain pending. It does not establish installed-daemon or Apple Silicon VM boot/display acceptance.
+
+## Legacy Prototype CLI Reference (Not Supported)
+
+The commands and examples in this section describe the removed prototype RPC CLI. They are not supported by the current public-API client.
 
 ```bash
 cd clients/gaovm_cli
@@ -262,7 +290,7 @@ dart run bin/gaovm_cli.dart events
 
 ---
 
-## VM Configuration Specification
+## Legacy Prototype VM Configuration Specification
 
 | Field | Type | Description |
 |---|---|---|
@@ -307,7 +335,7 @@ swift test
 
 ## End-to-End Automated Run
 
-An automated end-to-end verification script is provided at [`scripts/e2e_macos14_happy_path.sh`](scripts/e2e_macos14_happy_path.sh). It executes a full build, runs the daemon in a temporary state directory, configures the VM, tests starting, display opening/closing, and stopping.
+The historical [`scripts/e2e_macos14_happy_path.sh`](scripts/e2e_macos14_happy_path.sh) still invokes the removed prototype CLI and socket contract. It must be migrated before use and is not v2 end-to-end acceptance evidence.
 
 ### Running the E2E Script
 
