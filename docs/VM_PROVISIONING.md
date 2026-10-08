@@ -379,6 +379,16 @@ tests cover full-identity exclusion and unresolved-count rejection. Startup
 teardown, unknown-process policy, and production admission wiring remain
 unfinished; Apple Silicon execution is still required.
 
+If startup reports `process inventory contains unresolved executables`, inspect
+`snapshot.unresolvedProcessIds` and call `inventory.inspect(pid)` for the actual
+native error. On this macOS host, repeated scans found live, non-zombie processes
+whose `proc_pidpath` returned `ENOENT`; their mapped executable paths no longer
+existed. An absent executable pathname does not prove process exit. This also
+occurs when a test removes its executable before its child has confirmed exit.
+Do not skip the census, fall back to basename/arguments, or signal unrelated PIDs
+to make installed-daemon tests pass. Coordinate affected application/process
+recovery with the operator; the fail-closed startup check remains a real gate.
+
 On macOS, `DriverProcessManager` now canonicalizes the executable before launch
 and captures its kernel identity after installing the owned process session and
 output drainage. Missing/mismatched identity or inspection failure fails spawn
