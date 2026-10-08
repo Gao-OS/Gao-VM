@@ -89,6 +89,170 @@ void main() {
     });
   });
   test(
+    'doctor reports possible orphan and staging entries without removing them',
+    () async {
+      await _withDoctor((fixture) async {
+        final root = fixture.store.directory.path;
+        final orphan = await Directory(
+          '$root/sha256-${List.filled(64, '0').join()}',
+        ).create();
+        final staged = await Directory('$root/.staging-evidence').create();
+        for (final directory in [orphan, staged]) {
+          await File('${directory.path}/evidence').writeAsString('preserve');
+        }
+
+        final response = await fixture.request();
+        expect(response.status, HttpStatus.ok);
+        final report = DoctorResult.fromJson(response.body);
+        expect(report.healthy, isTrue);
+        final images = report.checks.singleWhere(
+          (check) => check.name == 'image_store',
+        );
+        expect(images.status, DoctorCheckStatus.warning);
+        expect(images.message, contains('unregistered_digest_dirs=1'));
+        expect(images.message, contains('staging_entries=1'));
+        for (final directory in [orphan, staged]) {
+          expect(
+            await File('${directory.path}/evidence').readAsString(),
+            'preserve',
+          );
+        }
+        expect(await fixture.store.list(), isEmpty);
+      });
+    },
+  );
+  test(
+    'doctor reports an incomplete image namespace when its entry budget is exceeded',
+    () async {
+      await _withDoctor((fixture) async {
+        for (var index = 0; index < 4097; index++) {
+          await File(
+            '${fixture.store.directory.path}/evidence-$index',
+          ).create();
+        }
+        final response = await fixture.request();
+        expect(response.status, HttpStatus.ok);
+        final report = DoctorResult.fromJson(response.body);
+        expect(report.healthy, isFalse);
+        final images = report.checks.singleWhere(
+          (check) => check.name == 'image_store',
+        );
+        expect(images.status, DoctorCheckStatus.error);
+        expect(images.message, contains('4096-entry'));
+        expect(await fixture.store.directory.list().length, 4097);
+      });
+    },
+  );
+  test(
+    'registered image directories and the regular store lock are not orphan warnings',
+    () async {
+      await _withDoctor((fixture) async {
+        final source = await File(
+          '${fixture.temporary.path}/disk',
+        ).writeAsString('disk');
+        final image = await fixture.store.importFile(
+          source,
+          type: ImageType.rawDisk,
+        );
+        final events = SqliteEventRepository(fixture.database);
+        final before = await events.list();
+
+        final report = DoctorResult.fromJson((await fixture.request()).body);
+        expect(report.healthy, isTrue);
+        final images = report.checks.singleWhere(
+          (check) => check.name == 'image_store',
+        );
+        expect(images.status, DoctorCheckStatus.ok);
+        expect(images.message, contains('unregistered_digest_dirs=0'));
+        expect(images.message, contains('staging_entries=0'));
+        expect(images.message, contains('unknown_entries=0'));
+        expect((await fixture.store.list()).single.id, image.id);
+        expect(await events.list(), before);
+      });
+    },
+  );
+  test(
+    'doctor does not wait for an in-flight image import store lock',
+    () async {
+      await _withDoctor((fixture) async {
+        final source = await File(
+          '${fixture.temporary.path}/disk',
+        ).writeAsString('disk');
+        final entered = Completer<void>();
+        final capacity = Completer<int>();
+        final publisher = ImageStore(
+          fixture.database,
+          fixture.store.directory,
+          availableBytes: (_) {
+            entered.complete();
+            return capacity.future;
+          },
+        );
+        final importing = publisher.importFile(source, type: ImageType.rawDisk);
+        try {
+          await entered.future.timeout(const Duration(seconds: 2));
+          final response = await fixture.request().timeout(
+            const Duration(seconds: 2),
+          );
+          final report = DoctorResult.fromJson(response.body);
+          expect(report.healthy, isTrue);
+          expect(
+            report.checks
+                .singleWhere((check) => check.name == 'image_store')
+                .status,
+            DoctorCheckStatus.ok,
+          );
+          expect(await fixture.store.list(), isEmpty);
+        } finally {
+          capacity.complete(1024 * 1024 * 1024);
+          await importing;
+        }
+        expect(await fixture.store.list(), hasLength(1));
+      });
+    },
+  );
+  test(
+    'doctor reports image namespace symlinks without following or adopting them',
+    () async {
+      await _withDoctor((fixture) async {
+        final outside = await Directory(
+          '${fixture.temporary.path}/operator-data',
+        ).create();
+        final evidence = await File(
+          '${outside.path}/evidence',
+        ).writeAsString('preserve');
+        final root = fixture.store.directory.path;
+        final links = <Link>[];
+        for (final name in [
+          'sha256-${List.filled(64, 'f').join()}',
+          '.staging-link',
+          '.lock',
+        ]) {
+          links.add(await Link('$root/$name').create(outside.path));
+        }
+        final unknown = await File(
+          '$root/operator-evidence',
+        ).writeAsString('leave');
+
+        final report = DoctorResult.fromJson((await fixture.request()).body);
+        expect(report.healthy, isTrue);
+        final images = report.checks.singleWhere(
+          (check) => check.name == 'image_store',
+        );
+        expect(images.status, DoctorCheckStatus.warning);
+        expect(images.message, contains('unregistered_digest_dirs=0'));
+        expect(images.message, contains('staging_entries=0'));
+        expect(images.message, contains('unknown_entries=4'));
+        expect(await evidence.readAsString(), 'preserve');
+        expect(await unknown.readAsString(), 'leave');
+        for (final link in links) {
+          expect(await link.target(), outside.path);
+        }
+        expect(await fixture.store.list(), isEmpty);
+      });
+    },
+  );
+  test(
     'doctor detects same-size image corruption without repairing or removing files',
     () async {
       await _withDoctor((fixture) async {

@@ -151,6 +151,9 @@ final class SystemDoctorService {
     await root.verifyPathBinding();
     var count = 0;
     var unverified = 0;
+    var unregistered = 0;
+    var staging = 0;
+    var unknown = 0;
     const contentByteBudget = 64 * 1024 * 1024;
     var remainingBytes = contentByteBudget;
     String? cursor;
@@ -195,14 +198,51 @@ final class SystemDoctorService {
         }
         cursor = ids.last.value;
       }
+      final digestDirectory = RegExp(r'^sha256-[0-9a-f]{64}$');
+      const namespaceEntryBudget = 4096;
+      var entries = 0;
+      await for (final entry in Directory(root.path).list(followLinks: false)) {
+        if (_closed || elapsed.elapsed >= timeout)
+          throw TimeoutException('image namespace scan deadline');
+        if (entries++ >= namespaceEntryBudget) {
+          return const DoctorCheck(
+            name: 'image_store',
+            status: DoctorCheckStatus.error,
+            message:
+                'Image namespace exceeded the 4096-entry diagnostic budget; the full namespace could not be verified. All entries were left untouched.',
+          );
+        }
+        final name = entry.path.split(Platform.pathSeparator).last;
+        final type = await FileSystemEntity.type(
+          entry.path,
+          followLinks: false,
+        );
+        if (name == '.lock' && type == FileSystemEntityType.file) continue;
+        if (type != FileSystemEntityType.directory) {
+          unknown++;
+        } else if (name.startsWith('.staging-')) {
+          staging++;
+        } else if (digestDirectory.hasMatch(name)) {
+          final registered = await database.read(
+            (db) => db.select(
+              'SELECT 1 FROM images WHERE digest = ? AND deleted_at IS NULL LIMIT 1',
+              ['sha256:${name.substring(7)}'],
+            ).isNotEmpty,
+          );
+          if (!registered) unregistered++;
+        } else {
+          unknown++;
+        }
+      }
       await root.verifyPathBinding();
       return DoctorCheck(
         name: 'image_store',
-        status: unverified == 0
+        status:
+            unverified == 0 && unregistered == 0 && staging == 0 && unknown == 0
             ? DoctorCheckStatus.ok
             : DoctorCheckStatus.warning,
         message:
-            '$count catalog image manifests and object sizes verified; content_digests_unverified=$unverified; hash_budget_bytes=$contentByteBudget. Unregistered files are left untouched; a warning is not full content-integrity proof.',
+            '$count catalog image manifests and object sizes verified; content_digests_unverified=$unverified; hash_budget_bytes=$contentByteBudget; unregistered_digest_dirs=$unregistered; staging_entries=$staging; unknown_entries=$unknown. Namespace findings may be in-flight publication or cleanup, not confirmed orphan ownership. All entries are left untouched; a warning is not full content-integrity proof.',
       );
     } finally {
       await root.verifyPathBinding();

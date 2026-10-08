@@ -401,6 +401,12 @@ are non-blocking. An eight-second observation deadline reports unfinished requir
 checks as errors and coalesces outstanding probes instead of starting duplicates.
 Image manifest/size checks are required; content rehashing has a shared 64 MiB
 budget. Skipped digests explicitly produce an image warning, not integrity proof.
+The image-root namespace scan reports `unregistered_digest_dirs`, `staging_entries`,
+and `unknown_entries`, reserving only a regular `.lock` file. It never follows
+symlinks or takes the mutating store lock. Findings warn rather than prove orphan
+ownership because publication and cleanup may be in flight. More than 4096 root
+entries makes this required check incomplete/error; the shared deadline still
+applies. Every observed entry remains untouched.
 No reconciliation, lease release/renewal, process signals, driver RPCs, VM starts,
 or socket cleanup occur. Only the live server's verified exact API socket link
 names are reserved during read-only namespace discovery; other `.g.*`/`.o.*`

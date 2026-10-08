@@ -109,6 +109,15 @@ in the same database transaction that adds a VM reference; PR020 supplies the
 reference query and deletion side. VM provisioning supplies reference creation
 validation in its own application transaction.
 
+The public doctor independently reports possible orphan/staging and unknown root
+entries without taking the mutating store lock or running reconciliation. Exact
+digest directories are checked against the active catalog; only a regular `.lock`
+is reserved, and symlinks are reported without following them. These observations
+can overlap publication or cleanup and do not authorize removal or adoption.
+Warnings leave the catalog and all files untouched. More than 4096 root entries
+or an expired observation deadline produces an incomplete-check error. Doctor's
+content-hash budget does not change reconciliation's full hash verification.
+
 ## Durable public operations
 
 `ImageApplicationService` and `ImageApiHandlers` expose the frozen import, list,

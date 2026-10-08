@@ -217,7 +217,10 @@ warnings do not fail host readiness. Malformed or contradictory reports use exit
 It checks the platform, static ARM64 driver signature/entitlement, catalog,
 directory bindings/permissions, images, capacity estimates, and runtime namespace.
 Image manifests/sizes are required checks; content hashing has a shared 64 MiB
-budget, and skipped digests are explicitly warned about. Guest session/exec
+budget, and skipped digests are explicitly warned about. A no-follow image-root
+scan warns about unregistered digest directories, staging, and unknown entries.
+These can be in-flight publications/cleanup, not confirmed orphan ownership;
+exceeding its 4096-entry budget is an incomplete-check error. Guest session/exec
 readiness remains unverified. Doctor does not repair files, release leases, signal
 processes, start a VM, or prove native VM/TestRun or release acceptance. It requires
 a running daemon and cannot bypass a pre-listener startup census failure.
