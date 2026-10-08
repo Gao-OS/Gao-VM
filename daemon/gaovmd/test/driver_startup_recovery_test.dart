@@ -68,6 +68,11 @@ void main() {
       );
       final run = await OwnedImageDirectory.open(Directory(layout.runRoot));
       final before = await File(paths.metadataPath).readAsBytes();
+      if (mode == _RecoveryCase.confirmedQuarantineExit) {
+        await Directory(
+          paths.directory,
+        ).rename('${paths.directory}.cleanup.${paths.cleanupToken}');
+      }
       var exited = false;
       try {
         final recovery = DriverStartupRecovery(
@@ -108,7 +113,8 @@ void main() {
           },
           orphanGrace: const Duration(milliseconds: 50),
         );
-        if (mode == _RecoveryCase.confirmedExit) {
+        if (mode == _RecoveryCase.confirmedExit ||
+            mode == _RecoveryCase.confirmedQuarantineExit) {
           await recovery.recover();
         } else {
           await expectLater(recovery.recover(), throwsStateError);
@@ -125,7 +131,8 @@ void main() {
         exited = true;
         expect(
           await Directory(paths.directory).parent.exists(),
-          mode != _RecoveryCase.confirmedExit,
+          mode != _RecoveryCase.confirmedExit &&
+              mode != _RecoveryCase.confirmedQuarantineExit,
         );
         await owner.verify();
       } finally {
@@ -142,6 +149,7 @@ void main() {
 
 enum _RecoveryCase {
   confirmedExit,
+  confirmedQuarantineExit,
   unresolvedBeforeExit,
   unresolvedAfterExit,
   changedMetadata,

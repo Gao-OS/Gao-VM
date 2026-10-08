@@ -25,9 +25,12 @@ enum DriverDiscoveryIssueKind {
 }
 
 final class DriverDiscoveryIssue {
-  const DriverDiscoveryIssue(this.path, this.kind);
+  const DriverDiscoveryIssue(this.path, this.kind, {this.correlation});
   final String path;
   final DriverDiscoveryIssueKind kind;
+  // Only a catalog-bound, canonical generation with absent metadata receives
+  // this identity. Absence never supplies process identity or signal authority.
+  final DriverCorrelation? correlation;
 }
 
 final class DriverDiscoverySnapshot {
@@ -110,6 +113,11 @@ final class DriverRuntimeDiscovery {
                 DriverDiscoveryIssue(
                   path,
                   DriverDiscoveryIssueKind.missingMetadata,
+                  correlation: DriverCorrelation(
+                    vmId: vmId,
+                    driverGeneration: generation,
+                    operationId: null,
+                  ),
                 ),
               );
             } else {
