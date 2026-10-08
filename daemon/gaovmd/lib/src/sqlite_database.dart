@@ -19,12 +19,13 @@ const coreTableNames = <String>{
   'test_runs',
   'test_steps',
   'artifacts',
+  'artifact_payloads',
   'resource_leases',
   'idempotency_keys',
   'outbox',
 };
 
-const _latestSchemaVersion = 9;
+const _latestSchemaVersion = 10;
 final _transactionContextKey = Object();
 final _savepointScopeKey = Object();
 final _transactionGates = <String, _AsyncGate>{};
@@ -501,6 +502,12 @@ const _migrations = <_Migration>[
       CHECK (planned_outcome IN ('succeeded', 'failed', 'cancelled'));
     CREATE INDEX test_runs_unfinished_idx ON test_runs(id)
       WHERE state NOT IN ('succeeded', 'failed', 'cancelled');
+  '''),
+  _Migration(10, '''
+    CREATE TABLE artifact_payloads (
+      artifact_id TEXT PRIMARY KEY REFERENCES artifacts(id) ON DELETE CASCADE,
+      storage_version INTEGER NOT NULL CHECK (storage_version = 1)
+    );
   '''),
 ];
 
