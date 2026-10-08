@@ -1,0 +1,11 @@
+name: gaovm_api_client
+description: GaoVM public HTTP over Unix Domain Socket client
+version: 0.1.0
+publish_to: none
+environment:
+  sdk: ^3.9.0
+dependencies:
+  gaovm_models:
+    path: ../gaovm_models
+dev_dependencies:
+  test: ^1.25.0
