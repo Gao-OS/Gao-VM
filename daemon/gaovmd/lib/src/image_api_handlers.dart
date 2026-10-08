@@ -113,7 +113,7 @@ PublicApiHandler _guard(PublicApiHandler handler) => (request) async {
       HttpStatus.conflict,
       ErrorCode.imageInUse,
       'image-in-use',
-      'The image is referenced by a VM.',
+      'The image is referenced by a VM or unfinished TestRun.',
     );
   } on FormatException catch (error) {
     throw _problem(

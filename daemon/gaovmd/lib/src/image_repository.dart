@@ -9,12 +9,16 @@ import 'persistence_timestamp.dart';
 import 'sqlite_database.dart';
 
 final class ImageInUse implements Exception {
-  ImageInUse(this.imageId, this.vmIds);
+  ImageInUse(this.imageId, List<String> resourceIds)
+    : resourceIds = List<String>.unmodifiable(resourceIds);
   final ImageId imageId;
-  final List<String> vmIds;
+  final List<String> resourceIds;
+  // Compatibility for VM-only callers; unfinished TestRuns also own images.
+  List<String> get vmIds =>
+      resourceIds.where((id) => id.startsWith('vm_')).toList();
   @override
   String toString() =>
-      'image.in_use: $imageId is referenced by ${vmIds.join(', ')}';
+      'image.in_use: $imageId is referenced by ${resourceIds.join(', ')}';
 }
 
 final class ImageNotFound implements Exception {
@@ -95,13 +99,19 @@ final class ImageRepository {
 
   Future<List<String>> references(ImageId id) => database.read((db) {
     // Include every retained generation: current/pending and the running applied
-    // spec may differ. Deleted VM history no longer owns managed images.
+    // spec may differ. Pending TestRuns pin inputs before they own a VM.
+    // Deleted VM history and completed TestRuns no longer own managed images.
     return [
       for (final row in db.select(
         '''SELECT DISTINCT s.vm_id, s.spec_json FROM vm_specs s JOIN vms v ON v.id=s.vm_id WHERE v.deleted_at IS NULL''',
       ))
         if (_references(jsonDecode(row['spec_json'] as String), id.value))
           row['vm_id'] as String,
+      for (final row in db.select(
+        "SELECT id, spec_json FROM test_runs WHERE state NOT IN ('succeeded', 'failed', 'cancelled')",
+      ))
+        if (_references(jsonDecode(row['spec_json'] as String), id.value))
+          row['id'] as String,
     ].toSet().toList();
   });
 

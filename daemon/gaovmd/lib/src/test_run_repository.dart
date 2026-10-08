@@ -425,9 +425,49 @@ final class SqliteTestRunRepository implements TestRunRepository {
         throw StateError('non-terminal TestRun outcome');
     }
     final completed = _require(connection, id);
+    await _completeCancellationActions(completed);
     await _append(completed, 'test_run.completed', now);
     return completed;
   });
+
+  Future<void> _completeCancellationActions(TestRun run) async {
+    final actions = [
+      ...(await _operations.list(
+        resourceType: ResourceType.testRun,
+        resourceId: run.id,
+      )).where((action) => action.type == 'test.cancel'),
+      ...(await _operations.list(
+        resourceType: ResourceType.operation,
+        resourceId: run.operationId,
+      )).where((action) => action.type == 'operation.cancel'),
+    ];
+    for (final action in actions) {
+      final request = action.request.toJson();
+      if (request['test_run_id'] != run.id.value ||
+          request['target_operation_id'] != run.operationId.value ||
+          !const {
+            OperationState.pending,
+            OperationState.running,
+          }.contains(action.state)) {
+        continue;
+      }
+      if (action.state == OperationState.pending)
+        await _operations.start(action.id);
+      if (run.state == TestRunState.failed) {
+        await _operations.fail(action.id, error: run.error!);
+      } else {
+        await _operations.succeed(
+          action.id,
+          result: JsonObjectValue.fromJson({
+            'test_run_id': run.id.value,
+            'target_operation_id': run.operationId.value,
+            'outcome': _stateName(run.state),
+            'cleanup_decision': run.cleanupDecision,
+          }),
+        );
+      }
+    }
+  }
 
   @override
   Future<TestRun> transition(

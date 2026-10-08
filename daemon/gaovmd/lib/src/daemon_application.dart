@@ -41,6 +41,8 @@ import 'sqlite_vm_patch_acceptor.dart';
 import 'sqlite_vm_provisioning_cancellation.dart';
 import 'sqlite_vm_runtime_assets.dart';
 import 'sqlite_vm_state_effect_adapter.dart';
+import 'test_run_api_handlers.dart';
+import 'test_run_application_service.dart';
 import 'vm_application_service.dart';
 import 'vm_bundle_store.dart';
 import 'vm_command_dispatch_loop.dart';
@@ -303,6 +305,10 @@ final class DaemonApplication {
       );
       const retention = Duration(days: 1);
       final feed = SqliteDurableEventFeed(database);
+      final testRuns = TestRunApplicationService(
+        database: database,
+        idempotencyRetention: retention,
+      );
       ResourceApiHandlers(
         vms: VmApplicationService.composed(
           repository: catalog,
@@ -327,6 +333,7 @@ final class DaemonApplication {
           mutations: _DaemonOperationCancellation(
             operations: operations,
             images: imageService,
+            testRuns: testRuns,
             provisioning: SqliteVmProvisioningCancellation(
               database: database,
               idempotencyRetention: retention,
@@ -336,6 +343,7 @@ final class DaemonApplication {
         ),
       ).register(router);
       ImageApiHandlers(images: imageService).register(router);
+      TestRunApiHandlers(runs: testRuns).register(router);
       EventApiHandlers(feed: feed).register(router);
       final ownedDatabase = database;
       final ownedLock = ownership;
@@ -444,16 +452,20 @@ final class _DaemonOperationCancellation implements OperationMutationAcceptor {
   const _DaemonOperationCancellation({
     required this.operations,
     required this.images,
+    required this.testRuns,
     required this.provisioning,
   });
   final OperationRepository operations;
   final ImageApplicationService images;
+  final TestRunApplicationService testRuns;
   final OperationMutationAcceptor provisioning;
   @override
   Future<OperationAcceptance> cancel(OperationCancelCommand command) async {
     final target = await operations.get(command.operationId);
     return target?.type == 'image.import'
         ? images.cancel(command)
+        : target?.type == 'test.run'
+        ? testRuns.cancel(command)
         : provisioning.cancel(command);
   }
 }
