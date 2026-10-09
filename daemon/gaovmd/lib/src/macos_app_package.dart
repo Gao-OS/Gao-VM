@@ -144,6 +144,7 @@ final class MacOsAppPackageBuilder {
             'xml1',
             '${contents.path}/Info.plist',
           ]);
+          await _writeLaunchAgent(contents, bundleIdentifier);
           // Sign code inside out. --deep is verification only, never signing.
           final signing = [
             '--force',
@@ -216,6 +217,42 @@ final class MacOsAppPackageBuilder {
       lock?.close();
       root.close();
     }
+  }
+}
+
+Future<void> _writeLaunchAgent(
+  OwnedImageDirectory contents,
+  String bundleIdentifier,
+) async {
+  final library = contents.createDirectory('Library');
+  try {
+    final agents = library.createDirectory('LaunchAgents');
+    try {
+      await _writeFile(
+        agents,
+        'gaovmd.plist',
+        utf8.encode(
+          jsonEncode({
+            'Label': '$bundleIdentifier.gaovmd',
+            'BundleProgram': 'Contents/MacOS/gaovmd',
+            'ProgramArguments': ['gaovmd'],
+            'KeepAlive': true,
+            'Umask': 0x3f,
+            // Old driver generations shut down through control EOF/watchdog.
+            'AbandonProcessGroup': true,
+          }),
+        ),
+      );
+      await _command('/usr/bin/plutil', [
+        '-convert',
+        'xml1',
+        '${agents.path}/gaovmd.plist',
+      ]);
+    } finally {
+      agents.close();
+    }
+  } finally {
+    library.close();
   }
 }
 

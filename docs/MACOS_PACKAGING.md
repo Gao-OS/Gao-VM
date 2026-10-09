@@ -47,6 +47,7 @@ GaoVM.app/Contents/
   MacOS/gaovmd
   MacOS/gaovm
   Helpers/gaovm-driver-vz
+  Library/LaunchAgents/gaovmd.plist
   Resources/driver-entitlements.plist
   Resources/schemas/...
 ```
@@ -62,6 +63,38 @@ verified, then the bundle is verified with `codesign --verify --deep --strict`.
 Schema copying rejects links and special files, limits depth to 16, entries to
 512, and each file to 1 MiB. The copied public OpenAPI document and its companion
 VmSpec references are loaded and validated before publication.
+
+## Bundled launch agent
+
+The assembler generates `Contents/Library/LaunchAgents/gaovmd.plist` before
+signing. It is intended for a future registration helper in the owning app using
+[`SMAppService.agent(plistName: "gaovmd.plist")`](https://developer.apple.com/documentation/servicemanagement/smappservice/agent(plistname:)).
+Apple's API requires the descriptor in that bundle-local directory. No
+registration command is implemented by this assembler, and `BundleProgram` is
+only supported for SMAppService-installed jobs: copying this plist to a shared
+LaunchAgents directory or using `launchctl bootstrap` is not an installation path.
+
+The fixed plist basename does not impose a filename-length limit on the existing
+255-character bundle-ID input contract.
+The descriptor contains only:
+
+- `Label=<bundle-id>.gaovmd`: a job identity derived from the supplied app identity.
+- `BundleProgram=Contents/MacOS/gaovmd` and `ProgramArguments=[gaovmd]`: a
+  bundle-relative daemon executable, with no shell, interpreter, working-directory
+  dependency, fixed user identity, `HOME`, or state/socket override.
+- `KeepAlive=true`: request continuous supervision; this also implies RunAtLoad.
+- `Umask=63`: the decimal plist representation of `077`, restricting newly
+  created files to the current user.
+- `AbandonProcessGroup=true`: request that launchd leave driver children to
+  shut down through control EOF/watchdog rather than killing the daemon's
+  process group immediately, matching `ARCHITECTURE.md` section 17.1.
+
+Key semantics come from the target host's `launchd.plist(5)`. Throttling and
+SIGTERM-to-SIGKILL grace retain launchd defaults. No unbounded stdout/stderr file
+is added; daemon logging remains separately bounded. The
+[v2 driver lifetime component](DRIVER_SESSION_LIFETIME.md) is a prerequisite, not
+proof of running-VM recovery. Registration/consent, installed daemon restart,
+process-group behavior, and install/update/uninstall still require native tests.
 
 ## Publication and failure handling
 
@@ -112,8 +145,10 @@ restart-recovery acceptance.
 ## Verification boundary
 
 The assembly suite uses real cross-compiled ARM64 fixtures and macOS signing
-tools, but never executes those fixtures. Unit tests cover packaged path selection,
-explicit overrides, invalid `HOME`, and preservation of development defaults.
+tools, but never executes those fixtures or registers a service. It checks the
+launch-agent descriptor after app renaming, the longest accepted bundle ID, and
+signature rejection after descriptor tampering. Unit tests cover packaged path
+selection, explicit overrides, invalid `HOME`, and preservation of development defaults.
 The test-process cleanup guard requires a confirmed child exit before a fixture
 can be removed; successful signal delivery or an elapsed deadline is not enough.
 Run from `daemon/gaovmd`:

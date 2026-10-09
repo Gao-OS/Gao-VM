@@ -157,6 +157,99 @@ void main() {
       },
     );
 
+    test('packages a relocatable per-user daemon launch agent', () async {
+      const identifier = 'org.gaovm.tests.Renamed';
+      final result = await package(identifier: identifier);
+      expect(result.exitCode, 0, reason: '${result.stderr}');
+      final bundle = await Directory(
+        (result.stdout as String).trim(),
+      ).rename('${output.path}/Renamed GaoVM.app');
+      final plist = await Process.run('/usr/bin/plutil', [
+        '-convert',
+        'json',
+        '-o',
+        '-',
+        '${bundle.path}/Contents/Library/LaunchAgents/gaovmd.plist',
+      ]);
+      expect(plist.exitCode, 0, reason: '${plist.stdout}\n${plist.stderr}');
+      final agent = jsonDecode(plist.stdout as String) as Map<String, dynamic>;
+      expect(agent, {
+        'Label': '$identifier.gaovmd',
+        'BundleProgram': 'Contents/MacOS/gaovmd',
+        'ProgramArguments': ['gaovmd'],
+        'KeepAlive': true,
+        'Umask': 0x3f,
+        'AbandonProcessGroup': true,
+      });
+      expect(
+        await FileSystemEntity.type(
+          '${bundle.path}/${agent['BundleProgram']}',
+          followLinks: false,
+        ),
+        FileSystemEntityType.file,
+      );
+      final verification = await Process.run('/usr/bin/codesign', [
+        '--verify',
+        '--deep',
+        '--strict',
+        bundle.path,
+      ]);
+      expect(verification.exitCode, 0, reason: '${verification.stderr}');
+    });
+
+    test('rejects a launch agent changed after bundle signing', () async {
+      final result = await package();
+      expect(result.exitCode, 0, reason: '${result.stderr}');
+      final bundle = (result.stdout as String).trim();
+      final before = await Process.run('/usr/bin/codesign', [
+        '--verify',
+        '--deep',
+        '--strict',
+        bundle,
+      ]);
+      expect(before.exitCode, 0, reason: '${before.stderr}');
+      final changed = await Process.run('/usr/bin/plutil', [
+        '-replace',
+        'KeepAlive',
+        '-bool',
+        'false',
+        '$bundle/Contents/Library/LaunchAgents/gaovmd.plist',
+      ]);
+      expect(changed.exitCode, 0, reason: '${changed.stderr}');
+      final after = await Process.run('/usr/bin/codesign', [
+        '--verify',
+        '--deep',
+        '--strict',
+        bundle,
+      ]);
+      expect(after.exitCode, isNot(0), reason: '${after.stderr}');
+    });
+
+    test(
+      'supports the longest accepted bundle ID in its launch agent',
+      () async {
+        final identifier = List.filled(
+          4,
+          List.filled(63, 'a').join(),
+        ).join('.');
+        expect(identifier.length, 255);
+        final result = await package(identifier: identifier);
+        expect(result.exitCode, 0, reason: '${result.stderr}');
+        final bundle = (result.stdout as String).trim();
+        final plist = await Process.run('/usr/bin/plutil', [
+          '-convert',
+          'json',
+          '-o',
+          '-',
+          '$bundle/Contents/Library/LaunchAgents/gaovmd.plist',
+        ]);
+        expect(plist.exitCode, 0, reason: '${plist.stderr}');
+        final agent =
+            jsonDecode(plist.stdout as String) as Map<String, dynamic>;
+        expect(agent['Label'], '$identifier.gaovmd');
+      },
+    );
+
     test('rejects invalid bundle metadata before creating staging', () async {
       for (final result in [
         await package(version: '0.1.0-beta'),
