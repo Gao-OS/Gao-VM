@@ -138,14 +138,29 @@ lifecycle, native VZ boot/display, Guest Agent/TestRun, upgrade rollback, notari
 distribution, or release readiness. Hosted macOS execution coverage and the
 required self-hosted Apple Silicon VM E2E gate remain pending.
 
-### Known hardened-runtime blocker
+### Hardened-runtime signing finding
 
 On Intel macOS 15.8.1 with Dart 3.9.0, compiled daemon entrypoint probes passed
 before hardened-runtime re-signing. After ad-hoc re-signing with `codesign --force
 --sign - --options runtime --timestamp=none` and no entitlements, the same probes
 timed out, including `--help`. Three owned fixture processes remained present
 after TERM and KILL; their exit was not confirmed. Sampling reached `Dart_Invoke`
-and an AOT-code address, but the root cause and required signing policy are not
-yet established. Hardened CLI execution and Apple Silicon reproduction have not
-been verified. Do not remove live executable fixtures or treat signature
-verification alone as packaged runtime acceptance.
+and an AOT-code address.
+
+A subsequent controlled probe copied the compiled daemon to a fresh private app
+layout and added only `com.apple.security.cs.allow-unsigned-executable-memory`
+while retaining hardened runtime and library validation. The signed copy reached
+`--help` and exited successfully. Its embedded `__dart_app_snap` payload was
+byte-identical before and after signing, the original artifact was unchanged,
+and every probe child confirmed exit before the temporary fixture was removed.
+This identifies the missing executable-memory exception as the launch blocker in
+the tested configuration, rather than snapshot corruption during re-signing.
+
+The pinned [Dart 3.9 AOT signing policy](https://github.com/dart-lang/sdk/blob/3.9.0/runtime/tools/entitlements/dartaotruntime_product.plist)
+includes that exception. Apple warns that it
+[relaxes executable-memory protection](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.cs.allow-unsigned-executable-memory).
+Production signing policy remains unchanged pending the decision to accept the
+scoped exception or use a different Dart build. The successful help probe does
+not establish complete daemon startup, hardened CLI execution, Apple Silicon
+compatibility, or native VM acceptance. Do not remove live executable fixtures or
+treat signature verification alone as packaged runtime acceptance.
