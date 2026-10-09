@@ -3,8 +3,10 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart' as crypto;
 import 'package:gaovm_models/gaovm_models.dart';
 
+part 'src/artifact_read.dart';
 part 'src/event_stream.dart';
 
 /// A transport boundary only: no SQLite, VM controller, or driver dependency.
@@ -13,6 +15,16 @@ final class GaoVmApiClient {
   GaoVmApiClient({required String socketPath})
     : socketPath = File(socketPath).absolute.path;
   final String socketPath;
+
+  /// Read a small artifact only after verifying its complete length and SHA-256.
+  /// Larger artifacts require streaming, not increasing a UI's preview budget.
+  /// Cancellation releases only this local read. No automatic retry is made.
+  Future<ApiArtifactResponse> readArtifact(
+    Artifact artifact, {
+    int maxBytes = 64 * 1024,
+    ApiRequestCancellation? cancellation,
+    Duration timeout = const Duration(seconds: 30),
+  }) => _readArtifact(socketPath, artifact, maxBytes, cancellation, timeout);
 
   /// Resume explicitly after the last consumed sequence. No automatic retry.
   /// The deadline bounds the entire subscription, including idle heartbeats.
