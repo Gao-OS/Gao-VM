@@ -8,7 +8,10 @@ import 'package:gaovmd/gaovmd.dart';
 import 'package:gaovmd/src/image_filesystem.dart' show imageFileMode;
 import 'package:test/test.dart';
 
+part 'artifact_download_cases.dart';
+
 void main() {
+  _artifactDownloadCliTests();
   test(
     'VM delete uses DELETE with an explicit target and idempotency key',
     () async {
@@ -236,6 +239,7 @@ void main() {
         'test get TR_ID',
         'test cancel TR_ID',
         'test artifacts TR_ID',
+        'test download TR_ID ART_ID --output-dir DIRECTORY',
         'events',
         'doctor',
         'schema',
@@ -247,6 +251,7 @@ void main() {
     expect(help['options'], contains('--vm-id VM_ID'));
     expect(help['options'], contains('--operation-id OP_ID'));
     expect(help['options'], contains('--test-run-id TR_ID'));
+    expect(help['options'], contains('--output-dir DIRECTORY'));
     expect(help['options']['--body-json JSON'], contains('guest exec'));
     expect(
       help['options']['--service-name NAME'],

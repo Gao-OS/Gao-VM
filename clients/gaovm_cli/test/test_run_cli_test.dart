@@ -205,6 +205,49 @@ void main() {
     },
   );
 
+  test(
+    'test download verifies a large public artifact into a new local directory',
+    () async {
+      final run = await createRun();
+      final artifact = await artifacts.publish(
+        bytes: Stream.fromIterable(
+          List.generate(32, (_) => List<int>.filled(8192, 0)),
+        ),
+        kind: ArtifactKind.stdout,
+        contentType: 'application/octet-stream',
+        maxBytes: 262144,
+        operationId: run.operationId,
+        testRunId: run.resourceId as TestRunId,
+      );
+      final output = await Directory('${temporary.path}/downloads').create();
+      final marker = await File(
+        '${output.path}/${artifact.id.value}',
+      ).writeAsString('keep existing');
+      final result = await invoke([
+        'test',
+        'download',
+        run.resourceId.value,
+        artifact.id.value,
+        '--output-dir',
+        output.path,
+      ]);
+      expect(result.code, 0, reason: result.error);
+      expect(result.error, isEmpty);
+      final receipt = jsonDecode(result.output) as Map;
+      expect(Artifact.fromJson(receipt['artifact']), artifact);
+      expect(receipt['verified'], isTrue);
+      expect(RequestId(receipt['request_id'] as String), isA<RequestId>());
+      final file = File(receipt['output_path'] as String);
+      expect(await file.length(), artifact.sizeBytes);
+      expect(file.parent.parent.path, await output.resolveSymbolicLinks());
+      expect(
+        await file.openRead().expand((chunk) => chunk).any((byte) => byte != 0),
+        isFalse,
+      );
+      expect(await marker.readAsString(), 'keep existing');
+    },
+  );
+
   test('test artifacts resumes isolated public metadata pages', () async {
     final runs = [for (var index = 0; index < 2; index++) await createRun()];
     final expected = <Artifact>[];

@@ -8,6 +8,8 @@ import 'package:gaovm_models/gaovm_models.dart';
 
 import 'src/default_socket_path.dart';
 
+part 'src/artifact_download.dart';
+
 /// Exit codes: 0 success, 1 API/action failure, 2 usage, 3 transport,
 /// 4 invalid server response, 124 deadline, 130 SIGINT, 143 SIGTERM.
 /// All diagnostic output is JSON.
@@ -58,6 +60,7 @@ Future<int> runCli(
             'test get TR_ID',
             'test cancel TR_ID',
             'test artifacts TR_ID',
+            'test download TR_ID ART_ID --output-dir DIRECTORY',
             'events',
             'doctor',
             'schema',
@@ -87,12 +90,70 @@ Future<int> runCli(
             '--timeout-seconds N': '1-86400; required by waits, otherwise 30',
             '--idempotency-key KEY':
                 'reuse the same key when retrying a mutation',
+            '--output-dir DIRECTORY':
+                'test download: existing local directory; creates a private child',
           },
         }),
       );
       return 0;
     }
     final client = GaoVmApiClient(socketPath: options.socket);
+    if (options.command.length == 4 &&
+        options.command[0] == 'test' &&
+        options.command[1] == 'download') {
+      if (options.outputDirectory == null) {
+        throw const FormatException('test download requires --output-dir');
+      }
+      final owner = TestRunId(_id(options.command[2], 'tr_'));
+      final id = ArtifactId(_id(options.command[3], 'art_'));
+      final cancellation = ApiRequestCancellation();
+      ProcessSignal? interrupted;
+      final signals = <StreamSubscription<ProcessSignal>>[];
+      try {
+        for (final signal in [ProcessSignal.sigint, ProcessSignal.sigterm]) {
+          signals.add(
+            signal.watch().listen((received) {
+              interrupted ??= received;
+              cancellation.cancel();
+            }),
+          );
+        }
+        final download = await _downloadTestArtifact(
+          client,
+          owner,
+          id,
+          Directory(options.outputDirectory!),
+          options.timeout,
+          cancellation,
+        );
+        if (download == null) {
+          return fail(
+            1,
+            'ARTIFACT_NOT_FOUND',
+            'No artifact ${id.value} belongs to ${owner.value}.',
+          );
+        }
+        write(
+          encode({
+            'artifact': download.artifact.toJson(),
+            'request_id': download.requestId.value,
+            'output_path': download.file.path,
+            'verified': true,
+          }),
+        );
+        return 0;
+      } on ApiRequestCancelledException {
+        return fail(
+          interrupted == ProcessSignal.sigint ? 130 : 143,
+          'CLI_INTERRUPTED',
+          'artifact download interrupted by $interrupted',
+        );
+      } finally {
+        for (final signal in signals) {
+          await signal.cancel();
+        }
+      }
+    }
     if (options.command.length == 1 && options.command.single == 'events') {
       final vmId = options.query['vm_id'];
       final operationId = options.query['operation_id'];
@@ -232,6 +293,10 @@ Future<int> runCli(
     return fail(3, 'CLI_TRANSPORT', exception);
   } on ApiProtocolException catch (exception) {
     return fail(4, 'CLI_PROTOCOL', exception);
+  } on ApiArtifactSizeLimitException catch (exception) {
+    return fail(1, 'CLI_ARTIFACT_LIMIT', exception);
+  } on FileSystemException catch (exception) {
+    return fail(1, 'CLI_LOCAL_IO', exception);
   }
 }
 
@@ -538,6 +603,7 @@ final class _Options {
     this.timeoutExplicit = false,
     this.condition,
     this.serviceName,
+    this.outputDirectory,
     this.query = const {},
   });
   final String socket;
@@ -550,6 +616,7 @@ final class _Options {
   final bool timeoutExplicit;
   final String? condition;
   final String? serviceName;
+  final String? outputDirectory;
   final Map<String, String> query;
 
   static _Options parse(List<String> args) {
@@ -562,6 +629,7 @@ final class _Options {
     String? ifMatch;
     String? condition;
     String? serviceName;
+    String? outputDirectory;
     final command = <String>[];
     final query = <String, String>{};
     final seenOptions = <String>{};
@@ -589,6 +657,13 @@ final class _Options {
           condition = value();
         case '--service-name':
           serviceName = value();
+        case '--output-dir':
+          outputDirectory = value();
+          if (outputDirectory.isEmpty || outputDirectory.contains('\u0000')) {
+            throw const FormatException(
+              '--output-dir must be a local directory path',
+            );
+          }
         case '--after-sequence' ||
             '--vm-id' ||
             '--operation-id' ||
@@ -691,6 +766,7 @@ final class _Options {
       if (ifMatch != null && verb != 'vm patch') '--if-match',
       if (condition != null && verb != 'vm wait') '--condition',
       if (serviceName != null && verb != 'vm wait') '--service-name',
+      if (outputDirectory != null && verb != 'test download') '--output-dir',
       if (idempotencyKey != null &&
           !const {
             'vm create',
@@ -728,6 +804,7 @@ final class _Options {
       timeoutExplicit: timeoutExplicit,
       condition: condition,
       serviceName: serviceName,
+      outputDirectory: outputDirectory,
       query: Map.unmodifiable(query),
     );
   }
