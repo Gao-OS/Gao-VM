@@ -21,6 +21,9 @@ artifact boundaries, and verification limits.
 The Swift driver also uses a [bounded asynchronous text-log writer](docs/DRIVER_LOGGING.md)
 with structured VM/generation/operation correlation, so filesystem I/O and rotation
 do not run on its VZ/control caller.
+Its [v2 control-session watchdog](docs/DRIVER_SESSION_LIFETIME.md) also bounds
+bootstrap, incomplete frames and backpressured writes; native VM shutdown and
+launchd acceptance remain separate gates.
 The daemon uses [bounded JSON Lines logging](docs/DAEMON_LOGGING.md) with
 server-owned request IDs and typed resource correlation, without awaiting log I/O
 in API or background callbacks.

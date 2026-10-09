@@ -22,6 +22,7 @@ struct LegacyConfig {
 final class UnixSocket: SocketWriteTransport {
     private let fdLock = NSLock()
     private var storedFD: Int32
+    private let writeDeadline: (() -> DispatchTime)?
 
     var fd: Int32 {
         fdLock.lock()
@@ -29,8 +30,9 @@ final class UnixSocket: SocketWriteTransport {
         return storedFD
     }
 
-    init(fd: Int32) throws {
+    init(fd: Int32, writeDeadline: (() -> DispatchTime)? = nil) throws {
         self.storedFD = fd
+        self.writeDeadline = writeDeadline
         var enabled: Int32 = 1
         guard Darwin.setsockopt(
             fd,
@@ -44,14 +46,30 @@ final class UnixSocket: SocketWriteTransport {
             self.storedFD = -1
             throw DriverError.io("setsockopt(SO_NOSIGPIPE) failed: \(message)")
         }
+        if writeDeadline != nil {
+            let flags = Darwin.fcntl(fd, F_GETFL)
+            guard flags >= 0, Darwin.fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0 else {
+                let message = String(cString: strerror(errno))
+                close()
+                throw DriverError.io("fcntl(O_NONBLOCK) failed: \(message)")
+            }
+        }
     }
 
     func writeAll(_ data: Data) throws {
+        // Only authenticated RPCs renew the budget, never partial-write progress.
         try data.withUnsafeBytes { rawBuf in
             guard let base = rawBuf.baseAddress else { return }
             var offset = 0
             while offset < data.count {
+                if let writeDeadline {
+                    try waitForControlSocket(fd, events: Int16(POLLOUT), deadline: writeDeadline)
+                }
                 let n = Darwin.write(fd, base.advanced(by: offset), data.count - offset)
+                if n < 0 {
+                    if errno == EINTR { continue }
+                    if writeDeadline != nil, errno == EAGAIN || errno == EWOULDBLOCK { continue }
+                }
                 if n <= 0 {
                     throw DriverError.io("write() failed: \(String(cString: strerror(errno)))")
                 }
@@ -60,10 +78,13 @@ final class UnixSocket: SocketWriteTransport {
         }
     }
 
-    func readExact(_ count: Int, context: String? = nil) throws -> Data {
+    func readExact(
+        _ count: Int, context: String? = nil, deadline: DispatchTime? = nil
+    ) throws -> Data {
         var data = Data(count: count)
         var offset = 0
         while offset < count {
+            if let deadline { try waitForControlSocket(fd, deadline: { deadline }) }
             let n = data.withUnsafeMutableBytes { rawBuf -> Int in
                 guard let base = rawBuf.baseAddress else { return -1 }
                 return Darwin.read(fd, base.advanced(by: offset), count - offset)
@@ -77,6 +98,7 @@ final class UnixSocket: SocketWriteTransport {
             }
             if n < 0 {
                 if errno == EINTR { continue }
+                if deadline != nil, errno == EAGAIN || errno == EWOULDBLOCK { continue }
                 throw DriverError.io("read() failed: \(String(cString: strerror(errno)))")
             }
             offset += n
@@ -108,6 +130,31 @@ final class UnixSocket: SocketWriteTransport {
     }
 
     deinit { close() }
+}
+
+struct ControlSocketDeadlineExpired: Error {}
+
+private func waitForControlSocket(
+    _ fd: Int32, events: Int16 = Int16(POLLIN), deadline: () -> DispatchTime
+) throws {
+    while true {
+        let now = DispatchTime.now().uptimeNanoseconds
+        let expires = deadline().uptimeNanoseconds
+        guard now < expires else {
+            throw ControlSocketDeadlineExpired()
+        }
+        let remaining = expires - now
+        let timeout = Int32(min(max(1, remaining / 1_000_000), UInt64(Int32.max)))
+        var descriptor = pollfd(fd: fd, events: events, revents: 0)
+        let result = Darwin.poll(&descriptor, 1, timeout)
+        if result < 0 {
+            if errno == EINTR { continue }
+            throw DriverError.io("poll() failed: \(String(cString: strerror(errno)))")
+        }
+        if result > 0, DispatchTime.now().uptimeNanoseconds < deadline().uptimeNanoseconds {
+            return
+        }
+    }
 }
 
 final class UnixListener {
@@ -156,12 +203,16 @@ final class UnixListener {
         }
     }
 
-    func acceptOne() throws -> UnixSocket {
-        let clientFD = Darwin.accept(fd, nil, nil)
-        guard clientFD >= 0 else {
+    func acceptOne(
+        deadline: DispatchTime? = nil, writeDeadline: (() -> DispatchTime)? = nil
+    ) throws -> UnixSocket {
+        while true {
+            if let deadline { try waitForControlSocket(fd, deadline: { deadline }) }
+            let clientFD = Darwin.accept(fd, nil, nil)
+            if clientFD >= 0 { return try UnixSocket(fd: clientFD, writeDeadline: writeDeadline) }
+            if errno == EINTR { continue }
             throw DriverError.socketAccept("accept() failed: \(String(cString: strerror(errno)))")
         }
-        return try UnixSocket(fd: clientFD)
     }
 
     func close() {

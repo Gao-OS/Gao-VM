@@ -56,7 +56,7 @@ final class DriverSessionV2 {
   private var pendingHelloID: DriverProtocolV2.JSONRPCID?
   private var localHelloAccepted = false
   private var remoteHelloAccepted = false
-  private var lastAuthenticatedDaemonRPC = Date()
+  private var authenticationDeadline = DispatchTime.now() + 15
   private var fatalError: Error?
   private var terminalExit = DriverTerminalExitGate()
 
@@ -73,6 +73,7 @@ final class DriverSessionV2 {
     guard #available(macOS 14.0, *) else {
       throw DriverError.invalidArgs("gaovm-driver-vz requires macOS 14+")
     }
+    stateQueue.sync { authenticationDeadline = .now() + 15 }
     let listener = UnixListener(path: config.socketPath)
     try listener.bindAndListen()
     guard Darwin.chmod(config.socketPath, mode_t(0o600)) == 0 else {
@@ -80,39 +81,44 @@ final class DriverSessionV2 {
       throw DriverError.socketBind("chmod(driver socket) failed")
     }
     self.listener = listener
-    let socket = try listener.acceptOne()
-    self.socket = socket
-    try socketWriter.attach(socket)
-    defer {
-      socketWriter.close()
-      listener.close()
-    }
-    stateQueue.sync { lastAuthenticatedDaemonRPC = Date() }
-    try sendHello()
+    do {
+      let socket = try listener.acceptOne(
+        deadline: currentAuthenticationDeadline(),
+        writeDeadline: { [weak self] in self?.currentAuthenticationDeadline() ?? .now() })
+      self.socket = socket
+      try socketWriter.attach(socket)
+      defer {
+        socketWriter.close()
+        listener.close()
+      }
+      try sendHello()
 
-    while true {
-      if let fatal = takeFatalError() { throw fatal }
-      if heartbeatExpired() {
-        try terminate(reason: "no authenticated daemon RPC within 15 seconds", code: 12)
-      }
-      if try !socket.pollReadable(timeoutMs: 500) { continue }
-      do {
-        try handle(readMessage())
-      } catch DriverError.eof {
+      while true {
         if let fatal = takeFatalError() { throw fatal }
-        try terminate(reason: "control socket EOF", code: 0)
+        if heartbeatExpired() { throw ControlSocketDeadlineExpired() }
+        if try !socket.pollReadable(timeoutMs: 500) { continue }
+        do {
+          try handle(readMessage())
+        } catch DriverError.eof {
+          if let fatal = takeFatalError() { throw fatal }
+          try terminate(reason: "control socket EOF", code: 0)
+        }
       }
+    } catch is ControlSocketDeadlineExpired {
+      try terminate(reason: "no authenticated daemon RPC within 15 seconds", code: 12)
     }
   }
 
   private func readMessage() throws -> DriverProtocolV2.Message {
     guard let socket else { throw DriverError.io("driver socket is unavailable") }
-    let header = try socket.readExact(4, context: "frame header")
+    let deadline = currentAuthenticationDeadline()
+    let header = try socket.readExact(4, context: "frame header", deadline: deadline)
     let length = header.reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
     guard length > 0, length <= UInt32(LengthPrefixedJsonRpc.maxFrameSize) else {
       throw DriverError.protocolViolation("invalid v2 frame length: \(length)")
     }
-    return try codec.decode(socket.readExact(Int(length), context: "frame payload"))
+    return try codec.decode(
+      socket.readExact(Int(length), context: "frame payload", deadline: deadline))
   }
 
   private func send(_ message: DriverProtocolV2.Message) throws {
@@ -539,13 +545,16 @@ final class DriverSessionV2 {
   }
 
   private func markAuthenticatedRPC() {
-    stateQueue.sync { lastAuthenticatedDaemonRPC = Date() }
+    guard authenticated else { return }
+    stateQueue.sync { authenticationDeadline = .now() + 15 }
+  }
+
+  private func currentAuthenticationDeadline() -> DispatchTime {
+    stateQueue.sync { authenticationDeadline }
   }
 
   private func heartbeatExpired() -> Bool {
-    stateQueue.sync {
-      authenticationDeadlineExpired(since: lastAuthenticatedDaemonRPC)
-    }
+    DispatchTime.now().uptimeNanoseconds >= currentAuthenticationDeadline().uptimeNanoseconds
   }
 
   private func recordFatal(_ error: Error, operationID: DriverProtocolV2.OperationID? = nil) {
