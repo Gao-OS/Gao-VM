@@ -55,6 +55,42 @@ void main() {
 ''')
           as Map<String, Object?>;
 
+  test('VM create request is typed without server-owned metadata', () {
+    final request = VmCreateRequest.fromJson({
+      'api_version': vmApiVersion,
+      'kind': vmKind,
+      'metadata': {
+        'name': 'new-vm',
+        'labels': {'channel': 'nightly'},
+      },
+      'spec': json['spec'],
+    });
+    expect(request.name, 'new-vm');
+    expect(request.spec.boot, isA<LinuxKernelBoot>());
+    expect(request.toJson()['metadata'], {
+      'name': 'new-vm',
+      'labels': {'channel': 'nightly'},
+    });
+    expect(VmCreateRequest.fromJson(request.toJson()), request);
+  });
+
+  test(
+    'VM patch preserves omitted fields, explicit null, and empty labels',
+    () {
+      final input = {
+        'metadata': {'name': 'renamed', 'labels': <String, String>{}},
+        'spec': {'cpu': 8, 'guest_profile': null, 'autostart': false},
+      };
+      final request = VmPatchRequest.fromJson(input);
+      expect(request.name, 'renamed');
+      expect(request.labels, isEmpty);
+      expect(request.spec!.guestProfile.isPresent, isTrue);
+      expect(request.spec!.guestProfile.value, isNull);
+      expect(request.toJson(), input);
+      expect(VmPatchRequest.fromJson(request.toJson()), request);
+    },
+  );
+
   test('VirtualMachine performs a schema-shaped JSON round trip', () {
     final vm = VirtualMachine.fromJson(json);
 
@@ -65,6 +101,101 @@ void main() {
     expect(vm.status.phase, VmPhase.running);
     expect(VirtualMachine.fromJson(vm.toJson()), vm);
   });
+
+  for (final invalid in [
+    'version',
+    'kind',
+    'status',
+    'server ID',
+    'revision',
+    'empty name',
+    'long name',
+    'labels',
+    'spec',
+  ]) {
+    test('VM create request rejects $invalid input', () {
+      final metadata = <String, Object?>{'name': 'new-vm'};
+      final input = <String, Object?>{
+        'api_version': vmApiVersion,
+        'kind': vmKind,
+        'metadata': metadata,
+        'spec': json['spec'],
+      };
+      switch (invalid) {
+        case 'version':
+          input['api_version'] = 'v2';
+        case 'kind':
+          input['kind'] = 'Image';
+        case 'status':
+          input['status'] = {};
+        case 'server ID':
+          metadata['id'] = 'vm_01J00000000000000000000000';
+        case 'revision':
+          metadata['revision'] = 7;
+        case 'empty name':
+          metadata['name'] = '';
+        case 'long name':
+          metadata['name'] = 'x' * 129;
+        case 'labels':
+          metadata['labels'] = {'channel': 1};
+        case 'spec':
+          input['spec'] = {'cpu': 4};
+      }
+      expect(
+        () => VmCreateRequest.fromJson(input),
+        throwsA(anyOf(isA<FormatException>(), isA<ArgumentError>())),
+      );
+    });
+  }
+
+  for (final input in [
+    <String, Object?>{},
+    {'metadata': <String, Object?>{}},
+    {
+      'metadata': {'id': 'vm_01J00000000000000000000000'},
+    },
+    {
+      'metadata': {'name': null},
+    },
+    {
+      'metadata': {'labels': null},
+    },
+    {
+      'metadata': {'name': ''},
+    },
+    {'spec': null},
+    {'spec': <String, Object?>{}},
+    {
+      'spec': {'cpu': 0},
+    },
+    {'revision': 7},
+  ]) {
+    test('VM patch rejects closed or empty input $input', () {
+      expect(
+        () => VmPatchRequest.fromJson(input),
+        throwsA(anyOf(isA<FormatException>(), isA<ArgumentError>())),
+      );
+    });
+  }
+
+  test(
+    'VM write labels and serialized collections do not alias caller state',
+    () {
+      final labels = {'channel': 'nightly'};
+      final create = VmCreateRequest(
+        name: 'new-vm',
+        labels: labels,
+        spec: VmSpec.fromJson(json['spec']),
+      );
+      final patch = VmPatchRequest(labels: labels);
+      labels['channel'] = 'changed';
+      expect(create.labels['channel'], 'nightly');
+      expect(patch.labels!['channel'], 'nightly');
+      expect(() => patch.labels!['new'] = 'value', throwsUnsupportedError);
+      expect(VmCreateRequest.fromJson(create.toJson()), create);
+      expect(VmPatchRequest.fromJson(patch.toJson()), patch);
+    },
+  );
 
   test('VmSpec rejects CPU below the schema minimum', () {
     final spec = Map<String, Object?>.from(json['spec']! as Map);

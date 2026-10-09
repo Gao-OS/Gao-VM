@@ -15,3 +15,4 @@ export 'src/resource_id.dart';
 export 'src/system_health.dart';
 export 'src/test_run.dart';
 export 'src/vm.dart';
+export 'src/vm_requests.dart';
