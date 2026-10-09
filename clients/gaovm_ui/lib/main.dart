@@ -15,6 +15,7 @@ part 'image_catalog.dart';
 part 'host_status.dart';
 part 'vm_deletion.dart';
 part 'vm_writes.dart';
+part 'test_runs.dart';
 
 void main() {
   LicenseRegistry.addLicense(() async* {
@@ -75,7 +76,7 @@ enum _VmVerb {
   final String label;
 }
 
-enum _ConsoleView { vms, images, operations, events, host }
+enum _ConsoleView { vms, images, operations, testRuns, events, host }
 
 // Local intent/correlation only. The daemon remains the source of VM/Operation state.
 class _VmAction {
@@ -960,6 +961,8 @@ class _ConsoleState extends State<_Console> {
                 const SizedBox(height: 8),
                 _navigation('Operations', view: _ConsoleView.operations),
                 const SizedBox(height: 8),
+                _navigation('TestRuns', view: _ConsoleView.testRuns),
+                const SizedBox(height: 8),
                 _navigation('Events', view: _ConsoleView.events),
                 const SizedBox(height: 8),
                 _navigation('Host status', view: _ConsoleView.host),
@@ -997,6 +1000,8 @@ class _ConsoleState extends State<_Console> {
                                 _ConsoleView.images => 'CONTROL PLANE / IMAGES',
                                 _ConsoleView.operations =>
                                   'CONTROL PLANE / HISTORY',
+                                _ConsoleView.testRuns =>
+                                  'CONTROL PLANE / TESTS',
                                 _ConsoleView.events =>
                                   'CONTROL PLANE / JOURNAL',
                                 _ConsoleView.host => 'CONTROL PLANE / HOST',
@@ -1013,6 +1018,7 @@ class _ConsoleState extends State<_Console> {
                                 _ConsoleView.vms => 'Virtual machines',
                                 _ConsoleView.images => 'Images',
                                 _ConsoleView.operations => 'Operations',
+                                _ConsoleView.testRuns => 'TestRuns',
                                 _ConsoleView.events => 'Events',
                                 _ConsoleView.host => 'Host status',
                               },
@@ -1028,6 +1034,7 @@ class _ConsoleState extends State<_Console> {
                                 _ConsoleView.vms => 'The daemon’s shared catalog. Select a VM to fetch its current detail.',
                                 _ConsoleView.images => 'Immutable image records from the daemon. Inspect a manifest without opening local files.',
                                 _ConsoleView.operations => 'Durable intents from every client. Select an Operation to fetch its current detail.',
+                                _ConsoleView.testRuns => 'Observe a durable TestRun by ID. Inspect steps and artifacts without controlling its VM.',
                                 _ConsoleView.events => 'Committed events from the daemon. Resume explicitly from the last validated sequence.',
                                 _ConsoleView.host => 'Independent public diagnostics. Refresh explicitly; no host repairs or VM commands.',
                               },
@@ -1095,7 +1102,18 @@ class _ConsoleState extends State<_Console> {
                     ),
                   const SizedBox(height: 24),
                   Expanded(
-                    child: _view == _ConsoleView.host
+                    child: _view == _ConsoleView.testRuns
+                        ? _client == null
+                              ? _panel(
+                                  const Center(
+                                    child: Text('Connect to observe a TestRun'),
+                                  ),
+                                )
+                              : _TestRuns(
+                                  key: ObjectKey(_client),
+                                  client: _client!,
+                                )
+                        : _view == _ConsoleView.host
                         ? _client == null
                               ? _panel(
                                   const Center(
@@ -1260,6 +1278,7 @@ class _ConsoleState extends State<_Console> {
                     _ConsoleView.vms => 'CATALOG SNAPSHOT · Actions submit durable Operations. Acceptance is not VM completion.',
                     _ConsoleView.images => 'IMAGE SNAPSHOT · Manifest inspection does not import, delete, create, or start a VM.',
                     _ConsoleView.operations => 'OPERATION SNAPSHOT · History reads do not select a VM or submit commands.',
+                    _ConsoleView.testRuns => 'TEST SNAPSHOT · Observations do not submit steps, cancel Operations, or change VM state.',
                     _ConsoleView.events => 'DURABLE JOURNAL · Events are evidence, not an inferred resource snapshot.',
                     _ConsoleView.host => 'HOST SNAPSHOTS · Health, advertisements, and doctor checks do not prove VM or guest readiness.',
                   }, style: const TextStyle(fontSize: 10, color: _muted)),

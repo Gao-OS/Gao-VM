@@ -3,7 +3,7 @@
 The Flutter client for `docs/DEVELOPMENT_PLAN.md` B1.2. This implements initial
 VM catalog/detail, lifecycle, linked-Operation, durable history, cancellation,
 resumable-event, image-catalog, host-status, schema-validated VM create/edit,
-and confirmed VM-deletion slices,
+confirmed VM-deletion, and TestRun/artifact-metadata slices,
 not complete Beta acceptance.
 History advances PRD UI-005/UI-007 and presents the public OP-003/OP-008 fields;
 it does not prove native or cross-client Beta gates.
@@ -20,6 +20,8 @@ Deletion advances UI-002/UI-007 through the existing VM-007/VM-008 and
 API-005/API-006 contracts. It does not prove native managed-file cleanup.
 Create/edit advances UI-002/UI-007 using the existing VM-002/VM-005 and
 API-005/API-006/API-007 contracts, not native provisioning or applied-spec proof.
+TestRun lookup and artifact metadata advance UI-006/UI-007 through existing
+public reads. They do not execute tests, download payloads, or prove guest results.
 
 ## Run and check
 
@@ -38,13 +40,14 @@ flutter run -d macos
 Run these commands from `clients/gaovm_ui`. Enter an absolute path to an already
 running daemon's private public-API socket and click **Connect**. There is no
 automatic daemon start, service registration, driver connection, or default VM.
-Choose Virtual machines, Images, Operations, Events, or Host status. Connect binds
+Choose Virtual machines, Images, Operations, TestRuns, Events, or Host status. Connect binds
 the explicit socket and resets the active view. VM/Operation panes fetch their
 catalogs; Events waits for an explicit Start stream. Images reads its catalog on
 connection/navigation.
 Host status starts four independent diagnostic reads on connection/navigation.
-Images, Operations, Events, and Host status can be connected without first loading
-VMs.
+Images, Operations, TestRuns, Events, and Host status can be connected without first
+loading VMs. TestRuns waits for an explicit ID lookup; there is no public TestRun
+list endpoint in the frozen API.
 Switching panes keeps the configured connection, releases
 superseded local reads, and fetches a destination catalog only when applicable.
 Editing the socket field alone never retargets navigation, paging, or detail refresh.
@@ -64,6 +67,9 @@ socket choice, not proof of daemon health; a failed read is not an empty catalog
   `GET /v1/operations/{operation_id}`.
 - Host reads use only public `GET /v1/system/live`, `GET /v1/system/ready`,
   `GET /v1/system/capabilities`, and `GET /v1/system/doctor`.
+- TestRun reads use only public `GET /v1/test-runs/{test_run_id}` and
+  `GET /v1/test-runs/{test_run_id}/artifacts`. Artifact selection inspects validated
+  metadata without fetching its download URL or reading daemon files.
 - Confirmed VM deletion uses only `DELETE /v1/vms/{vm_id}` and correlated public
   Operation reads, without direct filesystem or driver access.
 - VM create/edit uses public `POST /v1/vms` and `PATCH /v1/vms/{vm_id}` with
@@ -170,11 +176,16 @@ merge-patch media type, unknown-outcome replay of identical request bytes,
 atomic acknowledgement/Operation rejection, explicit resource reload, and actual
 submission EOF when navigating away. These checks use the real shared HTTP client
 against Unix-socket fixtures; they are not installed-daemon acceptance.
+TestRun coverage adds other-client lookup without VM selection, immutable-input
+and response-correlation rejection, invalid-draft isolation, atomic artifact-page
+validation, configured-socket cursor retries, and actual detail/artifact socket EOF
+on navigation, reconnect, and close.
 `flutter test` renders `build/ui-catalog-preview.png`,
 `build/ui-operations-preview.png`, `build/ui-cancellation-preview.png`,
 `build/ui-events-preview.png`, `build/ui-images-preview.png`,
 `build/ui-host-preview.png`, `build/ui-vm-deletion-preview.png`,
-`build/ui-vm-write-draft-preview.png`, and `build/ui-vm-write-preview.png` with
+`build/ui-vm-write-draft-preview.png`, `build/ui-vm-write-preview.png`, and
+`build/ui-test-run-preview.png` with
 bundled fonts for visual inspection.
 These previews use test HTTP servers, not running VMs or a native sandbox probe.
 
@@ -187,6 +198,31 @@ change production timeouts or replace the actual socket-disconnect assertion.
 Deletion tests also flush superseded rendered selections and use condition-based
 pumping while independent reads are pending, rather than settling their loading
 animations against a virtual clock. Their pointer hit-test warnings are fatal.
+
+## TestRun and artifact metadata
+
+Enter a public `tr_<ULID>` ID and choose Observe TestRun. This can inspect another
+client's run without selecting or querying its VM. The view separates immutable
+input from ordered step results, TestRun result/error, parent Operation, VM
+reference, cleanup request/decision, and UTC timestamps. A retained VM reference
+does not establish current VM state. Full typed JSON remains inspectable.
+
+Refresh TestRun reads the accepted ID through the configured connection, ignoring
+unsubmitted ID/socket drafts. It requires a matching ID, immutable specification,
+parent Operation and creation time, and a valid response request ID. An allocated
+VM reference cannot rebind. A failed refresh keeps the last validated snapshot.
+
+Load TestRun artifacts explicitly reads the run's metadata catalog. Load more
+passes the opaque cursor unchanged. A complete page is validated before publishing:
+every artifact must belong to that TestRun, have a unique ID and canonical download
+URL, and satisfy the shared schema. Cursor loops are rejected. Failed paging
+retains the previous page, selection, and cursor for an explicit retry.
+
+Selection shows declared kind, MIME type, size, SHA-256, resource references,
+download URL, creation and retention time, and full JSON. These are metadata claims,
+not downloaded bytes or verified integrity. Payload preview/download remains
+unfinished. Leaving, reconnecting, or closing releases local reads without
+submitting steps, cancelling Operations, changing VM state, or managing the daemon.
 
 ## VM create and edit
 
@@ -353,7 +389,7 @@ by the server.
 
 - Image import/delete and independent display control.
 - Operation filters beyond cursor paging.
-- Driver/serial log contents and tailing, TestRun/artifacts.
+- Driver/serial log contents and tailing; TestRun artifact payload preview/download.
 - Production capabilities/quota policy and native host-diagnostic evidence.
 - Cross-client creation/takeover and consistent state against the real daemon.
 - Native window-close evidence against running daemon/VMs, not just a test server.
