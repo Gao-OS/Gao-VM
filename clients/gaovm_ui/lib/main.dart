@@ -7,6 +7,8 @@ import 'package:flutter/services.dart';
 import 'package:gaovm_api_client/gaovm_api_client.dart';
 import 'package:gaovm_models/gaovm_models.dart';
 
+part 'operation_history.dart';
+
 void main() {
   LicenseRegistry.addLicense(() async* {
     for (final family in ['InstrumentSerif', 'JetBrainsMono']) {
@@ -23,6 +25,39 @@ const _paper = Color(0xfff1f0e9);
 const _muted = Color(0xff52635a);
 const _line = Color(0xffd6dcd1);
 const _lime = Color(0xffc8e490);
+
+Widget _apiFailure(Object error) {
+  final children = <Widget>[];
+  if (error is ApiProblemException) {
+    final problem = error.problem;
+    children.addAll([
+      Text(problem.title),
+      Text(problem.toJson()['code']! as String),
+      Text(problem.detail),
+      SelectableText(problem.requestId.value),
+      Text(problem.retryable ? 'Retryable' : 'Not retryable'),
+      if (problem.operationId != null)
+        SelectableText(problem.operationId!.value),
+    ]);
+  } else {
+    children.add(Text(error.toString()));
+  }
+  return Container(
+    constraints: const BoxConstraints(maxHeight: 180),
+    padding: const EdgeInsets.all(16),
+    decoration: BoxDecoration(
+      color: const Color(0xfffff0d5),
+      border: Border.all(color: const Color(0xffd5bd83)),
+      borderRadius: BorderRadius.circular(8),
+    ),
+    child: SingleChildScrollView(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: children,
+      ),
+    ),
+  );
+}
 
 enum _VmVerb {
   start('Start'),
@@ -130,6 +165,7 @@ class _ConsoleState extends State<_Console> {
   Object? _detailError;
   bool _loading = false;
   Object? _error;
+  bool _operationsView = false;
   final _actions = <(String, VmId), _VmAction>{};
 
   bool _canSubmit(_VmAction? action, _VmVerb verb) =>
@@ -317,7 +353,8 @@ class _ConsoleState extends State<_Console> {
                   .convert(operation.result!.toJson()),
             ),
         ],
-        if (action.observationError != null) _failure(action.observationError!),
+        if (action.observationError != null)
+          _apiFailure(action.observationError!),
       ],
     );
   }
@@ -387,25 +424,40 @@ class _ConsoleState extends State<_Console> {
               style: TextStyle(fontSize: 11, color: _muted),
             ),
             const SizedBox(height: 8),
-            _failure(action.error!),
+            _apiFailure(action.error!),
           ],
         ],
       ],
     );
   }
 
-  Future<void> _connect({bool more = false}) async {
+  Future<void> _connect({bool more = false, GaoVmApiClient? client}) async {
     if (more && (_client == null || _nextCursor == null)) return;
-    final client = more ? _client! : null;
+    final connection = more ? _client! : client;
     final cursor = more ? _nextCursor : null;
-    final path = more ? client!.socketPath : _socket.text.trim();
+    final path = connection?.socketPath ?? _socket.text.trim();
     if (!path.startsWith('/') || path.contains('\u0000')) {
       setState(() => _error = 'Enter an absolute daemon socket path.');
       return;
     }
+    final connectedClient = connection ?? GaoVmApiClient(socketPath: path);
     _catalogRequest?.cancel();
     if (!more) {
       _detailRequest?.cancel();
+    }
+    if (!more && _operationsView) {
+      setState(() {
+        _client = connectedClient;
+        _loading = false;
+        _error = null;
+        _vms = [];
+        _selectedId = null;
+        _selected = null;
+        _detailError = null;
+        _nextCursor = null;
+        _seenCursors.clear();
+      });
+      return;
     }
     final pending = _catalogRequest = ApiRequestCancellation();
     setState(() {
@@ -415,13 +467,12 @@ class _ConsoleState extends State<_Console> {
         _vms = [];
         _selectedId = null;
         _selected = null;
-        _client = null;
+        _client = connectedClient;
         _nextCursor = null;
         _seenCursors.clear();
       }
     });
     try {
-      final connectedClient = client ?? GaoVmApiClient(socketPath: path);
       final response = await connectedClient.request(
         'GET',
         '/v1/vms',
@@ -490,39 +541,6 @@ class _ConsoleState extends State<_Console> {
     } catch (error) {
       if (mounted && !pending.isCancelled) setState(() => _detailError = error);
     }
-  }
-
-  Widget _failure(Object error) {
-    final children = <Widget>[];
-    if (error is ApiProblemException) {
-      final problem = error.problem;
-      children.addAll([
-        Text(problem.title),
-        Text(problem.toJson()['code']! as String),
-        Text(problem.detail),
-        SelectableText(problem.requestId.value),
-        Text(problem.retryable ? 'Retryable' : 'Not retryable'),
-        if (problem.operationId != null)
-          SelectableText(problem.operationId!.value),
-      ]);
-    } else {
-      children.add(Text(error.toString()));
-    }
-    return Container(
-      constraints: const BoxConstraints(maxHeight: 180),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: const Color(0xfffff0d5),
-        border: Border.all(color: const Color(0xffd5bd83)),
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: SingleChildScrollView(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: children,
-        ),
-      ),
-    );
   }
 
   Widget _detail(VirtualMachine vm) => ListView(
@@ -726,6 +744,36 @@ class _ConsoleState extends State<_Console> {
     child: child,
   );
 
+  void _navigate(bool operations) {
+    if (_operationsView == operations) return;
+    final connection = _client;
+    _catalogRequest?.cancel();
+    _detailRequest?.cancel();
+    setState(() {
+      _operationsView = operations;
+      _loading = false;
+      _error = null;
+      _selectedId = null;
+      _selected = null;
+      _detailError = null;
+    });
+    if (!operations && connection != null) _connect(client: connection);
+  }
+
+  Widget _navigation(String label, {required bool operations}) => TextButton(
+    onPressed: () => _navigate(operations),
+    style: TextButton.styleFrom(
+      alignment: Alignment.centerLeft,
+      foregroundColor: _operationsView == operations ? _lime : Colors.white,
+      backgroundColor: _operationsView == operations
+          ? const Color(0xff35463b)
+          : Colors.transparent,
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+    ),
+    child: Text(label, style: const TextStyle(fontSize: 11)),
+  );
+
   @override
   void dispose() {
     _catalogRequest?.cancel();
@@ -770,7 +818,7 @@ class _ConsoleState extends State<_Console> {
                 ),
                 const SizedBox(height: 48),
                 const Text(
-                  '01 / CATALOG',
+                  '01 / RESOURCES',
                   style: TextStyle(
                     fontSize: 10,
                     letterSpacing: 1.4,
@@ -778,10 +826,9 @@ class _ConsoleState extends State<_Console> {
                   ),
                 ),
                 const SizedBox(height: 16),
-                const Text(
-                  'Virtual machines',
-                  style: TextStyle(fontSize: 13, color: Colors.white),
-                ),
+                _navigation('Virtual machines', operations: false),
+                const SizedBox(height: 8),
+                _navigation('Operations', operations: true),
                 const Spacer(),
                 const Icon(Icons.hub_outlined, color: _lime, size: 22),
                 const SizedBox(height: 16),
@@ -806,31 +853,40 @@ class _ConsoleState extends State<_Console> {
                   Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Expanded(
+                      Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              'CONTROL PLANE / CATALOG',
-                              style: TextStyle(
+                              _operationsView
+                                  ? 'CONTROL PLANE / HISTORY'
+                                  : 'CONTROL PLANE / CATALOG',
+                              style: const TextStyle(
                                 fontSize: 10,
                                 letterSpacing: 1.8,
                                 color: _muted,
                               ),
                             ),
-                            SizedBox(height: 8),
+                            const SizedBox(height: 8),
                             Text(
-                              'Virtual machines',
-                              style: TextStyle(
+                              _operationsView
+                                  ? 'Operations'
+                                  : 'Virtual machines',
+                              style: const TextStyle(
                                 fontFamily: 'InstrumentSerif',
                                 fontSize: 46,
                                 height: 1.1,
                               ),
                             ),
-                            SizedBox(height: 10),
+                            const SizedBox(height: 10),
                             Text(
-                              'The daemon’s shared catalog. Select a VM to fetch its current detail.',
-                              style: TextStyle(fontSize: 11, color: _muted),
+                              _operationsView
+                                  ? 'Durable intents from every client. Select an Operation to fetch its current detail.'
+                                  : 'The daemon’s shared catalog. Select a VM to fetch its current detail.',
+                              style: const TextStyle(
+                                fontSize: 11,
+                                color: _muted,
+                              ),
                             ),
                           ],
                         ),
@@ -838,6 +894,8 @@ class _ConsoleState extends State<_Console> {
                       Text(
                         _client == null
                             ? 'DISCONNECTED'
+                            : _operationsView || _loading || _error != null
+                            ? 'API CONFIGURED'
                             : '${_vms.length} loaded',
                         style: const TextStyle(fontSize: 11, color: _muted),
                       ),
@@ -871,102 +929,122 @@ class _ConsoleState extends State<_Console> {
                   if (_error != null)
                     Padding(
                       padding: const EdgeInsets.only(top: 16),
-                      child: _failure(_error!),
+                      child: _apiFailure(_error!),
                     ),
                   const SizedBox(height: 24),
                   Expanded(
-                    child: Row(
-                      children: [
-                        Expanded(
-                          flex: 6,
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                    child: _operationsView
+                        ? _client == null
+                              ? _panel(
+                                  const Center(
+                                    child: Text(
+                                      'Connect to read Operation history',
+                                    ),
+                                  ),
+                                )
+                              : _OperationHistory(
+                                  key: ObjectKey(_client),
+                                  client: _client!,
+                                )
+                        : Row(
                             children: [
-                              const Text(
-                                'CATALOG SNAPSHOT',
-                                style: TextStyle(
-                                  fontSize: 10,
-                                  letterSpacing: 1.5,
-                                  color: _muted,
-                                ),
-                              ),
-                              const SizedBox(height: 12),
                               Expanded(
-                                child: _vms.isEmpty
-                                    ? Center(
-                                        child: Text(
-                                          _loading
-                                              ? 'Loading VM catalog…'
-                                              : _client == null
-                                              ? 'Connect to a daemon'
-                                              : 'No virtual machines',
-                                        ),
-                                      )
-                                    : ListView(
-                                        children: [
-                                          for (final vm in _vms) _row(vm),
-                                        ],
+                                flex: 6,
+                                child: Column(
+                                  crossAxisAlignment:
+                                      CrossAxisAlignment.stretch,
+                                  children: [
+                                    const Text(
+                                      'CATALOG SNAPSHOT',
+                                      style: TextStyle(
+                                        fontSize: 10,
+                                        letterSpacing: 1.5,
+                                        color: _muted,
                                       ),
-                              ),
-                              if (_nextCursor != null)
-                                TextButton(
-                                  onPressed: _loading
-                                      ? null
-                                      : () => _connect(more: true),
-                                  child: const Text('Load more'),
+                                    ),
+                                    const SizedBox(height: 12),
+                                    Expanded(
+                                      child: _vms.isEmpty
+                                          ? Center(
+                                              child: Text(
+                                                _loading
+                                                    ? 'Loading VM catalog…'
+                                                    : _error != null
+                                                    ? 'VM catalog snapshot unavailable'
+                                                    : _client == null
+                                                    ? 'Connect to a daemon'
+                                                    : 'No virtual machines',
+                                              ),
+                                            )
+                                          : ListView(
+                                              children: [
+                                                for (final vm in _vms) _row(vm),
+                                              ],
+                                            ),
+                                    ),
+                                    if (_nextCursor != null)
+                                      TextButton(
+                                        onPressed: _loading
+                                            ? null
+                                            : () => _connect(more: true),
+                                        child: const Text('Load more'),
+                                      ),
+                                  ],
                                 ),
+                              ),
+                              const SizedBox(width: 24),
+                              Expanded(
+                                flex: 5,
+                                child: _panel(
+                                  _selectedId == null
+                                      ? const Center(
+                                          child: Column(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              Icon(
+                                                Icons.dns_outlined,
+                                                size: 40,
+                                                color: _muted,
+                                              ),
+                                              SizedBox(height: 20),
+                                              Text(
+                                                'Select a VM',
+                                                style: TextStyle(
+                                                  fontFamily: 'InstrumentSerif',
+                                                  fontSize: 30,
+                                                ),
+                                              ),
+                                              SizedBox(height: 10),
+                                              Text(
+                                                'No default VM. Every selection is explicit.',
+                                                style: TextStyle(
+                                                  fontSize: 10,
+                                                  color: _muted,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        )
+                                      : _detailError != null
+                                      ? Center(
+                                          child: _apiFailure(_detailError!),
+                                        )
+                                      : _selected == null
+                                      ? const Center(
+                                          child: CircularProgressIndicator(),
+                                        )
+                                      : _detail(_selected!),
+                                ),
+                              ),
                             ],
                           ),
-                        ),
-                        const SizedBox(width: 24),
-                        Expanded(
-                          flex: 5,
-                          child: _panel(
-                            _selectedId == null
-                                ? const Center(
-                                    child: Column(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        Icon(
-                                          Icons.dns_outlined,
-                                          size: 40,
-                                          color: _muted,
-                                        ),
-                                        SizedBox(height: 20),
-                                        Text(
-                                          'Select a VM',
-                                          style: TextStyle(
-                                            fontFamily: 'InstrumentSerif',
-                                            fontSize: 30,
-                                          ),
-                                        ),
-                                        SizedBox(height: 10),
-                                        Text(
-                                          'No default VM. Every selection is explicit.',
-                                          style: TextStyle(
-                                            fontSize: 10,
-                                            color: _muted,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  )
-                                : _detailError != null
-                                ? Center(child: _failure(_detailError!))
-                                : _selected == null
-                                ? const Center(
-                                    child: CircularProgressIndicator(),
-                                  )
-                                : _detail(_selected!),
-                          ),
-                        ),
-                      ],
-                    ),
                   ),
                   const SizedBox(height: 16),
-                  const Text(
-                    'CATALOG SNAPSHOT · Actions submit durable Operations. Acceptance is not VM completion.',
-                    style: TextStyle(fontSize: 10, color: _muted),
+                  Text(
+                    _operationsView
+                        ? 'OPERATION SNAPSHOT · History reads do not select a VM or submit commands.'
+                        : 'CATALOG SNAPSHOT · Actions submit durable Operations. Acceptance is not VM completion.',
+                    style: const TextStyle(fontSize: 10, color: _muted),
                   ),
                 ],
               ),
