@@ -20,9 +20,9 @@ Deletion advances UI-002/UI-007 through the existing VM-007/VM-008 and
 API-005/API-006 contracts. It does not prove native managed-file cleanup.
 Create/edit advances UI-002/UI-007 using the existing VM-002/VM-005 and
 API-005/API-006/API-007 contracts, not native provisioning or applied-spec proof.
-TestRun lookup, artifact metadata, and verified small-payload previews advance
-UI-006/UI-007 through existing public reads. They do not execute tests or prove
-native guest results.
+TestRun lookup, artifact metadata, verified small-payload previews, and streamed
+local downloads advance UI-006/UI-007 through existing public reads. They do not
+execute tests or prove native guest results.
 
 ## Run and check
 
@@ -35,8 +35,17 @@ dart format --output=none --set-exit-if-changed lib test
 flutter analyze --no-pub
 flutter test --no-pub
 flutter build macos --debug --no-pub
+codesign --verify --deep --strict build/macos/Build/Products/Debug/gaovm_ui.app
 flutter run -d macos
 ```
+
+The macOS embed phase declares its `App.framework` and `FlutterMacOS.framework`
+outputs so Xcode invalidates the outer app signature after Dart-only changes.
+Verify the signature after building; an incremental build can otherwise exit
+successfully while its outer seal still refers to an older framework. The
+source-change regression was checked with Flutter 3.47.6 / Xcode 26.3 on Intel
+macOS. This is an ad-hoc debug signature check, not release signing, notarization,
+or native guest/runtime acceptance.
 
 Run these commands from `clients/gaovm_ui`. Enter an absolute path to an already
 running daemon's private public-API socket and click **Connect**. There is no
@@ -62,7 +71,8 @@ socket choice, not proof of daemon health; a failed read is not an empty catalog
 
 ## Implemented boundary
 
-- Direct production dependencies are Flutter, `gaovm_api_client`, and `gaovm_models`.
+- Direct production dependencies are Flutter, `gaovm_api_client`, `gaovm_models`,
+  and Flutter's `file_selector` for native directory selection.
 - Reads use public `GET /v1/vms`, `GET /v1/vms/{vm_id}`,
   `GET /v1/images`, `GET /v1/operations`, and
   `GET /v1/operations/{operation_id}`.
@@ -74,6 +84,8 @@ socket choice, not proof of daemon health; a failed read is not an empty catalog
 - Explicit payload reads use only public `GET /v1/artifacts/{artifact_id}` through
   the shared SDK. It verifies the complete Content-Length and SHA-256 against the
   selected metadata before returning immutable bytes and a typed request ID.
+- Downloads use that same raw GET, streamed into an explicitly selected local
+  directory. This is caller-owned output, not access to the daemon's managed store.
 - Confirmed VM deletion uses only `DELETE /v1/vms/{vm_id}` and correlated public
   Operation reads, without direct filesystem or driver access.
 - VM create/edit uses public `POST /v1/vms` and `PATCH /v1/vms/{vm_id}` with
@@ -188,13 +200,19 @@ Payload coverage adds explicit reads, the preview-size admission limit, altered-
 rejection and verified-snapshot retention, empty/invalid-UTF-8/inert-HTML rendering,
 bounded binary presentation, draft isolation, and actual pre-header/mid-body EOF
 on navigation, reconnect, close, new lookup, reload, and another artifact selection.
+Download coverage adds a 2 MiB transfer without enlarging the preview cap,
+existing-file preservation, actual partial writes, cancellation/cleanup before
+retry, late chooser fencing, directory and size admission, corrupt-byte rejection,
+verified-file retention, and independent preview/download lifetimes. It uses real
+HTTP/Unix sockets and files; only the operating-system dialog is substituted at
+the plugin's public platform boundary. It does not prove native panel or sandbox access.
 `flutter test` renders `build/ui-catalog-preview.png`,
 `build/ui-operations-preview.png`, `build/ui-cancellation-preview.png`,
 `build/ui-events-preview.png`, `build/ui-images-preview.png`,
 `build/ui-host-preview.png`, `build/ui-vm-deletion-preview.png`,
 `build/ui-vm-write-draft-preview.png`, `build/ui-vm-write-preview.png`, and
-`build/ui-test-run-preview.png`, and `build/ui-test-run-payload-preview.png` with
-bundled fonts for visual inspection.
+`build/ui-test-run-preview.png`, `build/ui-test-run-payload-preview.png`, and
+`build/ui-test-run-download-preview.png` with bundled fonts for visual inspection.
 These previews use test HTTP servers, not running VMs or a native sandbox probe.
 
 The test listener is explicitly closed separately from `HttpServer.listenOn`.
@@ -246,10 +264,42 @@ caption. Verification applies to that read, not to a claimed guest execution.
 
 Another artifact, a new TestRun lookup, or successful catalog reload clears this
 local payload and releases its pending read. Leaving, reconnecting, or closing also
-releases local reads without
-submitting steps, cancelling Operations, changing VM state, or managing the daemon.
-Large-artifact streaming downloads remain unfinished; the preview cap is not a
-replacement for that full-plan requirement.
+releases local reads without submitting steps, cancelling Operations, changing VM
+state, or managing the daemon.
+
+Download artifact separately opens a native directory chooser. Choose an existing
+directory; the SDK resolves it and creates a new private child, then streams and
+hashes bytes with write backpressure. The completed filename is the public Artifact
+ID, never a server-supplied host path. Existing files are not overwritten. The
+256 MiB admission limit matches the current managed store maximum and does not
+change the independent 64 KiB preview budget. The shared 30-second whole-transfer
+deadline starts after directory selection, not while waiting for the user.
+
+Only complete, verified, flushed output produces a receipt with a local path,
+byte count, and payload request ID. Downloaded content is never automatically
+opened, rendered as active HTML, or executed. The file is caller-owned and mutable;
+verification describes that read, not future changes or Guest execution. A failed
+repeat download keeps the previous verified file/receipt with a stale-result caption.
+Retry is explicit and creates another private child rather than overwriting it.
+
+Cancel download releases only its local transfer. The cancellation caption and
+retry control appear after the SDK has closed the file and removed its staging.
+Cleanup I/O failures are errors, not a claim of successful cancellation. Preview
+and download are independent; cancelling one does not cancel the other. Changing
+artifact/TestRun, successful catalog reload, navigation, reconnect, and close also
+cancel incomplete output, and a late directory-choice result cannot start a read.
+These changes clear the local receipt but never delete a completed caller-owned file.
+See [artifact download limits](../../docs/ARTIFACTS.md) for OS I/O cancellation,
+power-loss durability, and crash-left staging boundaries.
+
+Debug/Profile and Release keep App Sandbox and add only
+`com.apple.security.files.user-selected.read-write` for this output workflow,
+as required by [file_selector](https://pub.dev/packages/file_selector).
+There is no default Downloads location, broad filesystem entitlement, persistent
+bookmark, or automatic permission request for the daemon's state directory.
+Native chooser/sandbox access, production public-socket permissions, and packaged
+cross-client acceptance still need interactive macOS validation; a widget fixture
+or successful debug build does not establish those gates.
 
 ## VM create and edit
 

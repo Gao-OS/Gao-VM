@@ -370,6 +370,11 @@ class _TestRunsState extends State<_TestRuns> {
         style: const TextStyle(fontFamily: 'InstrumentSerif', fontSize: 30),
       ),
       _payloadView(artifact),
+      _ArtifactDownload(
+        key: ObjectKey(artifact),
+        client: widget.client,
+        artifact: artifact,
+      ),
       for (final entry in {
         'ID': artifact.id.value,
         'Content type': artifact.contentType,
@@ -396,11 +401,9 @@ class _TestRunsState extends State<_TestRuns> {
             ],
           ),
         ),
-      Text(
-        _payload == null
-            ? 'Declared metadata, not a downloaded or verified payload.'
-            : 'Metadata snapshot · verification belongs to the last explicit payload read.',
-        style: const TextStyle(fontSize: 11, color: _muted),
+      const Text(
+        'Metadata snapshot · verification belongs to an explicit read or download.',
+        style: TextStyle(fontSize: 11, color: _muted),
       ),
       _json('Full artifact JSON', artifact.toJson()),
     ],

@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io' show ContentType, HttpException;
+import 'dart:io'
+    show ContentType, Directory, FileSystemException, HttpException;
 import 'dart:math';
 
+import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart' hide Image;
 import 'package:flutter/services.dart';
@@ -17,6 +19,7 @@ part 'host_status.dart';
 part 'vm_deletion.dart';
 part 'vm_writes.dart';
 part 'test_runs.dart';
+part 'artifact_download.dart';
 
 void main() {
   LicenseRegistry.addLicense(() async* {

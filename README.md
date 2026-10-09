@@ -213,6 +213,7 @@ Implemented commands at this checkpoint:
 - `operation list`
 - `guest exec VM_ID --body-json JSON` (client adapter; installed Guest API pending)
 - `test run --body-json JSON`, `test get/cancel/artifacts TR_ID`
+- `test download TR_ID ART_ID --output-dir DIRECTORY`
 - `events [--after-sequence N] [--vm-id VM_ID] [--operation-id OP_ID] [--test-run-id TR_ID]`
 - `doctor [--timeout-seconds N]`
 - `schema [--timeout-seconds N]`
@@ -226,11 +227,24 @@ pass the returned `next_cursor` unchanged
 with the same filters and sort to resume. Filtering and cursor validation remain
 owned by the public API.
 
-Targets must be real server-generated `vm_`/`img_`/`op_`/`tr_` ULIDs. There is no implicit or name-based `default` VM. Create accepts the public `api_version`, `kind`, `metadata`, and `spec` object; patch accepts the public metadata/spec patch object, not the legacy config format below.
+`test download` resolves an artifact through its TestRun's public metadata pages
+and streams verified bytes into a fresh private child of the explicitly selected,
+existing local output directory. Its JSON receipt contains the artifact metadata,
+payload request ID, verified flag, and completed local path. Existing files are
+not replaced, failed reads clean up their owned staging, and the full payload is
+not buffered in memory. One local deadline covers paging and download; SIGINT or
+SIGTERM releases the local read without changing a TestRun or VM. The shared SDK's
+64 KiB preview cap remains unchanged. See [Artifact downloads](docs/ARTIFACTS.md)
+for integrity, local I/O errors, cleanup limits, and remaining native acceptance.
+The [desktop TestRun pane](clients/gaovm_ui/README.md#testrun-and-artifacts) also
+offers a separate Download artifact action with native directory selection and
+local-only cancellation. It uses the same verified streaming reader.
+
+Targets must be real server-generated `vm_`/`img_`/`op_`/`tr_`/`art_` ULIDs. There is no implicit or name-based `default` VM. Create accepts the public `api_version`, `kind`, `metadata`, and `spec` object; patch accepts the public metadata/spec patch object, not the legacy config format below.
 
 Image import accepts the public `source_path`, `type`, and `architecture` (`arm64`) object, with optional image metadata and labels. The source path must be readable by the daemon. Import and deletion return durable Operations; use `operation get/wait/cancel` to track them. `image get` searches the paginated public catalog because the frozen API has no image-by-ID GET endpoint. Its local deadline covers the whole catalog walk; a missing image returns exit `1` with `IMAGE_NOT_FOUND`, and malformed pages or repeated cursors return exit `4`.
 
-All output is JSON; `--json` selects compact output for ordinary results and diagnostics. Events always use one compact Event JSON object per line, with SSE comments omitted. Successful results go to stdout and Problems/local diagnostics to stderr. Exit codes are `0` for success or accepted work, `1` for API failure or a failed/cancelled waited Operation, `2` for usage errors, `3` for transport failure, `4` for invalid server responses, `124` for a deadline or `WAIT_TIMEOUT`, `130` for event-stream SIGINT, and `143` for event-stream SIGTERM.
+All output is JSON; `--json` selects compact output for ordinary results and diagnostics. Events always use one compact Event JSON object per line, with SSE comments omitted. Successful results go to stdout and Problems/local diagnostics to stderr. Exit codes are `0` for success or accepted work, `1` for API/local-output failure or a failed/cancelled waited Operation, `2` for usage errors, `3` for transport failure, `4` for invalid server responses, `124` for a deadline or `WAIT_TIMEOUT`, `130` for event-stream/download SIGINT, and `143` for event-stream/download SIGTERM.
 
 Requests default to a 30-second local deadline; waits require an explicit `--timeout-seconds` and allow five additional seconds for transport. Mutations return accepted Operations without waiting for completion. Use `--idempotency-key KEY` and reuse it for explicit retries; the client does not automatically retry writes. Patch also requires an explicit revision/ETag through `--if-match`.
 

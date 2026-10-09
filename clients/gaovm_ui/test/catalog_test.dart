@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:ui' as ui;
 
+import 'package:file_selector_platform_interface/file_selector_platform_interface.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
@@ -19,6 +20,7 @@ part 'vm_deletion_cases.dart';
 part 'vm_write_cases.dart';
 part 'test_run_cases.dart';
 part 'test_run_payload_cases.dart';
+part 'test_run_download_cases.dart';
 
 // Exercise real HTTP/Unix sockets, not Flutter's default HTTP-400 substitute.
 class _SocketTestBinding extends AutomatedTestWidgetsFlutterBinding {
@@ -49,6 +51,7 @@ void main() {
   _vmWriteTests();
   _testRunTests();
   _testRunPayloadTests();
+  _testRunDownloadTests();
 
   testWidgets('connect shows the public VM catalog without selecting a VM', (
     tester,
