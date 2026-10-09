@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
@@ -9,6 +10,7 @@ import 'package:gaovm_models/gaovm_models.dart';
 
 part 'operation_history.dart';
 part 'operation_cancellation.dart';
+part 'event_journal.dart';
 
 void main() {
   LicenseRegistry.addLicense(() async* {
@@ -68,6 +70,8 @@ enum _VmVerb {
   const _VmVerb(this.label);
   final String label;
 }
+
+enum _ConsoleView { vms, operations, events }
 
 // Local intent/correlation only. The daemon remains the source of VM/Operation state.
 class _VmAction {
@@ -166,7 +170,8 @@ class _ConsoleState extends State<_Console> {
   Object? _detailError;
   bool _loading = false;
   Object? _error;
-  bool _operationsView = false;
+  _ConsoleView _view = _ConsoleView.vms;
+  bool get _operationsView => _view == _ConsoleView.operations;
   final _actions = <(String, VmId), _VmAction>{};
   final _cancellations = _OperationCancellations();
 
@@ -447,7 +452,7 @@ class _ConsoleState extends State<_Console> {
     if (!more) {
       _detailRequest?.cancel();
     }
-    if (!more && _operationsView) {
+    if (!more && _view != _ConsoleView.vms) {
       setState(() {
         _client = connectedClient;
         _loading = false;
@@ -746,28 +751,30 @@ class _ConsoleState extends State<_Console> {
     child: child,
   );
 
-  void _navigate(bool operations) {
-    if (_operationsView == operations) return;
+  void _navigate(_ConsoleView view) {
+    if (_view == view) return;
     final connection = _client;
     _catalogRequest?.cancel();
     _detailRequest?.cancel();
     setState(() {
-      _operationsView = operations;
+      _view = view;
       _loading = false;
       _error = null;
       _selectedId = null;
       _selected = null;
       _detailError = null;
     });
-    if (!operations && connection != null) _connect(client: connection);
+    if (view == _ConsoleView.vms && connection != null) {
+      _connect(client: connection);
+    }
   }
 
-  Widget _navigation(String label, {required bool operations}) => TextButton(
-    onPressed: () => _navigate(operations),
+  Widget _navigation(String label, {required _ConsoleView view}) => TextButton(
+    onPressed: () => _navigate(view),
     style: TextButton.styleFrom(
       alignment: Alignment.centerLeft,
-      foregroundColor: _operationsView == operations ? _lime : Colors.white,
-      backgroundColor: _operationsView == operations
+      foregroundColor: _view == view ? _lime : Colors.white,
+      backgroundColor: _view == view
           ? const Color(0xff35463b)
           : Colors.transparent,
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
@@ -829,9 +836,11 @@ class _ConsoleState extends State<_Console> {
                   ),
                 ),
                 const SizedBox(height: 16),
-                _navigation('Virtual machines', operations: false),
+                _navigation('Virtual machines', view: _ConsoleView.vms),
                 const SizedBox(height: 8),
-                _navigation('Operations', operations: true),
+                _navigation('Operations', view: _ConsoleView.operations),
+                const SizedBox(height: 8),
+                _navigation('Events', view: _ConsoleView.events),
                 const Spacer(),
                 const Icon(Icons.hub_outlined, color: _lime, size: 22),
                 const SizedBox(height: 16),
@@ -861,9 +870,13 @@ class _ConsoleState extends State<_Console> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              _operationsView
-                                  ? 'CONTROL PLANE / HISTORY'
-                                  : 'CONTROL PLANE / CATALOG',
+                              switch (_view) {
+                                _ConsoleView.vms => 'CONTROL PLANE / CATALOG',
+                                _ConsoleView.operations =>
+                                  'CONTROL PLANE / HISTORY',
+                                _ConsoleView.events =>
+                                  'CONTROL PLANE / JOURNAL',
+                              },
                               style: const TextStyle(
                                 fontSize: 10,
                                 letterSpacing: 1.8,
@@ -872,9 +885,11 @@ class _ConsoleState extends State<_Console> {
                             ),
                             const SizedBox(height: 8),
                             Text(
-                              _operationsView
-                                  ? 'Operations'
-                                  : 'Virtual machines',
+                              switch (_view) {
+                                _ConsoleView.vms => 'Virtual machines',
+                                _ConsoleView.operations => 'Operations',
+                                _ConsoleView.events => 'Events',
+                              },
                               style: const TextStyle(
                                 fontFamily: 'InstrumentSerif',
                                 fontSize: 46,
@@ -883,9 +898,11 @@ class _ConsoleState extends State<_Console> {
                             ),
                             const SizedBox(height: 10),
                             Text(
-                              _operationsView
-                                  ? 'Durable intents from every client. Select an Operation to fetch its current detail.'
-                                  : 'The daemon’s shared catalog. Select a VM to fetch its current detail.',
+                              switch (_view) {
+                                _ConsoleView.vms => 'The daemon’s shared catalog. Select a VM to fetch its current detail.',
+                                _ConsoleView.operations => 'Durable intents from every client. Select an Operation to fetch its current detail.',
+                                _ConsoleView.events => 'Committed events from the daemon. Resume explicitly from the last validated sequence.',
+                              },
                               style: const TextStyle(
                                 fontSize: 11,
                                 color: _muted,
@@ -897,7 +914,9 @@ class _ConsoleState extends State<_Console> {
                       Text(
                         _client == null
                             ? 'DISCONNECTED'
-                            : _operationsView || _loading || _error != null
+                            : _view != _ConsoleView.vms ||
+                                  _loading ||
+                                  _error != null
                             ? 'API CONFIGURED'
                             : '${_vms.length} loaded',
                         style: const TextStyle(fontSize: 11, color: _muted),
@@ -936,7 +955,20 @@ class _ConsoleState extends State<_Console> {
                     ),
                   const SizedBox(height: 24),
                   Expanded(
-                    child: _operationsView
+                    child: _view == _ConsoleView.events
+                        ? _client == null
+                              ? _panel(
+                                  const Center(
+                                    child: Text(
+                                      'Connect to read the event journal',
+                                    ),
+                                  ),
+                                )
+                              : _EventJournal(
+                                  key: ObjectKey(_client),
+                                  client: _client!,
+                                )
+                        : _operationsView
                         ? _client == null
                               ? _panel(
                                   const Center(
@@ -1044,12 +1076,11 @@ class _ConsoleState extends State<_Console> {
                           ),
                   ),
                   const SizedBox(height: 16),
-                  Text(
-                    _operationsView
-                        ? 'OPERATION SNAPSHOT · History reads do not select a VM or submit commands.'
-                        : 'CATALOG SNAPSHOT · Actions submit durable Operations. Acceptance is not VM completion.',
-                    style: const TextStyle(fontSize: 10, color: _muted),
-                  ),
+                  Text(switch (_view) {
+                    _ConsoleView.vms => 'CATALOG SNAPSHOT · Actions submit durable Operations. Acceptance is not VM completion.',
+                    _ConsoleView.operations => 'OPERATION SNAPSHOT · History reads do not select a VM or submit commands.',
+                    _ConsoleView.events => 'DURABLE JOURNAL · Events are evidence, not an inferred resource snapshot.',
+                  }, style: const TextStyle(fontSize: 10, color: _muted)),
                 ],
               ),
             ),

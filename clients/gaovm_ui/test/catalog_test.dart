@@ -11,6 +11,7 @@ import 'package:gaovm_ui/main.dart';
 
 part 'operation_history_cases.dart';
 part 'operation_cancellation_cases.dart';
+part 'event_journal_cases.dart';
 
 // Exercise real HTTP/Unix sockets, not Flutter's default HTTP-400 substitute.
 class _SocketTestBinding extends AutomatedTestWidgetsFlutterBinding {
@@ -34,6 +35,7 @@ void main() {
 
   _operationHistoryTests();
   _operationCancellationTests();
+  _eventJournalTests();
 
   testWidgets('connect shows the public VM catalog without selecting a VM', (
     tester,

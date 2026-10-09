@@ -1,12 +1,14 @@
 # GaoVM desktop console
 
 The Flutter client for `docs/DEVELOPMENT_PLAN.md` B1.2. This implements initial
-VM catalog/detail, lifecycle, linked-Operation, durable history, and cancellation
-slices, not complete Beta acceptance.
+VM catalog/detail, lifecycle, linked-Operation, durable history, cancellation,
+and resumable-event slices, not complete Beta acceptance.
 History advances PRD UI-005/UI-007 and presents the public OP-003/OP-008 fields;
 it does not prove native or cross-client Beta gates.
 Cancellation exposes the existing OP-004/OP-005 public contract without changing
 daemon cleanup semantics or proving native cleanup completion.
+The event pane exposes the existing EVT-001/EVT-002/EVT-003 stream and advances
+UI-005/UI-007 without deriving resource state from events.
 
 ## Run and check
 
@@ -25,14 +27,17 @@ flutter run -d macos
 Run these commands from `clients/gaovm_ui`. Enter an absolute path to an already
 running daemon's private public-API socket and click **Connect**. There is no
 automatic daemon start, service registration, driver connection, or default VM.
-Choose Virtual machines or Operations. Connect binds the explicit socket,
-reloads the active catalog, and clears selection. Operations can be connected
-without first loading VMs. Switching panes keeps the configured connection and
-fetches the destination catalog, releasing superseded local reads. Editing the
-socket field alone never retargets navigation, paging, or detail refresh.
-Selecting a row fetches that resource's current detail. Rows are explicitly
-labeled snapshots, not a live event feed. Load more passes opaque continuation
-cursors unchanged and preserves selection. API CONFIGURED indicates a local
+Choose Virtual machines, Operations, or Events. Connect binds the explicit socket
+and resets the active view. VM/Operation panes fetch their catalogs; Events waits
+for an explicit Start stream. Operations and Events can be connected without
+first loading VMs. Switching panes keeps the configured connection, releases
+superseded local reads, and fetches a destination catalog only when applicable.
+Editing the socket field alone never retargets navigation, paging, or detail refresh.
+Selecting a VM or Operation row fetches that resource's current detail. Those
+rows are explicitly labeled snapshots, not a live event feed. Selecting an event
+inspects its already consumed journal record without another request.
+Load more passes opaque continuation cursors unchanged and preserves selection.
+API CONFIGURED indicates a local
 socket choice, not proof of daemon health; a failed read is not an empty catalog.
 
 ## Implemented boundary
@@ -40,6 +45,8 @@ socket choice, not proof of daemon health; a failed read is not an empty catalog
 - Production dependencies are Flutter, `gaovm_api_client`, and `gaovm_models`.
 - Reads use public `GET /v1/vms`, `GET /v1/vms/{vm_id}`,
   `GET /v1/operations`, and `GET /v1/operations/{operation_id}`.
+- Event subscriptions use only public `GET /v1/events`, not a driver connection
+  or direct SQLite/filesystem access. The public API contract is unchanged.
 - Operation history is independent of UI-submitted actions and VM selection.
   It accepts all public resource types, other-client keys, and null keys.
   Pages and records are typed against the shared model; invalid page shapes,
@@ -115,9 +122,13 @@ or pane changes. Cancellation coverage includes confirmation, fresh eligibility,
 separate acceptance/completion, same-key replay after a lost response and navigation,
 new intents after terminal failure, per-socket receipts, identity rejection,
 structured problems, stale selection, and actual submission/read EOF on teardown.
+Event coverage adds explicit connection/subscription, immutable filter scopes,
+cursor/header resume after EOF, comment handling, bounded retention/selection
+eviction, system/non-VM resources, strict frame rejection, structured problems,
+and actual idle/pre-header socket EOF on pause, navigation, reconnect, and close.
 `flutter test` renders `build/ui-catalog-preview.png`,
-`build/ui-operations-preview.png`, and `build/ui-cancellation-preview.png`
-with bundled fonts for visual inspection.
+`build/ui-operations-preview.png`, `build/ui-cancellation-preview.png`,
+and `build/ui-events-preview.png` with bundled fonts for visual inspection.
 These previews use test HTTP servers, not running VMs or a native sandbox probe.
 
 The test listener is explicitly closed separately from `HttpServer.listenOn`.
@@ -127,11 +138,47 @@ also need condition-based pumping between real-I/O turns, so the harness drains
 widget-zone microtasks while awaiting peer acceptance and EOF. This does not
 change production timeouts or replace the actual socket-disconnect assertion.
 
+## Event journal
+
+Connect selects a socket but does not start a subscription or verify daemon health.
+Optional VM, Operation, and TestRun IDs are typed public IDs and combine as AND
+filters. After sequence is a nonnegative 64-bit decimal cursor, initially zero.
+Start stream applies these drafts as a new scope and clears this local view;
+pause an active stream before starting another scope. Invalid drafts issue no
+request and leave the last validated scope, cursor, records, and selection intact.
+
+Resume stream preserves the active filters and configured socket, ignoring draft
+edits. It sends the last validated cursor through both `after_sequence` and
+`Last-Event-ID`. Comments/heartbeats do not advance that cursor. Invalid frames,
+non-increasing sequences, records outside the active scope, and reused IDs within
+the retained window interrupt the stream without consuming the offending record.
+Sequence gaps are allowed; they are not evidence of lost matching events.
+
+Each subscription retains the shared client's 30-second whole-stream deadline,
+including idle heartbeats. EOF, timeout, transport, and protocol failures require
+explicit resume; there is no automatic reconnect or background resource refresh.
+Pause, Connect, pane changes, and window close release only the local subscription.
+They do not submit commands, cancel Operations, stop VMs, or manage the daemon.
+
+The pane retains at most 200 events and 2 MiB of encoded Event JSON, with a visible
+omitted-record count. Eviction clears a selected old record but keeps the cursor.
+This is a bounded display window, not a second durable journal or exact heap-size
+limit. It lasts only for this pane/connection; leaving or reconnecting clears it.
+Record a cursor and enter it as After sequence to resume after reopening the pane.
+The daemon's SQLite journal remains the durable source. Selection exposes the
+typed event's resource/correlation IDs, UTC occurrence time, and full payload;
+system and non-VM events do not require VM selection. Event payloads never replace
+fresh public resource reads or imply the completion of an Operation.
+
+Log-content viewing remains unfinished. The existing VM logs API lists only file
+metadata; it provides neither contents nor a tail stream. Implementing that part
+requires a separately accepted bounded public API, not UI filesystem access.
+
 ## Still required by the full plan
 
 - Image catalog; create/edit/delete; independent display control.
 - Operation filters beyond cursor paging.
-- Resumable events, driver/serial logs, TestRun/artifacts, host status.
+- Driver/serial log contents and tailing, TestRun/artifacts, host status.
 - Cross-client creation/takeover and consistent state against the real daemon.
 - Native window-close evidence against running daemon/VMs, not just a test server.
 - Native sandbox/private-socket permissions, signing, installation, and release gates.
