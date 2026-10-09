@@ -74,6 +74,11 @@ final class ArtifactApiHandlers {
         'Digest': 'sha-256=${base64.encode(digest)}',
         'Content-Length': '${download.artifact.sizeBytes}',
       },
+      logCorrelation: PublicApiLogCorrelation(
+        vmId: download.artifact.vmId,
+        operationId: download.artifact.operationId,
+        testRunId: download.artifact.testRunId,
+      ),
     );
   }
 }

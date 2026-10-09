@@ -12,6 +12,7 @@ void main() {
   late TestRunApplicationService runs;
   late ImageApplicationService images;
   late PublicApiServer server;
+  late RotatingLogger logger;
   late HttpClient client;
   late Image source;
 
@@ -31,11 +32,13 @@ void main() {
     final router = PublicApiRouter();
     TestRunApiHandlers(runs: runs).register(router);
     ImageApiHandlers(images: images).register(router);
+    logger = RotatingLogger(path: '${directory.path}/daemon.log');
     server = PublicApiServer(
       socketPath: '${directory.path}/api.sock',
       openApiDocument: const {},
       systemHealth: _Health(),
       router: router,
+      logger: logger,
     );
     await server.start();
     client = HttpClient()
@@ -49,6 +52,7 @@ void main() {
   tearDown(() async {
     client.close(force: true);
     await server.close();
+    await logger.flush();
     database.close();
     await directory.delete(recursive: true);
   });
@@ -115,6 +119,23 @@ void main() {
       expect(replay.status, 202);
       expect(replay.body, accepted.body);
       expect(await SqliteOperationRepository(database).list(), hasLength(1));
+      expect(
+        replay.headers.value('x-request-id'),
+        isNot(accepted.headers.value('x-request-id')),
+      );
+      await logger.flush();
+      final records = (await File(logger.path).readAsLines())
+          .map((line) => jsonDecode(line) as Map<String, dynamic>)
+          .toList();
+      for (final result in [accepted, response, replay]) {
+        final record = records.singleWhere(
+          (record) =>
+              record['request_id'] == result.headers.value('x-request-id'),
+        );
+        expect(record['operation_id'], acceptance.operationId.value);
+        expect(record['test_run_id'], acceptance.resourceId.value);
+        expect(record['vm_id'], isNull);
+      }
     },
   );
   test(

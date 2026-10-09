@@ -154,6 +154,9 @@ PublicApiResponse _accepted(OperationAcceptance accepted) =>
       status: HttpStatus.accepted,
       body: accepted.toJson(),
       headers: {'Location': '/v1/operations/${accepted.operationId.value}'},
+      logCorrelation: PublicApiLogCorrelation(
+        operationId: accepted.operationId,
+      ),
     );
 
 String? _key(PublicApiRequest request) {

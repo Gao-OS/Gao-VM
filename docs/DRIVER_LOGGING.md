@@ -46,8 +46,9 @@ Message newlines, quotes and control characters are escaped inside the JSON
 string. Existing historical text records are not rewritten or truncated; old
 current files can contain text followed by new JSON records until normal rotation.
 Collectors must preserve those historical bytes, not assume every old line is
-JSON. Early/fallback stderr diagnostics and the daemon's separate log format are
-not converted here; this is not a claim of complete project-wide `EVT-004` coverage.
+JSON. Early/fallback stderr diagnostics remain outside these file records. The
+daemon has a separate [bounded JSON Lines writer](DAEMON_LOGGING.md); neither
+change claims complete project-wide `EVT-004` coverage.
 
 ## Admission and loss
 

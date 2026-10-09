@@ -6,6 +6,7 @@ import 'dart:io';
 import 'package:ffi/ffi.dart';
 import 'package:gaovm_models/gaovm_models.dart';
 import 'package:gaovmd/src/public_api_server.dart';
+import 'package:gaovmd/src/rotating_logger.dart';
 import 'package:test/test.dart';
 
 void main() {
@@ -24,6 +25,222 @@ void main() {
     if (await temporaryDirectory.exists()) {
       await temporaryDirectory.delete(recursive: true);
     }
+  });
+
+  test(
+    'stalled log I/O does not delay responses or listener shutdown',
+    () async {
+      final log = File('${temporaryDirectory.path}/daemon.log');
+      expect((await Process.run('mkfifo', [log.path])).exitCode, 0);
+      final logger = RotatingLogger(path: log.path);
+      final server = PublicApiServer(
+        socketPath: socketPath,
+        openApiDocument: const {},
+        systemHealth: _HealthService(),
+        logger: logger,
+      );
+      await server.start();
+      final held = logger.info('held').catchError((Object _) {});
+      String? requestId;
+      try {
+        await expectLater(
+          logger.flush().timeout(const Duration(milliseconds: 50)),
+          throwsA(isA<TimeoutException>()),
+        );
+        final response = await _request(
+          socketPath,
+          'GET',
+          '/v1/system/live',
+        ).timeout(const Duration(seconds: 3));
+        expect(response.status, 200);
+        requestId = response.headers['x-request-id'];
+        await server.close().timeout(const Duration(seconds: 1));
+        expect(server.isRunning, isFalse);
+      } finally {
+        await server.close();
+        final reader = await log
+            .open(mode: FileMode.read)
+            .timeout(const Duration(seconds: 3));
+        try {
+          await log.delete();
+          await log.create();
+          await logger.flush().timeout(const Duration(seconds: 3));
+        } finally {
+          await reader.close();
+        }
+      }
+      await held;
+      await logger.info('writer recovered');
+      final records = (await log.readAsLines())
+          .map((line) => jsonDecode(line) as Map<String, dynamic>)
+          .toList();
+      expect(records.last['message'], 'writer recovered');
+      expect(
+        records.singleWhere(
+          (record) => record['event_type'] == 'api.request.completed',
+        )['request_id'],
+        requestId,
+      );
+    },
+  );
+
+  test(
+    'logs the authoritative request ID without retaining HTTP payloads',
+    () async {
+      final log = File('${temporaryDirectory.path}/daemon.log');
+      final logger = RotatingLogger(path: log.path);
+      final vmId = VmId.generate();
+      final router = PublicApiRouter()
+        ..add(
+          'POST',
+          '/v1/vms/{vm_id}/actions/start',
+          (_) async => PublicApiResponse.json(
+            status: 202,
+            body: const {'private': 'response-secret'},
+            headers: const {'X-Request-ID': 'handler-forged'},
+          ),
+        );
+      final server = PublicApiServer(
+        socketPath: socketPath,
+        openApiDocument: const {},
+        systemHealth: _HealthService(),
+        router: router,
+        logger: logger,
+        newRequestId: () => _requestId,
+      );
+      addTearDown(server.close);
+      await server.start();
+      final response = await _request(
+        socketPath,
+        'POST',
+        '/v1/vms/${vmId.value}/actions/start?token=query-secret',
+        headers: const {
+          'X-Request-ID': 'caller-forged',
+          'Authorization': 'Bearer header-secret',
+          'Content-Type': 'application/json',
+        },
+        body: utf8.encode('{"private":"body-secret"}'),
+      );
+      expect(response.status, 202);
+      expect(response.headers['x-request-id'], _requestId.value);
+      await server.close();
+      await logger.flush();
+      expect(await log.exists(), isTrue);
+      final contents = await log.readAsString();
+      final record = jsonDecode(contents) as Map<String, dynamic>;
+      expect(record['request_id'], response.headers['x-request-id']);
+      expect(record['vm_id'], vmId.value);
+      expect(record['operation_id'], isNull);
+      expect(record['driver_generation'], isNull);
+      expect(record['component'], 'gaovmd.api');
+      expect(record['level'], 'info');
+      expect(record['event_type'], 'api.request.completed');
+      expect(record['message'], 'public API response 202');
+      for (final privateValue in [
+        'caller-forged',
+        'handler-forged',
+        'header-secret',
+        'query-secret',
+        'body-secret',
+        'response-secret',
+      ]) {
+        expect(contents, isNot(contains(privateValue)));
+      }
+    },
+  );
+
+  test(
+    'logs accepted resource correlation without changing the response body',
+    () async {
+      final log = File('${temporaryDirectory.path}/daemon.log');
+      final logger = RotatingLogger(path: log.path);
+      final vmId = VmId.generate();
+      final router = PublicApiRouter()
+        ..add(
+          'POST',
+          '/v1/vms',
+          (_) async => PublicApiResponse.json(
+            status: 202,
+            body: {
+              'resource_id': vmId.value,
+              'operation_id': _operationId.value,
+            },
+            logCorrelation: PublicApiLogCorrelation(
+              vmId: vmId,
+              operationId: _operationId,
+              driverGeneration: 7,
+            ),
+          ),
+        );
+      final server = PublicApiServer(
+        socketPath: socketPath,
+        openApiDocument: const {},
+        systemHealth: _HealthService(),
+        router: router,
+        logger: logger,
+        newRequestId: () => _requestId,
+      );
+      addTearDown(server.close);
+      await server.start();
+      final response = await _request(socketPath, 'POST', '/v1/vms');
+      expect(response.status, 202);
+      expect(jsonDecode(response.body), {
+        'resource_id': vmId.value,
+        'operation_id': _operationId.value,
+      });
+      await logger.flush();
+      final record =
+          jsonDecode(await log.readAsString()) as Map<String, dynamic>;
+      expect(record['vm_id'], vmId.value);
+      expect(record['operation_id'], _operationId.value);
+      expect(record['driver_generation'], 7);
+      expect(record['request_id'], _requestId.value);
+    },
+  );
+
+  test('logs canonical routed IDs but never malformed resource text', () async {
+    final log = File('${temporaryDirectory.path}/daemon.log');
+    final logger = RotatingLogger(path: log.path);
+    final runId = TestRunId.generate();
+    final router = PublicApiRouter();
+    for (final path in [
+      '/v1/vms/{vm_id}',
+      '/v1/operations/{operation_id}',
+      '/v1/test-runs/{test_run_id}',
+    ]) {
+      router.add(
+        'GET',
+        path,
+        (_) async => PublicApiResponse.json(status: 200, body: const {}),
+      );
+    }
+    final server = PublicApiServer(
+      socketPath: socketPath,
+      openApiDocument: const {},
+      systemHealth: _HealthService(),
+      router: router,
+      logger: logger,
+    );
+    addTearDown(server.close);
+    await server.start();
+    for (final path in [
+      '/v1/operations/${_operationId.value}',
+      '/v1/test-runs/${runId.value}',
+      '/v1/vms/vm_invalid-private-text',
+    ]) {
+      expect((await _request(socketPath, 'GET', path)).status, 200);
+    }
+    await logger.flush();
+    final contents = await log.readAsString();
+    final records = const LineSplitter()
+        .convert(contents)
+        .map((line) => jsonDecode(line) as Map<String, dynamic>)
+        .toList();
+    expect(records, hasLength(3));
+    expect(records[0]['operation_id'], _operationId.value);
+    expect(records[1]['test_run_id'], runId.value);
+    expect(records.map((record) => record['vm_id']), everyElement(isNull));
+    expect(contents, isNot(contains('vm_invalid-private-text')));
   });
 
   test('router registration is exact, versioned, and method-aware', () {
@@ -368,6 +585,8 @@ void main() {
   test(
     'handler problems stay stable and request ID cannot be spoofed',
     () async {
+      final log = File('${temporaryDirectory.path}/daemon.log');
+      final logger = RotatingLogger(path: log.path);
       final router = PublicApiRouter()
         ..add(
           'POST',
@@ -409,6 +628,7 @@ void main() {
               title: 'Driver unhealthy',
               detail: 'The runtime driver is unavailable.',
               retryable: true,
+              operationId: _operationId,
               details: JsonObjectValue.empty,
             ),
           );
@@ -418,6 +638,7 @@ void main() {
         openApiDocument: const {'openapi': '3.1.0'},
         systemHealth: _HealthService(),
         router: router,
+        logger: logger,
         newRequestId: () => _requestId,
       );
       addTearDown(server.close);
@@ -440,16 +661,41 @@ void main() {
 
       final thrown = await _request(socketPath, 'GET', '/v1/problem-throw');
       _expectProblem(thrown, HttpStatus.serviceUnavailable, 'DRIVER_UNHEALTHY');
+      await logger.flush();
+      final records = (await log.readAsLines())
+          .map((line) => jsonDecode(line) as Map<String, dynamic>)
+          .toList();
+      expect(records.map((record) => record['message']), [
+        'public API response 405',
+        'public API response 200',
+        'public API response 409',
+        'public API response 503',
+      ]);
+      expect(records.map((record) => record['level']), [
+        'warn',
+        'info',
+        'warn',
+        'error',
+      ]);
+      expect(records[2]['operation_id'], _operationId.value);
+      expect(records[3]['operation_id'], _operationId.value);
+      expect(
+        records.map((record) => record['request_id']),
+        everyElement(_requestId.value),
+      );
     },
   );
 
   test(
     'request-ID generator failure uses a canonical emergency response',
     () async {
+      final log = File('${temporaryDirectory.path}/daemon.log');
+      final logger = RotatingLogger(path: log.path);
       final server = PublicApiServer(
         socketPath: socketPath,
         openApiDocument: const {'openapi': '3.1.0'},
         systemHealth: _HealthService(),
+        logger: logger,
         newRequestId: () => throw StateError('request ID unavailable'),
       );
       addTearDown(server.close);
@@ -465,6 +711,13 @@ void main() {
       final problem = jsonDecode(response.body) as Map<String, Object?>;
       expect(problem['code'], 'INTERNAL_ERROR');
       expect(problem['request_id'], emergencyPublicApiRequestId.value);
+      await logger.flush();
+      expect(await log.exists(), isTrue);
+      final record =
+          jsonDecode(await log.readAsString()) as Map<String, dynamic>;
+      expect(record['request_id'], emergencyPublicApiRequestId.value);
+      expect(record['level'], 'error');
+      expect(record['message'], 'public API response 500');
     },
   );
 

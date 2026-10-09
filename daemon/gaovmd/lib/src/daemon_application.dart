@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 
 import 'package:gaovm_models/gaovm_models.dart';
@@ -162,6 +161,7 @@ final class DaemonApplication {
         openApiDocument: openApiDocument,
         systemHealth: health,
         router: router,
+        logger: logger,
       );
       if (File(server.socketPath).parent.absolute.path != run.path) {
         throw ArgumentError(
@@ -270,16 +270,17 @@ final class DaemonApplication {
         unawaited(
           logger
               .error(
-                jsonEncode({
-                  'component': component,
-                  'vm_id': vm?.value,
-                  'operation_id': operation?.value,
-                  'request_id': request?.value,
-                  'test_run_id': testRun?.value,
-                  'driver_generation': driverGeneration,
-                  'message': 'background work failed',
-                  'error_type': '${error.runtimeType}',
-                }),
+                'background work failed',
+                context: LogContext(
+                  component: component,
+                  eventType: 'background.failed',
+                  vmId: vm,
+                  operationId: operation,
+                  requestId: request,
+                  testRunId: testRun,
+                  driverGeneration: driverGeneration,
+                  errorType: '${error.runtimeType}',
+                ),
               )
               .catchError((Object _) {}),
         );

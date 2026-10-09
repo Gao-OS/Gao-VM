@@ -129,6 +129,10 @@ final class ResourceApiHandlers {
       status: HttpStatus.ok,
       body: virtualMachine.toJson(),
       headers: {'ETag': '"${virtualMachine.metadata.revision}"'},
+      logCorrelation: PublicApiLogCorrelation(
+        vmId: virtualMachine.metadata.id,
+        driverGeneration: virtualMachine.status.driverGeneration,
+      ),
     );
   }
 
@@ -262,9 +266,15 @@ final class ResourceApiHandlers {
 
   Future<PublicApiResponse> _getOperation(PublicApiRequest request) async {
     final operation = await _operations.get(_operationId(request));
+    final resourceId = operation.resourceId;
     return PublicApiResponse.json(
       status: HttpStatus.ok,
       body: operation.toJson(),
+      logCorrelation: PublicApiLogCorrelation(
+        vmId: resourceId is VmId ? resourceId : null,
+        operationId: operation.id,
+        testRunId: resourceId is TestRunId ? resourceId : null,
+      ),
     );
   }
 
@@ -293,9 +303,15 @@ final class ResourceApiHandlers {
     );
     request.extendResponseDeadlineForWait(command.timeout);
     final operation = await _operations.wait(command);
+    final resourceId = operation.resourceId;
     return PublicApiResponse.json(
       status: HttpStatus.ok,
       body: operation.toJson(),
+      logCorrelation: PublicApiLogCorrelation(
+        vmId: resourceId is VmId ? resourceId : null,
+        operationId: operation.id,
+        testRunId: resourceId is TestRunId ? resourceId : null,
+      ),
     );
   }
 }
@@ -412,10 +428,16 @@ PublicApiHandler _guard(
 };
 
 PublicApiResponse _accepted(OperationAcceptance operation) {
+  final resourceId = operation.resourceId;
   return PublicApiResponse.json(
     status: HttpStatus.accepted,
     body: operation.toJson(),
     headers: {'Location': '/v1/operations/${operation.operationId.value}'},
+    logCorrelation: PublicApiLogCorrelation(
+      vmId: resourceId is VmId ? resourceId : null,
+      operationId: operation.operationId,
+      testRunId: resourceId is TestRunId ? resourceId : null,
+    ),
   );
 }
 

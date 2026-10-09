@@ -208,11 +208,14 @@ void main() {
           pollInterval: const Duration(milliseconds: 10),
         ),
       ).register(router);
+      final log = File('${root.path}/daemon.log');
+      final logger = RotatingLogger(path: log.path);
       final server = PublicApiServer(
         socketPath: '${root.path}/api.sock',
         openApiDocument: const {},
         systemHealth: _Health(),
         router: router,
+        logger: logger,
       );
       final client = HttpClient()
         ..connectionFactory = (_, _, _) => Socket.startConnect(
@@ -244,6 +247,37 @@ void main() {
             jsonDecode(await utf8.decoder.bind(incoming).join())
                 as Map<String, dynamic>;
         expect(incoming.statusCode, anyOf(200, 202), reason: '$path: $json');
+        await logger.flush();
+        final record = (await log.readAsLines())
+            .map((line) => jsonDecode(line) as Map<String, dynamic>)
+            .singleWhere(
+              (record) =>
+                  record['request_id'] ==
+                  incoming.headers.value('x-request-id'),
+            );
+        if (json['operation_id'] case final String operationId) {
+          expect(record['operation_id'], operationId, reason: path);
+        }
+        if (json['id'] case final String operationId
+            when path.startsWith('/v1/operations/')) {
+          expect(record['operation_id'], operationId, reason: path);
+        }
+        if (json['resource_id'] case final String id
+            when ResourceId.parse(id) is VmId) {
+          expect(record['vm_id'], id, reason: path);
+        }
+        if (json['kind'] == vmKind) {
+          expect(
+            record['vm_id'],
+            (json['metadata'] as Map)['id'],
+            reason: path,
+          );
+          expect(
+            record['driver_generation'],
+            (json['status'] as Map)['driver_generation'],
+            reason: path,
+          );
+        }
         return json;
       }
 
@@ -546,6 +580,7 @@ void main() {
         await drivers.close();
         await scheduler.shutdown();
         await manager.close();
+        await logger.flush();
         images.close();
         bundles.close();
         database.close();

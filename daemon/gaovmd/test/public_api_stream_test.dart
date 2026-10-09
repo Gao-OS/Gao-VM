@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:gaovm_models/gaovm_models.dart';
 import 'package:gaovmd/src/image_filesystem.dart' show imageFileMode;
 import 'package:gaovmd/src/public_api_server.dart';
+import 'package:gaovmd/src/rotating_logger.dart';
 import 'package:test/test.dart';
 
 void main() {
@@ -114,6 +115,8 @@ void main() {
   test(
     'server close cancels an open stream without awaiting its source',
     () async {
+      final log = File('${temporaryDirectory.path}/daemon.log');
+      final logger = RotatingLogger(path: log.path);
       final listened = Completer<void>();
       final cancelStarted = Completer<void>();
       final cancelNeverFinishes = Completer<void>();
@@ -138,13 +141,15 @@ void main() {
         openApiDocument: const {'openapi': '3.1.0'},
         systemHealth: const _HealthService(),
         router: router,
+        logger: logger,
         streamWriteDeadline: const Duration(milliseconds: 20),
         newRequestId: () => _requestId,
       );
-      addTearDown(() {
+      addTearDown(() async {
         cancelNeverFinishes.complete();
-        chunks.close();
-        return server.close();
+        await chunks.close();
+        await server.close();
+        await logger.flush();
       });
       await server.start();
 
@@ -152,9 +157,22 @@ void main() {
       addTearDown(client.destroy);
       await listened.future;
 
+      await logger.flush();
+      expect(
+        await log.exists(),
+        isTrue,
+        reason: 'an active stream is already correlated',
+      );
       await server.close().timeout(const Duration(milliseconds: 250));
       await cancelStarted.future;
       expect(server.isRunning, isFalse);
+      await logger.flush();
+      expect(await log.exists(), isTrue);
+      final record =
+          jsonDecode(await log.readAsString()) as Map<String, dynamic>;
+      expect(record['request_id'], _requestId.value);
+      expect(record['event_type'], 'api.request.streaming');
+      expect(record['message'], 'public API response 200');
     },
   );
 

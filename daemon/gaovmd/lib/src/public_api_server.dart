@@ -6,6 +6,8 @@ import 'dart:io';
 import 'package:ffi/ffi.dart';
 import 'package:gaovm_models/gaovm_models.dart';
 
+import 'rotating_logger.dart';
+
 typedef _RenamexNpNative =
     ffi.Int32 Function(
       ffi.Pointer<Utf8> source,
@@ -156,11 +158,28 @@ final class PublicApiRequest {
   }
 }
 
+/// Internal-only response correlation, never an HTTP/JSON field. Request IDs
+/// deliberately remain owned by the server, not by a handler or client.
+final class PublicApiLogCorrelation {
+  const PublicApiLogCorrelation({
+    this.vmId,
+    this.operationId,
+    this.driverGeneration,
+    this.testRunId,
+  });
+
+  final VmId? vmId;
+  final OperationId? operationId;
+  final int? driverGeneration;
+  final TestRunId? testRunId;
+}
+
 final class PublicApiResponse {
   PublicApiResponse.json({
     required this.status,
     required Object body,
     Map<String, String> headers = const {},
+    this.logCorrelation = const PublicApiLogCorrelation(),
   }) : body = body,
        contentType = ContentType.json,
        problem = null,
@@ -171,6 +190,7 @@ final class PublicApiResponse {
     required Stream<List<int>> body,
     required this.contentType,
     Map<String, String> headers = const {},
+    this.logCorrelation = const PublicApiLogCorrelation(),
   }) : status = HttpStatus.ok,
        body = const {},
        problem = null,
@@ -187,6 +207,7 @@ final class PublicApiResponse {
     OperationId? operationId,
     JsonObjectValue? details,
     Map<String, String> headers = const {},
+    this.logCorrelation = const PublicApiLogCorrelation(),
   }) : status = status,
        body = const {},
        contentType = ContentType.json,
@@ -209,6 +230,7 @@ final class PublicApiResponse {
   final PublicApiProblem? problem;
   final Stream<List<int>>? streamBody;
   final Map<String, String> headers;
+  final PublicApiLogCorrelation logCorrelation;
 }
 
 final class _PublicApiStreamSession {
@@ -429,6 +451,7 @@ final class PublicApiServer {
     required Map<String, Object?> openApiDocument,
     required SystemHealthService systemHealth,
     PublicApiRouter? router,
+    RotatingLogger? logger,
     PublicApiListenerFactory listenerFactory =
         const DartPublicApiListenerFactory(),
     RequestId Function()? newRequestId,
@@ -441,6 +464,7 @@ final class PublicApiServer {
   }) : _openApiDocument = _deepFreezeJsonObject(openApiDocument),
        _systemHealth = systemHealth,
        _router = router ?? PublicApiRouter(),
+       _logger = logger,
        _listenerFactory = listenerFactory,
        _newRequestId = newRequestId ?? RequestId.generate,
        _newSocketToken = newSocketToken ?? (() => RequestId.generate().value),
@@ -481,6 +505,7 @@ final class PublicApiServer {
   final Map<String, Object?> _openApiDocument;
   final SystemHealthService _systemHealth;
   final PublicApiRouter _router;
+  final RotatingLogger? _logger;
   final PublicApiListenerFactory _listenerFactory;
   final RequestId Function() _newRequestId;
   final String Function() _newSocketToken;
@@ -691,6 +716,7 @@ final class PublicApiServer {
           retryable: false,
         );
       } finally {
+        _logRequest(request, requestId);
         try {
           await response.close();
         } catch (_) {}
@@ -698,9 +724,25 @@ final class PublicApiServer {
       return;
     }
     response.headers.set('X-Request-ID', requestId.value);
+    PublicApiResponse? apiResponse;
+    OperationId? problemOperationId;
+    var streamingResponseLogged = false;
     try {
-      await _dispatch(request, requestId);
+      apiResponse = await _dispatch(
+        request,
+        requestId,
+        onStreamingResponse: (result) {
+          streamingResponseLogged = true;
+          _logRequest(
+            request,
+            requestId,
+            correlation: result.logCorrelation,
+            eventType: 'api.request.streaming',
+          );
+        },
+      );
     } on PublicApiException catch (failure) {
+      problemOperationId = failure.problem.operationId;
       try {
         _writePublicProblem(response, requestId, failure.problem);
       } catch (_) {}
@@ -744,6 +786,15 @@ final class PublicApiServer {
         );
       } catch (_) {}
     } finally {
+      if (!streamingResponseLogged) {
+        _logRequest(
+          request,
+          requestId,
+          correlation: apiResponse?.logCorrelation,
+          problemOperationId:
+              apiResponse?.problem?.operationId ?? problemOperationId,
+        );
+      }
       try {
         await response.close();
       } catch (_) {
@@ -752,7 +803,65 @@ final class PublicApiServer {
     }
   }
 
-  Future<void> _dispatch(HttpRequest request, RequestId requestId) async {
+  void _logRequest(
+    HttpRequest request,
+    RequestId requestId, {
+    PublicApiLogCorrelation? correlation,
+    OperationId? problemOperationId,
+    String eventType = 'api.request.completed',
+  }) {
+    final logger = _logger;
+    if (logger == null) return;
+    final parameters = _router.pathParameters(request.uri.path);
+    final vmId = correlation?.vmId ?? _logId(parameters['vm_id'], VmId.new);
+    final operationId =
+        problemOperationId ??
+        correlation?.operationId ??
+        _logId(parameters['operation_id'], OperationId.new);
+    final testRunId =
+        correlation?.testRunId ??
+        _logId(parameters['test_run_id'], TestRunId.new);
+    final status = request.response.statusCode;
+    // Never await filesystem work on the request/control path. Raw URIs,
+    // headers, bodies, and exception messages are deliberately excluded.
+    unawaited(
+      logger
+          .log(
+            status >= 500
+                ? LogLevel.error
+                : status >= 400
+                ? LogLevel.warn
+                : LogLevel.info,
+            'public API response $status',
+            context: LogContext(
+              component: 'gaovmd.api',
+              eventType: eventType,
+              vmId: vmId,
+              operationId: operationId,
+              driverGeneration: correlation?.driverGeneration,
+              requestId: requestId,
+              testRunId: testRunId,
+            ),
+          )
+          .catchError((Object _) {}),
+    );
+  }
+
+  T? _logId<T extends ResourceId>(String? value, T Function(String) parse) {
+    if (value == null) return null;
+    try {
+      return parse(value);
+    } on FormatException {
+      // Malformed identifiers must not break a response or enter the log.
+      return null;
+    }
+  }
+
+  Future<PublicApiResponse?> _dispatch(
+    HttpRequest request,
+    RequestId requestId, {
+    required void Function(PublicApiResponse) onStreamingResponse,
+  }) async {
     final requestStopwatch = Stopwatch()..start();
     Duration remainingOrdinaryDeadline() {
       final remaining = requestDeadline - requestStopwatch.elapsed;
@@ -785,7 +894,7 @@ final class PublicApiServer {
         detail: 'No public API route matches ${request.uri.path}.',
         retryable: false,
       );
-      return;
+      return null;
     }
     final allowedMethods = builtIn
         ? const {'GET'}
@@ -806,7 +915,7 @@ final class PublicApiServer {
             'Allowed methods: ${(allowedMethods.toList()..sort()).join(', ')}.',
         retryable: false,
       );
-      return;
+      return null;
     }
     if (routed && !builtIn) {
       final jsonBody = await _readJsonBody(
@@ -844,11 +953,12 @@ final class PublicApiServer {
       } else if (result.streamBody case final stream?) {
         request.response.statusCode = result.status;
         request.response.headers.contentType = result.contentType;
+        onStreamingResponse(result);
         await _writeStream(request.response, stream);
       } else {
         _writeJson(request.response, result.status, result.body);
       }
-      return;
+      return result;
     }
     switch (request.uri.path) {
       case '/v1/openapi.json':
@@ -875,6 +985,7 @@ final class PublicApiServer {
           {'ready': status.healthy, 'checks': status.checks},
         );
     }
+    return null;
   }
 
   Future<void> _writeStream(

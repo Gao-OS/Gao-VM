@@ -8,6 +8,7 @@ import 'package:gaovmd/src/image_filesystem.dart' show imageFileMode;
 import 'package:gaovmd/src/image_store.dart';
 import 'package:gaovmd/src/operation_repository.dart';
 import 'package:gaovmd/src/public_api_server.dart';
+import 'package:gaovmd/src/rotating_logger.dart';
 import 'package:gaovmd/src/sqlite_database.dart';
 import 'package:gaovmd/src/vm_repository.dart';
 import 'package:test/test.dart';
@@ -17,6 +18,7 @@ void main() {
   late GaoVmDatabase database;
   late ImageApplicationService images;
   late PublicApiServer server;
+  late RotatingLogger logger;
   late HttpClient client;
   setUp(() async {
     directory = await Directory.systemTemp.createTemp('gvm-image-api-');
@@ -28,11 +30,13 @@ void main() {
     );
     final router = PublicApiRouter();
     ImageApiHandlers(images: images).register(router);
+    logger = RotatingLogger(path: '${directory.path}/daemon.log');
     server = PublicApiServer(
       socketPath: '${directory.path}/api.sock',
       openApiDocument: const {},
       systemHealth: _Health(),
       router: router,
+      logger: logger,
     );
     await server.start();
     client = HttpClient()
@@ -45,6 +49,7 @@ void main() {
   tearDown(() async {
     client.close(force: true);
     await server.close();
+    await logger.flush();
     database.close();
     await directory.delete(recursive: true);
   });
@@ -182,6 +187,18 @@ void main() {
       '/v1/operations/${accepted.body['operation_id']}',
     );
     expect(accepted.headers.value('x-request-id'), startsWith('req_'));
+    await logger.flush();
+    final log = await File(logger.path).readAsString();
+    final record = const LineSplitter()
+        .convert(log)
+        .map((line) => jsonDecode(line) as Map<String, dynamic>)
+        .singleWhere(
+          (record) =>
+              record['request_id'] == accepted.headers.value('x-request-id'),
+        );
+    expect(record['operation_id'], accepted.body['operation_id']);
+    expect(record['vm_id'], isNull);
+    expect(log, isNot(contains(source.path)));
     expect((await request('GET', '/v1/images')).body['items'], isEmpty);
     await images.dispatchOnce();
     final catalog = await request('GET', '/v1/images');

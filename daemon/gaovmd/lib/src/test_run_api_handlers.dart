@@ -35,11 +35,17 @@ final class TestRunApiHandlers {
 
   Future<PublicApiResponse> _get(PublicApiRequest request) async {
     _noBody(request);
+    final run = await runs.get(
+      TestRunId(request.pathParameters['test_run_id']!),
+    );
     return PublicApiResponse.json(
       status: HttpStatus.ok,
-      body: (await runs.get(
-        TestRunId(request.pathParameters['test_run_id']!),
-      )).toJson(),
+      body: run.toJson(),
+      logCorrelation: PublicApiLogCorrelation(
+        vmId: run.vmId,
+        operationId: run.operationId,
+        testRunId: run.id,
+      ),
     );
   }
 
@@ -134,12 +140,18 @@ PublicApiException _problem(
   ),
 );
 
-PublicApiResponse _accepted(OperationAcceptance accepted) =>
-    PublicApiResponse.json(
-      status: HttpStatus.accepted,
-      body: accepted.toJson(),
-      headers: {'Location': '/v1/operations/${accepted.operationId.value}'},
-    );
+PublicApiResponse _accepted(OperationAcceptance accepted) {
+  final resourceId = accepted.resourceId;
+  return PublicApiResponse.json(
+    status: HttpStatus.accepted,
+    body: accepted.toJson(),
+    headers: {'Location': '/v1/operations/${accepted.operationId.value}'},
+    logCorrelation: PublicApiLogCorrelation(
+      operationId: accepted.operationId,
+      testRunId: resourceId is TestRunId ? resourceId : null,
+    ),
+  );
+}
 
 String? _key(PublicApiRequest request) {
   final values = request.headers['idempotency-key'];

@@ -102,6 +102,7 @@ void main() {
       final state = await Directory('/private/tmp').createTemp('gvm-app-');
       addTearDown(() => state.delete(recursive: true));
       final daemon = await _Daemon.start(state, '/bin/cat');
+      final missingVmId = VmId.generate();
       try {
         final response = await daemon.get('/v1/vms');
         expect(response.$1, HttpStatus.ok);
@@ -109,7 +110,7 @@ void main() {
         final images = await daemon.get('/v1/images');
         expect(images.$1, HttpStatus.ok);
         expect(images.$2['items'], isEmpty);
-        final logs = await daemon.get('/v1/vms/${VmId.generate().value}/logs');
+        final logs = await daemon.get('/v1/vms/${missingVmId.value}/logs');
         expect(logs.$1, HttpStatus.notFound);
         expect(logs.$2['code'], 'VM_NOT_FOUND');
         final health = await daemon.get('/v1/system/live');
@@ -117,6 +118,38 @@ void main() {
       } finally {
         await daemon.close();
       }
+      final records =
+          (await File('${state.path}/logs/gaovmd.log').readAsLines())
+              .map((line) => jsonDecode(line) as Map<String, dynamic>)
+              .toList();
+      expect(records, hasLength(4));
+      expect(
+        records.map((record) => record['component']),
+        everyElement('gaovmd.api'),
+      );
+      expect(
+        records.map((record) => record['event_type']),
+        everyElement('api.request.completed'),
+      );
+      expect(records.map((record) => record['message']), [
+        'public API response 200',
+        'public API response 200',
+        'public API response 404',
+        'public API response 200',
+      ]);
+      expect(records[2]['vm_id'], missingVmId.value);
+      expect(
+        records.map((record) => record['driver_generation']),
+        everyElement(isNull),
+      );
+      expect(
+        records.map((record) => record['operation_id']),
+        everyElement(isNull),
+      );
+      final requestIds = records
+          .map((record) => RequestId(record['request_id'] as String))
+          .toSet();
+      expect(requestIds, hasLength(4));
     },
     skip: !Platform.isMacOS,
   );

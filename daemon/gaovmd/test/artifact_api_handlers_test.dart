@@ -13,6 +13,7 @@ void main() {
   late OwnedImageDirectory root;
   late ArtifactApplicationService artifacts;
   late PublicApiServer server;
+  late RotatingLogger logger;
   late HttpClient client;
 
   setUp(() async {
@@ -25,11 +26,13 @@ void main() {
     artifacts = ArtifactApplicationService(database: database, directory: root);
     final router = PublicApiRouter();
     ArtifactApiHandlers(artifacts: artifacts).register(router);
+    logger = RotatingLogger(path: '${temporary.path}/daemon.log');
     server = PublicApiServer(
       socketPath: '${temporary.path}/api.sock',
       openApiDocument: const {},
       systemHealth: _Health(),
       router: router,
+      logger: logger,
     );
     client = HttpClient()
       ..findProxy = ((_) => 'DIRECT')
@@ -43,6 +46,7 @@ void main() {
   tearDown(() async {
     client.close(force: true);
     await server.close();
+    await logger.flush();
     root.close();
     database.close();
     await temporary.delete(recursive: true);
@@ -191,6 +195,26 @@ void main() {
           ..sort((a, b) => a.id.value.compareTo(b.id.value));
         expect(received, sorted);
       }
+      final request = await client.getUrl(
+        Uri.parse('http://localhost${expected.first.downloadUrl}'),
+      );
+      final response = await request.close().timeout(
+        const Duration(seconds: 5),
+      );
+      expect(response.statusCode, 200);
+      expect(await response.expand((chunk) => chunk).toList(), [0]);
+      await logger.flush();
+      final record = (await File(logger.path).readAsLines())
+          .map((line) => jsonDecode(line) as Map<String, dynamic>)
+          .singleWhere(
+            (record) =>
+                record['request_id'] == response.headers.value('x-request-id'),
+          );
+      expect(record['event_type'], 'api.request.streaming');
+      expect(record['vm_id'], first.metadata.id.value);
+      expect(record['operation_id'], run.operationId.value);
+      expect(record['test_run_id'], run.id.value);
+      expect(record['driver_generation'], isNull);
     },
   );
 
