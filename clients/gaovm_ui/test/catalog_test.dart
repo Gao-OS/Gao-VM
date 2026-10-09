@@ -584,7 +584,660 @@ void main() {
       expect(tester.takeException(), isNull);
     },
   );
+  testWidgets(
+    'an accepted Start shows durable progress without changing observed phase',
+    (tester) async {
+      await _desktop(tester);
+      String? key;
+      final api = (await tester.runAsync(
+        () => _ApiFixture.open(
+          handler: (request) async {
+            if (request.method == 'POST') {
+              key = request.headers.value('Idempotency-Key');
+              await request.drain<void>();
+              request.response.statusCode = 202;
+              await _reply(request, {
+                'operation_id': 'op_01J00000000000000000000000',
+                'state': 'pending',
+                'resource_type': 'virtual_machine',
+                'resource_id': 'vm_01J00000000000000000000000',
+              });
+            } else if (request.uri.path.startsWith('/v1/operations/')) {
+              await _reply(request, _operation(key: key));
+            } else {
+              final vm = _vm(
+                phase: 'stopped',
+                desiredState: 'stopped',
+                restartRequired: false,
+              );
+              await _reply(
+                request,
+                request.uri.path == '/v1/vms'
+                    ? {
+                        'items': [vm],
+                        'next_cursor': null,
+                      }
+                    : vm,
+              );
+            }
+          },
+        ),
+      ))!;
+      addTearDown(api.close);
+      await _connect(tester, api);
+      await tester.runAsync(
+        () async => tester.tap(find.text('gaoos-nightly-network')),
+      );
+      await _until(tester, find.text('Desired state'));
+      await tester.runAsync(() async => tester.tap(find.text('Start')));
+      await _until(tester, find.text('Accepted · pending'));
+      await tester.runAsync(
+        () async => tester.tap(find.text('Refresh Operation')),
+      );
+      await _until(tester, find.text('Operation · running'));
+
+      expect(find.text('Booting guest'), findsOneWidget);
+      expect(find.text('40%'), findsOneWidget);
+      expect(find.text('req_01J00000000000000000000000'), findsOneWidget);
+      expect(find.text('stopped'), findsNWidgets(3));
+      expect(find.text('running'), findsNothing);
+      await tester.pumpWidget(const SizedBox.shrink());
+      expect(api.requests, [
+        'GET /v1/vms',
+        'GET /v1/vms/vm_01J00000000000000000000000',
+        'POST /v1/vms/vm_01J00000000000000000000000/actions/start',
+        'GET /v1/operations/op_01J00000000000000000000000',
+      ]);
+      expect(tester.takeException(), isNull);
+    },
+  );
+  for (final verb in ['Stop', 'Restart']) {
+    testWidgets('$verb is sent only after confirmation for the selected VM', (
+      tester,
+    ) async {
+      await _desktop(tester);
+      final keys = <String?>[];
+      final bodies = <Object?>[];
+      final api = (await tester.runAsync(
+        () => _ApiFixture.open(
+          handler: (request) async {
+            if (request.method == 'POST') {
+              keys.add(request.headers.value('Idempotency-Key'));
+              bodies.add(jsonDecode(await utf8.decoder.bind(request).join()));
+              request.response.statusCode = 202;
+              await _reply(request, {
+                'operation_id': 'op_01J00000000000000000000000',
+                'state': 'pending',
+                'resource_type': 'virtual_machine',
+                'resource_id': 'vm_01J00000000000000000000000',
+              });
+            } else {
+              await _reply(
+                request,
+                request.uri.path == '/v1/vms'
+                    ? {
+                        'items': [_vm()],
+                        'next_cursor': null,
+                      }
+                    : _vm(),
+              );
+            }
+          },
+        ),
+      ))!;
+      addTearDown(api.close);
+      await _connect(tester, api);
+      await tester.runAsync(
+        () async => tester.tap(find.text('gaoos-nightly-network')),
+      );
+      await _until(tester, find.text('Desired state'));
+      await tester.tap(find.text(verb));
+      await tester.pumpAndSettle();
+      expect(find.text('$verb this VM?'), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byType(AlertDialog),
+          matching: find.text('vm_01J00000000000000000000000'),
+        ),
+        findsOneWidget,
+      );
+      expect(keys, isEmpty);
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(keys, isEmpty);
+      await tester.tap(find.text(verb));
+      await tester.pumpAndSettle();
+      await tester.runAsync(() async => tester.tap(find.text('$verb VM')));
+      await _until(tester, find.text('Accepted · pending'));
+      expect(keys.single, matches(RegExp(r'^ui-[0-9a-f]{32}$')));
+      expect(bodies, [{}]);
+      await tester.pumpWidget(const SizedBox.shrink());
+      expect(api.requests, [
+        'GET /v1/vms',
+        'GET /v1/vms/vm_01J00000000000000000000000',
+        'POST /v1/vms/vm_01J00000000000000000000000/actions/${verb.toLowerCase()}',
+      ]);
+      expect(tester.takeException(), isNull);
+    });
+  }
+  testWidgets(
+    'a terminal Operation refreshes observed VM state instead of guessing it',
+    (tester) async {
+      await _desktop(tester);
+      String? key;
+      var detailReads = 0;
+      final api = (await tester.runAsync(
+        () => _ApiFixture.open(
+          handler: (request) async {
+            if (request.method == 'POST') {
+              key = request.headers.value('Idempotency-Key');
+              await request.drain<void>();
+              request.response.statusCode = 202;
+              await _reply(request, {
+                'operation_id': 'op_01J00000000000000000000000',
+                'state': 'pending',
+                'resource_type': 'virtual_machine',
+                'resource_id': 'vm_01J00000000000000000000000',
+              });
+            } else if (request.uri.path.startsWith('/v1/operations/')) {
+              await _reply(request, {
+                ..._operation(key: key, state: 'succeeded'),
+                'progress': {'percent': 100, 'step': 'Command completed'},
+                'result': {'driver_generation': 9},
+              });
+            } else if (request.uri.path == '/v1/vms') {
+              await _reply(request, {
+                'items': [
+                  _vm(
+                    phase: 'stopped',
+                    desiredState: 'stopped',
+                    restartRequired: false,
+                  ),
+                ],
+                'next_cursor': null,
+              });
+            } else {
+              detailReads++;
+              await _reply(
+                request,
+                _vm(
+                  phase: detailReads == 1 ? 'stopped' : 'starting',
+                  desiredState: detailReads == 1 ? 'stopped' : 'running',
+                  restartRequired: false,
+                ),
+              );
+            }
+          },
+        ),
+      ))!;
+      addTearDown(api.close);
+      await _connect(tester, api);
+      await tester.runAsync(
+        () async => tester.tap(find.text('gaoos-nightly-network')),
+      );
+      await _until(tester, find.text('Desired state'));
+      await tester.runAsync(() async => tester.tap(find.text('Start')));
+      await _until(tester, find.text('Accepted · pending'));
+      await tester.runAsync(
+        () async => tester.tap(find.text('Refresh Operation')),
+      );
+      await _until(tester, find.text('starting'));
+      expect(find.text('Operation · succeeded'), findsOneWidget);
+      expect(find.text('100%'), findsOneWidget);
+      expect(
+        find.text('running'),
+        findsOneWidget,
+      ); // Desired only, not observed.
+      expect(find.text('stopped'), findsOneWidget); // Catalog snapshot only.
+      expect(detailReads, 2);
+      await tester.pumpWidget(const SizedBox.shrink());
+      expect(api.requests, [
+        'GET /v1/vms',
+        'GET /v1/vms/vm_01J00000000000000000000000',
+        'POST /v1/vms/vm_01J00000000000000000000000/actions/start',
+        'GET /v1/operations/op_01J00000000000000000000000',
+        'GET /v1/vms/vm_01J00000000000000000000000',
+      ]);
+      expect(tester.takeException(), isNull);
+    },
+  );
+  testWidgets('a new explicit Start after terminal failure uses a new key', (
+    tester,
+  ) async {
+    await _desktop(tester);
+    final keys = <String?>[];
+    var failed = false;
+    final api = (await tester.runAsync(
+      () => _ApiFixture.open(
+        handler: (request) async {
+          if (request.method == 'POST') {
+            keys.add(request.headers.value('Idempotency-Key'));
+            await request.drain<void>();
+            request.response.statusCode = 202;
+            await _reply(request, {
+              'operation_id': keys.length == 1
+                  ? 'op_01J00000000000000000000000'
+                  : 'op_01J00000000000000000000001',
+              'state': 'pending',
+              'resource_type': 'virtual_machine',
+              'resource_id': 'vm_01J00000000000000000000000',
+            });
+          } else if (request.uri.path.startsWith('/v1/operations/')) {
+            failed = true;
+            await _reply(
+              request,
+              _operation(
+                key: keys.first,
+                state: 'failed',
+                error: {
+                  'code': 'DRIVER_START_FAILED',
+                  'message': 'Driver retry budget exhausted.',
+                  'retryable': false,
+                  'details': {'attempts': 5},
+                },
+              ),
+            );
+          } else {
+            final vm = _vm(
+              phase: failed ? 'failed' : 'stopped',
+              desiredState: 'stopped',
+              restartRequired: false,
+            );
+            await _reply(
+              request,
+              request.uri.path == '/v1/vms'
+                  ? {
+                      'items': [vm],
+                      'next_cursor': null,
+                    }
+                  : vm,
+            );
+          }
+        },
+      ),
+    ))!;
+    addTearDown(api.close);
+    await _connect(tester, api);
+    await tester.runAsync(
+      () async => tester.tap(find.text('gaoos-nightly-network')),
+    );
+    await _until(tester, find.text('Desired state'));
+    await tester.runAsync(() async => tester.tap(find.text('Start')));
+    await _until(tester, find.text('Accepted · pending'));
+    await tester.runAsync(
+      () async => tester.tap(find.text('Refresh Operation')),
+    );
+    await _until(tester, find.text('Operation · failed'));
+    expect(find.text('DRIVER_START_FAILED'), findsOneWidget);
+    expect(find.text('Driver retry budget exhausted.'), findsOneWidget);
+    expect(find.text('failed'), findsOneWidget);
+    await tester.runAsync(() async => tester.tap(find.text('Start')));
+    await _until(tester, find.text('op_01J00000000000000000000001'));
+    expect(keys, hasLength(2));
+    expect(keys.last, matches(RegExp(r'^ui-[0-9a-f]{32}$')));
+    expect(keys.last, isNot(keys.first));
+    expect(find.text('running'), findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+    expect(api.requests, [
+      'GET /v1/vms',
+      'GET /v1/vms/vm_01J00000000000000000000000',
+      'POST /v1/vms/vm_01J00000000000000000000000/actions/start',
+      'GET /v1/operations/op_01J00000000000000000000000',
+      'GET /v1/vms/vm_01J00000000000000000000000',
+      'POST /v1/vms/vm_01J00000000000000000000000/actions/start',
+    ]);
+    expect(tester.takeException(), isNull);
+  });
+  for (final mismatch in [
+    'operation ID',
+    'VM ID',
+    'action type',
+    'idempotency key',
+  ]) {
+    testWidgets('Operation reads reject a mismatched $mismatch', (
+      tester,
+    ) async {
+      await _desktop(tester);
+      String? key;
+      final api = (await tester.runAsync(
+        () => _ApiFixture.open(
+          handler: (request) async {
+            if (request.method == 'POST') {
+              key = request.headers.value('Idempotency-Key');
+              await request.drain<void>();
+              request.response.statusCode = 202;
+              await _reply(request, {
+                'operation_id': 'op_01J00000000000000000000000',
+                'state': 'pending',
+                'resource_type': 'virtual_machine',
+                'resource_id': 'vm_01J00000000000000000000000',
+              });
+            } else if (request.uri.path.startsWith('/v1/operations/')) {
+              await _reply(
+                request,
+                _operation(
+                  id: mismatch == 'operation ID'
+                      ? 'op_01J00000000000000000000001'
+                      : 'op_01J00000000000000000000000',
+                  vmId: mismatch == 'VM ID'
+                      ? 'vm_01J00000000000000000000001'
+                      : 'vm_01J00000000000000000000000',
+                  type: mismatch == 'action type' ? 'vm.stop' : 'vm.start',
+                  key: mismatch == 'idempotency key' ? 'foreign-intent' : key,
+                  state: 'succeeded',
+                ),
+              );
+            } else {
+              final vm = _vm(
+                phase: 'stopped',
+                desiredState: 'stopped',
+                restartRequired: false,
+              );
+              await _reply(
+                request,
+                request.uri.path == '/v1/vms'
+                    ? {
+                        'items': [vm],
+                        'next_cursor': null,
+                      }
+                    : vm,
+              );
+            }
+          },
+        ),
+      ))!;
+      addTearDown(api.close);
+      await _connect(tester, api);
+      await tester.runAsync(
+        () async => tester.tap(find.text('gaoos-nightly-network')),
+      );
+      await _until(tester, find.text('Desired state'));
+      await tester.runAsync(() async => tester.tap(find.text('Start')));
+      await _until(tester, find.text('Accepted · pending'));
+      await tester.runAsync(
+        () async => tester.tap(find.text('Refresh Operation')),
+      );
+      await _until(
+        tester,
+        find.text('Operation identity disagrees with the submitted VM action.'),
+      );
+      expect(find.text('Operation · succeeded'), findsNothing);
+      expect(find.text('Accepted · pending'), findsOneWidget);
+      expect(find.text('running'), findsNothing);
+      await tester.pumpWidget(const SizedBox.shrink());
+      expect(api.requests, [
+        'GET /v1/vms',
+        'GET /v1/vms/vm_01J00000000000000000000000',
+        'POST /v1/vms/vm_01J00000000000000000000000/actions/start',
+        'GET /v1/operations/op_01J00000000000000000000000',
+      ]);
+      expect(tester.takeException(), isNull);
+    });
+  }
+  testWidgets('a late terminal Operation cannot replace another selected VM', (
+    tester,
+  ) async {
+    await _desktop(tester);
+    const secondId = 'vm_01J00000000000000000000001';
+    final latches = (await tester.runAsync(
+      () async => (Completer<void>(), Completer<void>(), Completer<void>()),
+    ))!;
+    final arrived = latches.$1;
+    final release = latches.$2;
+    final replied = latches.$3;
+    String? key;
+    final api = (await tester.runAsync(
+      () => _ApiFixture.open(
+        handler: (request) async {
+          if (request.method == 'POST') {
+            key = request.headers.value('Idempotency-Key');
+            await request.drain<void>();
+            request.response.statusCode = 202;
+            await _reply(request, {
+              'operation_id': 'op_01J00000000000000000000000',
+              'state': 'pending',
+              'resource_type': 'virtual_machine',
+              'resource_id': 'vm_01J00000000000000000000000',
+            });
+          } else if (request.uri.path.startsWith('/v1/operations/')) {
+            arrived.complete();
+            await release.future;
+            await _reply(request, _operation(key: key, state: 'succeeded'));
+            replied.complete();
+          } else if (request.uri.path == '/v1/vms') {
+            await _reply(request, {
+              'items': [_vm(), _vm(id: secondId, name: 'gaoos-secondary')],
+              'next_cursor': null,
+            });
+          } else {
+            await _reply(
+              request,
+              request.uri.path.endsWith(secondId)
+                  ? _vm(id: secondId, name: 'gaoos-secondary')
+                  : _vm(),
+            );
+          }
+        },
+      ),
+    ))!;
+    addTearDown(() {
+      if (!release.isCompleted) release.complete();
+      return api.close();
+    });
+    await _connect(tester, api);
+    await tester.runAsync(
+      () async => tester.tap(find.text('gaoos-nightly-network')),
+    );
+    await _until(tester, find.text('Desired state'));
+    await tester.runAsync(() async => tester.tap(find.text('Start')));
+    await _until(tester, find.text('Accepted · pending'));
+    await tester.runAsync(() async {
+      await tester.tap(find.text('Refresh Operation'));
+      await arrived.future.timeout(const Duration(seconds: 3));
+    });
+    await tester.runAsync(() async => tester.tap(find.text('gaoos-secondary')));
+    await _until(tester, find.widgetWithText(SelectableText, secondId));
+    await tester.runAsync(() async {
+      release.complete();
+      await replied.future.timeout(const Duration(seconds: 3));
+    });
+    await tester.pumpAndSettle();
+    expect(find.text('gaoos-secondary'), findsNWidgets(2));
+    expect(find.text('gaoos-nightly-network'), findsOneWidget);
+    expect(find.text('Operation · succeeded'), findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+    expect(api.requests, [
+      'GET /v1/vms',
+      'GET /v1/vms/vm_01J00000000000000000000000',
+      'POST /v1/vms/vm_01J00000000000000000000000/actions/start',
+      'GET /v1/operations/op_01J00000000000000000000000',
+      'GET /v1/vms/$secondId',
+    ]);
+    expect(tester.takeException(), isNull);
+  });
+  testWidgets('closing a stalled Operation read closes only its local socket', (
+    tester,
+  ) async {
+    await _desktop(tester);
+    final latches = (await tester.runAsync(
+      () async => (Completer<void>(), Completer<void>()),
+    ))!;
+    final arrived = latches.$1;
+    final disconnected = latches.$2;
+    late _ApiFixture api;
+    api = (await tester.runAsync(
+      () => _ApiFixture.open(
+        handler: (request) async {
+          if (request.method == 'POST') {
+            await request.drain<void>();
+            request.response.statusCode = 202;
+            await _reply(request, {
+              'operation_id': 'op_01J00000000000000000000000',
+              'state': 'pending',
+              'resource_type': 'virtual_machine',
+              'resource_id': 'vm_01J00000000000000000000000',
+            });
+          } else if (request.uri.path.startsWith('/v1/operations/')) {
+            final socket = await request.response.detachSocket(
+              writeHeaders: false,
+            );
+            api.detached.add(socket);
+            socket.listen(
+              (_) {},
+              onDone: () {
+                if (!disconnected.isCompleted) disconnected.complete();
+              },
+              onError: (Object _) {
+                if (!disconnected.isCompleted) disconnected.complete();
+              },
+            );
+            arrived.complete();
+          } else {
+            await _reply(
+              request,
+              request.uri.path == '/v1/vms'
+                  ? {
+                      'items': [_vm()],
+                      'next_cursor': null,
+                    }
+                  : _vm(),
+            );
+          }
+        },
+      ),
+    ))!;
+    addTearDown(api.close);
+    await _connect(tester, api);
+    await tester.runAsync(
+      () async => tester.tap(find.text('gaoos-nightly-network')),
+    );
+    await _until(tester, find.text('Desired state'));
+    await tester.runAsync(() async => tester.tap(find.text('Start')));
+    await _until(tester, find.text('Accepted · pending'));
+    await tester.runAsync(() async {
+      await tester.tap(find.text('Refresh Operation'));
+      await arrived.future.timeout(const Duration(seconds: 3));
+    });
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.runAsync(
+      () => disconnected.future.timeout(const Duration(seconds: 3)),
+    );
+    expect(api.requests, [
+      'GET /v1/vms',
+      'GET /v1/vms/vm_01J00000000000000000000000',
+      'POST /v1/vms/vm_01J00000000000000000000000/actions/start',
+      'GET /v1/operations/op_01J00000000000000000000000',
+    ]);
+    expect(tester.takeException(), isNull);
+  });
+  testWidgets(
+    'an Operation read problem keeps the accepted intent and structured error',
+    (tester) async {
+      await _desktop(tester);
+      final api = (await tester.runAsync(
+        () => _ApiFixture.open(
+          handler: (request) async {
+            if (request.method == 'POST') {
+              await request.drain<void>();
+              request.response.statusCode = 202;
+              await _reply(request, {
+                'operation_id': 'op_01J00000000000000000000000',
+                'state': 'pending',
+                'resource_type': 'virtual_machine',
+                'resource_id': 'vm_01J00000000000000000000000',
+              });
+            } else if (request.uri.path.startsWith('/v1/operations/')) {
+              request.response.statusCode = 404;
+              request.response.headers.contentType = ContentType(
+                'application',
+                'problem+json',
+              );
+              request.response.write(
+                jsonEncode({
+                  'type': 'https://gaovm.dev/problems/operation-not-found',
+                  'title': 'Operation unavailable',
+                  'status': 404,
+                  'code': 'OPERATION_NOT_FOUND',
+                  'detail': 'The accepted Operation could not be read.',
+                  'request_id': 'req_01J00000000000000000000001',
+                  'retryable': false,
+                  'operation_id': 'op_01J00000000000000000000000',
+                  'details': {},
+                }),
+              );
+              await request.response.close();
+            } else {
+              await _reply(
+                request,
+                request.uri.path == '/v1/vms'
+                    ? {
+                        'items': [_vm()],
+                        'next_cursor': null,
+                      }
+                    : _vm(),
+              );
+            }
+          },
+        ),
+      ))!;
+      addTearDown(api.close);
+      await _connect(tester, api);
+      await tester.runAsync(
+        () async => tester.tap(find.text('gaoos-nightly-network')),
+      );
+      await _until(tester, find.text('Desired state'));
+      await tester.runAsync(() async => tester.tap(find.text('Start')));
+      await _until(tester, find.text('Accepted · pending'));
+      await tester.runAsync(
+        () async => tester.tap(find.text('Refresh Operation')),
+      );
+      await _until(tester, find.text('OPERATION_NOT_FOUND'));
+      expect(find.text('req_01J00000000000000000000001'), findsOneWidget);
+      expect(find.text('Not retryable'), findsOneWidget);
+      expect(find.text('Accepted · pending'), findsOneWidget);
+      expect(find.text('Retry Start'), findsNothing);
+      expect(
+        tester
+            .widget<FilledButton>(find.widgetWithText(FilledButton, 'Start'))
+            .onPressed,
+        isNull,
+      );
+      await tester.pumpWidget(const SizedBox.shrink());
+      expect(api.requests.where((request) => request.startsWith('POST')), [
+        'POST /v1/vms/vm_01J00000000000000000000000/actions/start',
+      ]);
+      expect(tester.takeException(), isNull);
+    },
+  );
 }
+
+Map<String, Object?> _operation({
+  String id = 'op_01J00000000000000000000000',
+  String vmId = 'vm_01J00000000000000000000000',
+  String type = 'vm.start',
+  String state = 'running',
+  String? key,
+  Object? error,
+}) => {
+  'id': id,
+  'type': type,
+  'resource_type': 'virtual_machine',
+  'resource_id': vmId,
+  'state': state,
+  'request_id': 'req_01J00000000000000000000000',
+  'idempotency_key': key,
+  'cancellable': false,
+  'progress': {'percent': 40, 'step': 'Booting guest'},
+  'request': {},
+  'result': null,
+  'error': error,
+  'created_at': '2026-10-09T08:00:00Z',
+  'started_at': '2026-10-09T08:00:01Z',
+  'completed_at': ['succeeded', 'failed', 'cancelled'].contains(state)
+      ? '2026-10-09T08:01:00Z'
+      : null,
+  'deadline_at': null,
+};
 
 Future<void> _reply(HttpRequest request, Object body) async {
   request.response.headers.contentType = ContentType.json;

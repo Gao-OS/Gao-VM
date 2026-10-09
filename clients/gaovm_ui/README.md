@@ -1,7 +1,7 @@
 # GaoVM desktop console
 
 The Flutter client for `docs/DEVELOPMENT_PLAN.md` B1.2. This is the first
-VM catalog/detail and Start-acceptance slice, not complete Beta acceptance.
+VM catalog/detail, lifecycle, and linked-Operation slice, not complete Beta acceptance.
 
 ## Run and check
 
@@ -27,15 +27,28 @@ live event feed. Load more passes opaque continuation cursors unchanged.
 ## Implemented boundary
 
 - Production dependencies are Flutter, `gaovm_api_client`, and `gaovm_models`.
-- Reads use public `GET /v1/vms` and `GET /v1/vms/{vm_id}`.
-- Start submits `POST /v1/vms/{vm_id}/actions/start` with an idempotency key
-  and validates the returned `202` Operation acceptance against the selected VM.
-  Acceptance never changes the displayed observed VM phase.
-- A lost or invalid response is an unknown outcome, not proof that Start failed.
-  Explicit retries reuse the same socket, VM, payload, and key within this UI
-  session, including after catalog reload or selection changes. Keys are not
-  persisted across application restarts. After validated acceptance, Start is
-  disabled for that VM in this session; Operation progress is not implemented yet.
+- Reads use public `GET /v1/vms`, `GET /v1/vms/{vm_id}`, and
+  `GET /v1/operations/{operation_id}`.
+- Start/Stop/Restart submit `POST /v1/vms/{vm_id}/actions/{action}` with an
+  idempotency key and validate the returned `202` acceptance against the selected VM.
+  Stop and Restart require confirmation identifying the VM; Cancel sends no command.
+  Admission is decided by the daemon, not inferred from the snapshot's phase.
+- A lost or invalid action response is an unknown outcome, not proof of failure.
+  Explicit replay of the latest intent reuses the same socket, VM, payload, and key,
+  including after catalog reload or selection changes. Keys are not persisted
+  across application restarts. A new explicit action after a verified terminal
+  Operation creates a new intent/key, not a replay of the previous failure.
+- The detail pane retains the latest action receipt per socket/VM. A different
+  explicit action can supersede this local pane without cancelling the old durable
+  Operation; all Operations remain owned by the daemon. Repeat submission of the
+  same accepted, nonterminal action is disabled, not silently replayed or polled.
+- Refresh Operation displays typed state, progress, request ID, cancellability,
+  error, and result. It rejects mismatched Operation ID, VM ID, action type, or
+  idempotency key. A read failure keeps the accepted receipt and its identity;
+  it does not submit another action. Reads are explicit snapshots, not a live feed.
+- Acceptance and Operation success never imply a VM phase. A terminal Operation
+  triggers a fresh public VM read only if that same VM/socket is still selected.
+  Late results cannot switch selection or overwrite another VM's observed state.
 - Catalog/detail show phase, metadata revision, labels, spec/applied/driver
   generations, restart-required state, and the typed specification.
 - Problems retain code, request ID, retryability, and optional Operation ID.
@@ -48,6 +61,9 @@ Desktop widget tests use real HTTP/Unix sockets and full schema-shaped VM replie
 not mocked internal API client/model classes. They also exercise actual peer
 disconnect on teardown, stale selections, opaque pagination, identity errors,
 and Start acceptance/replay after a lost response.
+Lifecycle coverage includes confirmation/cancellation, correlated Operation reads,
+terminal failure versus a fresh Start intent, separate observed-state refresh,
+structured read problems, stale selections, and socket EOF on Operation-read teardown.
 `flutter test` renders `build/ui-catalog-preview.png` with bundled fonts for
 visual inspection. That preview uses a test HTTP server, not a running VM.
 
@@ -57,9 +73,9 @@ not the widget test's virtual-clock zone.
 
 ## Still required by the full plan
 
-- Image catalog; create/edit/delete; stop/restart; independent display control.
-- Full lifecycle/Operation progress and terminal-result handling beyond Start acceptance.
-- Operations, resumable events, driver/serial logs, TestRun/artifacts, host status.
+- Image catalog; create/edit/delete; independent display control.
+- Full Operation catalog/history, externally created Operations, and cancellation UI.
+- Resumable events, driver/serial logs, TestRun/artifacts, host status.
 - Cross-client creation/takeover and consistent state against the real daemon.
 - Native window-close evidence against running daemon/VMs, not just a test server.
 - Native sandbox/private-socket permissions, signing, installation, and release gates.

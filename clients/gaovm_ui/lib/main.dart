@@ -24,20 +24,40 @@ const _muted = Color(0xff52635a);
 const _line = Color(0xffd6dcd1);
 const _lime = Color(0xffc8e490);
 
+enum _VmVerb {
+  start('Start'),
+  stop('Stop'),
+  restart('Restart');
+
+  const _VmVerb(this.label);
+  final String label;
+}
+
 // Local intent/correlation only. The daemon remains the source of VM/Operation state.
 class _VmAction {
-  _VmAction(this.client, this.vmId)
+  _VmAction(this.client, this.vmId, this.verb)
     : key =
           'ui-${List.generate(16, (_) => Random.secure().nextInt(256).toRadixString(16).padLeft(2, '0')).join()}';
 
   final GaoVmApiClient client;
   final VmId vmId;
+  final _VmVerb verb;
   final String key;
   final request = ApiRequestCancellation();
   bool sending = true;
   OperationId? operationId;
   String? acceptedState;
   Object? error;
+  ApiRequestCancellation? observation;
+  bool reading = false;
+  Operation? operation;
+  Object? observationError;
+
+  bool get terminal => const {
+    OperationState.succeeded,
+    OperationState.failed,
+    OperationState.cancelled,
+  }.contains(operation?.state);
 }
 
 class GaoVmApp extends StatelessWidget {
@@ -112,13 +132,72 @@ class _ConsoleState extends State<_Console> {
   Object? _error;
   final _actions = <(String, VmId), _VmAction>{};
 
-  Future<void> _start(VirtualMachine vm) async {
+  bool _canSubmit(_VmAction? action, _VmVerb verb) =>
+      action?.sending != true &&
+      (action?.verb != verb ||
+          action?.operationId == null ||
+          action?.terminal == true);
+
+  Future<void> _requestAction(VirtualMachine vm, _VmVerb verb) async {
     final client = _client;
     if (client == null) return;
     final scope = (client.socketPath, vm.metadata.id);
-    final previous = _actions[scope];
-    if (previous?.sending == true || previous?.operationId != null) return;
-    final action = previous ?? _VmAction(client, vm.metadata.id);
+    var previous = _actions[scope];
+    if (!_canSubmit(previous, verb)) return;
+    final replay = previous?.verb == verb && previous?.operationId == null;
+    if (verb != _VmVerb.start && !replay) {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          constraints: const BoxConstraints(maxWidth: 520),
+          backgroundColor: _paper,
+          title: Text(
+            '${verb.label} this VM?',
+            style: const TextStyle(fontFamily: 'InstrumentSerif', fontSize: 30),
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(vm.metadata.name),
+              const SizedBox(height: 8),
+              SelectableText(
+                vm.metadata.id.value,
+                style: const TextStyle(fontSize: 11),
+              ),
+              const SizedBox(height: 20),
+              Text(
+                verb == _VmVerb.stop
+                    ? 'Request graceful shutdown through the daemon. The Operation reports the outcome.'
+                    : 'Request a restart through the daemon to apply the saved spec. The Operation reports the outcome.',
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: Text('${verb.label} VM'),
+            ),
+          ],
+        ),
+      );
+      if (!mounted ||
+          confirmed != true ||
+          _client?.socketPath != client.socketPath ||
+          _selectedId != vm.metadata.id) {
+        return;
+      }
+      previous = _actions[scope];
+      if (!_canSubmit(previous, verb)) return;
+    }
+    final action = previous?.verb == verb && previous?.operationId == null
+        ? previous!
+        : _VmAction(client, vm.metadata.id, verb);
+    if (!identical(previous, action)) previous?.observation?.cancel();
     setState(() {
       _actions[scope] = action;
       action.sending = true;
@@ -127,7 +206,7 @@ class _ConsoleState extends State<_Console> {
     try {
       final response = await action.client.request(
         'POST',
-        '/v1/vms/${action.vmId.value}/actions/start',
+        '/v1/vms/${action.vmId.value}/actions/${action.verb.name}',
         body: JsonObjectValue.fromJson({}),
         idempotencyKey: action.key,
         cancellation: action.request,
@@ -155,19 +234,140 @@ class _ConsoleState extends State<_Console> {
     }
   }
 
+  Future<void> _refreshOperation(_VmAction action) async {
+    final id = action.operationId;
+    if (id == null || action.reading) return;
+    final pending = action.observation = ApiRequestCancellation();
+    setState(() {
+      action.reading = true;
+      action.observationError = null;
+    });
+    try {
+      final response = await action.client.request(
+        'GET',
+        '/v1/operations/${id.value}',
+        cancellation: pending,
+      );
+      final operation = Operation.fromJson(response.body.toJson());
+      if (response.status != 200 ||
+          operation.id != id ||
+          operation.type != 'vm.${action.verb.name}' ||
+          operation.resourceType != ResourceType.virtualMachine ||
+          operation.resourceId != action.vmId ||
+          operation.idempotencyKey != action.key) {
+        throw const ApiProtocolException(
+          'Operation identity disagrees with the submitted VM action.',
+        );
+      }
+      if (mounted && !pending.isCancelled) {
+        setState(() => action.operation = operation);
+        // Operation success is not proof of the VM's current observed phase.
+        if (action.terminal &&
+            identical(
+              _actions[(action.client.socketPath, action.vmId)],
+              action,
+            ) &&
+            _client?.socketPath == action.client.socketPath &&
+            _selectedId == action.vmId &&
+            _selected != null) {
+          await _select(_selected!);
+        }
+      }
+    } on ApiRequestCancelledException {
+      // Closing the UI releases a local read, never the durable Operation.
+    } catch (error) {
+      if (mounted && !pending.isCancelled) {
+        setState(() => action.observationError = error);
+      }
+    } finally {
+      if (mounted && !pending.isCancelled) {
+        setState(() => action.reading = false);
+      }
+    }
+  }
+
+  Widget _operationView(_VmAction action) {
+    final operation = action.operation;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        TextButton(
+          onPressed: action.reading ? null : () => _refreshOperation(action),
+          child: const Text('Refresh Operation'),
+        ),
+        if (action.reading) const Text('Reading Operation…'),
+        if (operation != null) ...[
+          Text('Operation · ${operation.state.name}'),
+          if (operation.progress.step != null) Text(operation.progress.step!),
+          if (operation.progress.percent != null)
+            Text('${operation.progress.percent}%'),
+          SelectableText(
+            operation.requestId.value,
+            style: const TextStyle(fontSize: 11, color: _muted),
+          ),
+          Text(operation.cancellable ? 'Cancellable' : 'Not cancellable'),
+          if (operation.error != null) ...[
+            Text(operation.error!.toJson()['code']! as String),
+            Text(operation.error!.message),
+            Text(operation.error!.retryable ? 'Retryable' : 'Not retryable'),
+          ],
+          if (operation.result != null)
+            SelectableText(
+              const JsonEncoder.withIndent('  ')
+                  .convert(operation.result!.toJson()),
+            ),
+        ],
+        if (action.observationError != null) _failure(action.observationError!),
+      ],
+    );
+  }
+
   Widget _actionView(VirtualMachine vm) {
     final action = _actions[(_client?.socketPath, vm.metadata.id)];
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        FilledButton(
-          onPressed: action?.sending == true || action?.operationId != null
-              ? null
-              : () => _start(vm),
-          child: Text(action?.error == null ? 'Start' : 'Retry Start'),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            for (final verb in _VmVerb.values)
+              if (verb == _VmVerb.start)
+                FilledButton(
+                  onPressed: _canSubmit(action, verb)
+                      ? () => _requestAction(vm, verb)
+                      : null,
+                  child: Text(
+                    action?.verb == verb && action?.error != null
+                        ? 'Retry ${verb.label}'
+                        : verb.label,
+                  ),
+                )
+              else
+                OutlinedButton(
+                  style: OutlinedButton.styleFrom(
+                    minimumSize: const Size(100, 52),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                  ),
+                  onPressed: _canSubmit(action, verb)
+                      ? () => _requestAction(vm, verb)
+                      : null,
+                  child: Text(
+                    action?.verb == verb && action?.error != null
+                        ? 'Retry ${verb.label}'
+                        : verb.label,
+                  ),
+                ),
+          ],
         ),
         if (action != null) ...[
           const SizedBox(height: 12),
+          Text(
+            'Last action · ${action.verb.label}',
+            style: const TextStyle(fontSize: 11, color: _muted),
+          ),
           if (action.sending) const Text('Submitting action…'),
           if (action.operationId != null) ...[
             Text('Accepted · ${action.acceptedState}'),
@@ -175,6 +375,7 @@ class _ConsoleState extends State<_Console> {
               action.operationId!.value,
               style: const TextStyle(fontSize: 11),
             ),
+            _operationView(action),
           ],
           if (action.error != null) ...[
             if (action.error is! ApiProblemException) ...[
@@ -531,6 +732,7 @@ class _ConsoleState extends State<_Console> {
     _detailRequest?.cancel();
     for (final action in _actions.values) {
       action.request.cancel();
+      action.observation?.cancel();
     }
     _socket.dispose();
     super.dispose();
