@@ -18,6 +18,7 @@ part 'host_status_cases.dart';
 part 'vm_deletion_cases.dart';
 part 'vm_write_cases.dart';
 part 'test_run_cases.dart';
+part 'test_run_payload_cases.dart';
 
 // Exercise real HTTP/Unix sockets, not Flutter's default HTTP-400 substitute.
 class _SocketTestBinding extends AutomatedTestWidgetsFlutterBinding {
@@ -47,6 +48,7 @@ void main() {
   _vmDeletionTests();
   _vmWriteTests();
   _testRunTests();
+  _testRunPayloadTests();
 
   testWidgets('connect shows the public VM catalog without selecting a VM', (
     tester,

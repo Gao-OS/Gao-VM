@@ -20,8 +20,9 @@ Deletion advances UI-002/UI-007 through the existing VM-007/VM-008 and
 API-005/API-006 contracts. It does not prove native managed-file cleanup.
 Create/edit advances UI-002/UI-007 using the existing VM-002/VM-005 and
 API-005/API-006/API-007 contracts, not native provisioning or applied-spec proof.
-TestRun lookup and artifact metadata advance UI-006/UI-007 through existing
-public reads. They do not execute tests, download payloads, or prove guest results.
+TestRun lookup, artifact metadata, and verified small-payload previews advance
+UI-006/UI-007 through existing public reads. They do not execute tests or prove
+native guest results.
 
 ## Run and check
 
@@ -61,7 +62,7 @@ socket choice, not proof of daemon health; a failed read is not an empty catalog
 
 ## Implemented boundary
 
-- Production dependencies are Flutter, `gaovm_api_client`, and `gaovm_models`.
+- Direct production dependencies are Flutter, `gaovm_api_client`, and `gaovm_models`.
 - Reads use public `GET /v1/vms`, `GET /v1/vms/{vm_id}`,
   `GET /v1/images`, `GET /v1/operations`, and
   `GET /v1/operations/{operation_id}`.
@@ -70,6 +71,9 @@ socket choice, not proof of daemon health; a failed read is not an empty catalog
 - TestRun reads use only public `GET /v1/test-runs/{test_run_id}` and
   `GET /v1/test-runs/{test_run_id}/artifacts`. Artifact selection inspects validated
   metadata without fetching its download URL or reading daemon files.
+- Explicit payload reads use only public `GET /v1/artifacts/{artifact_id}` through
+  the shared SDK. It verifies the complete Content-Length and SHA-256 against the
+  selected metadata before returning immutable bytes and a typed request ID.
 - Confirmed VM deletion uses only `DELETE /v1/vms/{vm_id}` and correlated public
   Operation reads, without direct filesystem or driver access.
 - VM create/edit uses public `POST /v1/vms` and `PATCH /v1/vms/{vm_id}` with
@@ -180,12 +184,16 @@ TestRun coverage adds other-client lookup without VM selection, immutable-input
 and response-correlation rejection, invalid-draft isolation, atomic artifact-page
 validation, configured-socket cursor retries, and actual detail/artifact socket EOF
 on navigation, reconnect, and close.
+Payload coverage adds explicit reads, the preview-size admission limit, altered-byte
+rejection and verified-snapshot retention, empty/invalid-UTF-8/inert-HTML rendering,
+bounded binary presentation, draft isolation, and actual pre-header/mid-body EOF
+on navigation, reconnect, close, new lookup, reload, and another artifact selection.
 `flutter test` renders `build/ui-catalog-preview.png`,
 `build/ui-operations-preview.png`, `build/ui-cancellation-preview.png`,
 `build/ui-events-preview.png`, `build/ui-images-preview.png`,
 `build/ui-host-preview.png`, `build/ui-vm-deletion-preview.png`,
 `build/ui-vm-write-draft-preview.png`, `build/ui-vm-write-preview.png`, and
-`build/ui-test-run-preview.png` with
+`build/ui-test-run-preview.png`, and `build/ui-test-run-payload-preview.png` with
 bundled fonts for visual inspection.
 These previews use test HTTP servers, not running VMs or a native sandbox probe.
 
@@ -199,7 +207,7 @@ Deletion tests also flush superseded rendered selections and use condition-based
 pumping while independent reads are pending, rather than settling their loading
 animations against a virtual clock. Their pointer hit-test warnings are fatal.
 
-## TestRun and artifact metadata
+## TestRun and artifacts
 
 Enter a public `tr_<ULID>` ID and choose Observe TestRun. This can inspect another
 client's run without selecting or querying its VM. The view separates immutable
@@ -220,9 +228,28 @@ retains the previous page, selection, and cursor for an explicit retry.
 
 Selection shows declared kind, MIME type, size, SHA-256, resource references,
 download URL, creation and retention time, and full JSON. These are metadata claims,
-not downloaded bytes or verified integrity. Payload preview/download remains
-unfinished. Leaving, reconnecting, or closing releases local reads without
+not downloaded bytes or verified integrity.
+
+Read artifact bytes explicitly fetches the selected canonical URL through the
+configured connection. The in-memory preview budget is 64 KiB; larger metadata
+disables this control without issuing a byte request. A complete response must have
+HTTP 200, an octet-stream media type, identity encoding, matching Content-Length and
+Digest, a valid response request ID, and matching actual SHA-256. Partial, altered,
+or mismatched bytes never become a verified preview. The shared SDK retains its
+30-second whole-request deadline and does not follow redirects or automatically retry.
+
+Known text MIME types with supported UTF-8/ASCII encoding render as inert selectable
+text, including literal HTML. Other encodings or invalid text render as hex, limited
+to the first 256 bytes of the completely verified payload. Empty artifacts remain
+valid. Failed reads preserve the last verified bytes with an explicit stale-snapshot
+caption. Verification applies to that read, not to a claimed guest execution.
+
+Another artifact, a new TestRun lookup, or successful catalog reload clears this
+local payload and releases its pending read. Leaving, reconnecting, or closing also
+releases local reads without
 submitting steps, cancelling Operations, changing VM state, or managing the daemon.
+Large-artifact streaming downloads remain unfinished; the preview cap is not a
+replacement for that full-plan requirement.
 
 ## VM create and edit
 
@@ -389,7 +416,7 @@ by the server.
 
 - Image import/delete and independent display control.
 - Operation filters beyond cursor paging.
-- Driver/serial log contents and tailing; TestRun artifact payload preview/download.
+- Driver/serial log contents and tailing; large-artifact streaming downloads.
 - Production capabilities/quota policy and native host-diagnostic evidence.
 - Cross-client creation/takeover and consistent state against the real daemon.
 - Native window-close evidence against running daemon/VMs, not just a test server.

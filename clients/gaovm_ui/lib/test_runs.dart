@@ -9,6 +9,7 @@ class _TestRuns extends StatefulWidget {
 }
 
 class _TestRunsState extends State<_TestRuns> {
+  static const _previewByteLimit = 64 * 1024;
   final _id = TextEditingController();
   TestRunId? _target;
   TestRun? _run;
@@ -25,6 +26,169 @@ class _TestRunsState extends State<_TestRuns> {
   bool _loadingArtifacts = false;
   bool _artifactsLoaded = false;
   Object? _artifactError;
+  ApiArtifactResponse? _payload;
+  String? _payloadText;
+  ApiRequestCancellation? _payloadRequest;
+  bool _readingPayload = false;
+  Object? _payloadError;
+
+  void _clearPayload() {
+    _payloadRequest?.cancel();
+    _payloadRequest = null;
+    _payload = null;
+    _payloadText = null;
+    _payloadError = null;
+    _readingPayload = false;
+  }
+
+  void _selectArtifact(Artifact artifact) {
+    if (_artifact == artifact) {
+      return;
+    }
+    setState(() {
+      _clearPayload();
+      _artifact = artifact;
+    });
+  }
+
+  Future<void> _readPayload() async {
+    final artifact = _artifact;
+    if (artifact == null ||
+        _readingPayload ||
+        artifact.sizeBytes > _previewByteLimit) {
+      return;
+    }
+    _payloadRequest?.cancel();
+    final pending = _payloadRequest = ApiRequestCancellation();
+    setState(() {
+      _readingPayload = true;
+      _payloadError = null;
+    });
+    try {
+      final payload = await widget.client.readArtifact(
+        artifact,
+        maxBytes: _previewByteLimit,
+        cancellation: pending,
+      );
+      final text = _previewText(payload);
+      if (mounted &&
+          !pending.isCancelled &&
+          identical(_payloadRequest, pending) &&
+          _artifact == artifact) {
+        setState(() {
+          _payload = payload;
+          _payloadText = text;
+        });
+      }
+    } on ApiRequestCancelledException {
+      // Release only this payload read, never its TestRun or VM.
+    } catch (error) {
+      if (mounted &&
+          !pending.isCancelled &&
+          identical(_payloadRequest, pending)) {
+        setState(() => _payloadError = error);
+      }
+    } finally {
+      if (mounted &&
+          !pending.isCancelled &&
+          identical(_payloadRequest, pending)) {
+        setState(() => _readingPayload = false);
+      }
+    }
+  }
+
+  String? _previewText(ApiArtifactResponse payload) {
+    try {
+      final type = ContentType.parse(payload.artifact.contentType);
+      final mime = type.mimeType.toLowerCase();
+      if (!mime.startsWith('text/') &&
+          mime != 'application/json' &&
+          mime != 'application/xml' &&
+          !mime.endsWith('+json') &&
+          !mime.endsWith('+xml')) {
+        return null;
+      }
+      final charset = type.charset?.toLowerCase();
+      if (charset == 'us-ascii') {
+        return ascii.decode(payload.bytes);
+      }
+      if (charset != null && charset != 'utf-8' && charset != 'utf8') {
+        return null;
+      }
+      return utf8.decode(payload.bytes);
+    } on FormatException {
+      return null;
+    } on HttpException {
+      return null;
+    }
+  }
+
+  String _previewHex(List<int> bytes) {
+    final lines = <String>[];
+    for (var offset = 0; offset < bytes.length && offset < 256; offset += 16) {
+      final end = offset + 16 < bytes.length ? offset + 16 : bytes.length;
+      final hex = bytes
+          .sublist(offset, end)
+          .map((value) => value.toRadixString(16).padLeft(2, '0'))
+          .join(' ');
+      lines.add('${offset.toRadixString(16).padLeft(6, '0')}  $hex');
+    }
+    return lines.join('\n');
+  }
+
+  Widget _payloadView(Artifact artifact) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      const SizedBox(height: 12),
+      TextButton(
+        onPressed: _readingPayload || artifact.sizeBytes > _previewByteLimit
+            ? null
+            : _readPayload,
+        child: const Text('Read artifact bytes'),
+      ),
+      if (artifact.sizeBytes > _previewByteLimit)
+        const Text(
+          'Payload exceeds the 64 KiB preview limit.',
+          style: TextStyle(fontSize: 11, color: _muted),
+        ),
+      if (_readingPayload) const LinearProgressIndicator(minHeight: 2),
+      if (_payloadError != null) ...[
+        _apiFailure(_payloadError!),
+        if (_payload != null)
+          const Text(
+            'Payload read failed · last verified bytes retained.',
+            style: TextStyle(fontSize: 11),
+          ),
+      ],
+      if (_payload case final payload?) ...[
+        const SizedBox(height: 12),
+        Text('Verified payload · ${payload.bytes.length} bytes'),
+        Text(
+          'Payload request · ${payload.requestId.value}',
+          style: const TextStyle(fontSize: 10, color: _muted),
+        ),
+        const Text(
+          'Complete length and SHA-256 verified · contents are inert.',
+          style: TextStyle(fontSize: 10, color: _muted),
+        ),
+        const SizedBox(height: 12),
+        if (payload.bytes.isEmpty)
+          const Text('Empty artifact')
+        else if (_payloadText != null)
+          SelectableText(_payloadText!, style: const TextStyle(fontSize: 11))
+        else ...[
+          Text(
+            'Binary preview · ${payload.bytes.length < 256 ? payload.bytes.length : 256} of ${payload.bytes.length} verified bytes',
+          ),
+          SelectableText(
+            _previewHex(payload.bytes),
+            style: const TextStyle(fontSize: 10),
+          ),
+        ],
+      ],
+      const SizedBox(height: 12),
+    ],
+  );
 
   void _lookup() {
     try {
@@ -48,6 +212,7 @@ class _TestRunsState extends State<_TestRuns> {
         _run = null;
         _responseId = null;
         _artifactRequest?.cancel();
+        _clearPayload();
         _artifacts = [];
         _artifact = null;
         _nextCursor = null;
@@ -162,6 +327,7 @@ class _TestRunsState extends State<_TestRuns> {
           _nextCursor = next as String?;
           _artifactsLoaded = true;
           if (!more) {
+            _clearPayload();
             _seenCursors.clear();
             _artifact = null;
           }
@@ -203,6 +369,7 @@ class _TestRunsState extends State<_TestRuns> {
         artifact.toJson()['kind']! as String,
         style: const TextStyle(fontFamily: 'InstrumentSerif', fontSize: 30),
       ),
+      _payloadView(artifact),
       for (final entry in {
         'ID': artifact.id.value,
         'Content type': artifact.contentType,
@@ -229,9 +396,11 @@ class _TestRunsState extends State<_TestRuns> {
             ],
           ),
         ),
-      const Text(
-        'Declared metadata, not a downloaded or verified payload.',
-        style: TextStyle(fontSize: 11, color: _muted),
+      Text(
+        _payload == null
+            ? 'Declared metadata, not a downloaded or verified payload.'
+            : 'Metadata snapshot · verification belongs to the last explicit payload read.',
+        style: const TextStyle(fontSize: 11, color: _muted),
       ),
       _json('Full artifact JSON', artifact.toJson()),
     ],
@@ -273,7 +442,7 @@ class _TestRunsState extends State<_TestRuns> {
             padding: const EdgeInsets.only(top: 12),
             child: InkWell(
               key: ValueKey('artifact-${artifact.id.value}'),
-              onTap: () => setState(() => _artifact = artifact),
+              onTap: () => _selectArtifact(artifact),
               child: Container(
                 width: double.infinity,
                 padding: const EdgeInsets.all(12),
@@ -438,6 +607,7 @@ class _TestRunsState extends State<_TestRuns> {
   void dispose() {
     _request?.cancel();
     _artifactRequest?.cancel();
+    _payloadRequest?.cancel();
     _id.dispose();
     super.dispose();
   }

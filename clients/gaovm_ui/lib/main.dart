@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show ContentType, HttpException;
 import 'dart:math';
 
 import 'package:flutter/foundation.dart';
