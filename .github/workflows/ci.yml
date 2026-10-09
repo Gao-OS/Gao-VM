@@ -46,7 +46,7 @@ jobs:
             entrypoint: ''
           - package: gaovmd
             directory: daemon/gaovmd
-            paths: bin lib test
+            paths: bin lib test tool
             entrypoint: bin/gaovmd.dart
           - package: gaovm_cli
             directory: clients/gaovm_cli

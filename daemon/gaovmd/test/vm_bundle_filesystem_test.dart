@@ -101,6 +101,24 @@ void main() {
       expect(await replacement.readAsString(), 'replacement');
     },
   );
+  test('sync uses the held file after its pathname becomes a link', () async {
+    final root = await Directory.systemTemp.createTemp('owned-file-sync-');
+    addTearDown(() => root.delete(recursive: true));
+    final path = '${root.path}/payload';
+    final original = await File(path).writeAsString('held bytes');
+    final held = await OwnedImageFile.open(original);
+    addTearDown(held.close);
+    final moved = await original.rename('${root.path}/moved');
+    await Link(path).create('${root.path}/missing');
+
+    await held.sync();
+
+    expect(await moved.readAsString(), 'held bytes');
+    expect(await Link(path).target(), '${root.path}/missing');
+    expect(await File('${root.path}/missing').exists(), isFalse);
+    held.close();
+    await expectLater(held.sync(), throwsStateError);
+  });
   test('child operations reject invalid basenames including NUL', () async {
     final root = await Directory.systemTemp.createTemp('bundle-names-');
     addTearDown(() => root.delete(recursive: true));

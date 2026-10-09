@@ -640,6 +640,26 @@ final class OwnedImageFile {
     _verifyDescriptorPath(_fd, path, directory: false);
   }
 
+  /// Flushes this held inode without reopening a replaceable pathname.
+  Future<void> sync() async {
+    _requireOpen();
+    final fd = _duplicateDescriptor(_fd);
+    final displayPath = path;
+    try {
+      await Isolate.run(() {
+        if (_fsync(fd) != 0) {
+          throw FileSystemException(
+            'cannot sync owned file',
+            displayPath,
+            OSError('fsync failed', _currentErrno()),
+          );
+        }
+      });
+    } finally {
+      _close(fd);
+    }
+  }
+
   /// Dart's asynchronous IO opens a duplicate of this held descriptor, never
   /// the original user pathname. Keep the descriptor alive until consumption
   /// ends. Linux procfs and Darwin devfs expose the process's descriptor table.

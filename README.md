@@ -146,6 +146,13 @@ dart pub get
 
 ---
 
+## macOS Bundle Assembly (Partial M8)
+
+The [macOS packaging tool](docs/MACOS_PACKAGING.md) assembles and signs prebuilt
+ARM64 daemon, CLI, and driver binaries with the canonical schemas. This is a
+build-time component, not an installer: launchd, bundle-relative runtime defaults,
+update/uninstall, notarization, and native VM release acceptance remain pending.
+
 ## Running the Current Prototype Daemon (`gaovmd`)
 
 Start the daemon from the repository root or project directory:
