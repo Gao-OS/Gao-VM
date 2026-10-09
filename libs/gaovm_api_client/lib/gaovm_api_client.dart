@@ -128,7 +128,9 @@ final class GaoVmApiClient {
     if (ifMatch != null)
       request.headers.set(HttpHeaders.ifMatchHeader, ifMatch);
     if (body != null) {
-      request.headers.contentType = ContentType.json;
+      request.headers.contentType = method == 'PATCH'
+          ? ContentType('application', 'merge-patch+json', charset: 'utf-8')
+          : ContentType.json;
       request.add(utf8.encode(jsonEncode(body.toJson())));
     }
     final response = await request.close();

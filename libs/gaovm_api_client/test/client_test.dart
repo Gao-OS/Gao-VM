@@ -7,6 +7,40 @@ import 'package:gaovm_models/gaovm_models.dart';
 import 'package:test/test.dart';
 
 void main() {
+  test('VM PATCH preserves merge-patch media type, revision and key', () async {
+    String? mediaType;
+    String? revision;
+    String? key;
+    Object? body;
+    await _serve(
+      (request) async {
+        mediaType = request.headers.contentType?.mimeType;
+        revision = request.headers.value('If-Match');
+        key = request.headers.value('Idempotency-Key');
+        body = jsonDecode(await utf8.decoder.bind(request).join());
+        request.response.headers.contentType = ContentType.json;
+        request.response.write('{}');
+        await request.response.close();
+      },
+      (client) async {
+        final patch = {
+          'spec': {'guest_profile': null, 'cpu': 8},
+        };
+        await client.request(
+          'PATCH',
+          '/v1/vms/vm_01J00000000000000000000000',
+          body: JsonObjectValue.fromJson(patch),
+          ifMatch: '"7"',
+          idempotencyKey: 'edit-1',
+        );
+        expect(mediaType, 'application/merge-patch+json');
+        expect(revision, '"7"');
+        expect(key, 'edit-1');
+        expect(body, patch);
+      },
+    );
+  });
+
   test('an unavailable readiness snapshot remains a health response', () async {
     final requestId = RequestId.generate();
     await _serve(
