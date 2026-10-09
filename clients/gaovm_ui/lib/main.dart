@@ -8,6 +8,7 @@ import 'package:gaovm_api_client/gaovm_api_client.dart';
 import 'package:gaovm_models/gaovm_models.dart';
 
 part 'operation_history.dart';
+part 'operation_cancellation.dart';
 
 void main() {
   LicenseRegistry.addLicense(() async* {
@@ -167,6 +168,7 @@ class _ConsoleState extends State<_Console> {
   Object? _error;
   bool _operationsView = false;
   final _actions = <(String, VmId), _VmAction>{};
+  final _cancellations = _OperationCancellations();
 
   bool _canSubmit(_VmAction? action, _VmVerb verb) =>
       action?.sending != true &&
@@ -778,6 +780,7 @@ class _ConsoleState extends State<_Console> {
   void dispose() {
     _catalogRequest?.cancel();
     _detailRequest?.cancel();
+    _cancellations.dispose();
     for (final action in _actions.values) {
       action.request.cancel();
       action.observation?.cancel();
@@ -945,6 +948,7 @@ class _ConsoleState extends State<_Console> {
                               : _OperationHistory(
                                   key: ObjectKey(_client),
                                   client: _client!,
+                                  cancellations: _cancellations,
                                 )
                         : Row(
                             children: [

@@ -1,9 +1,12 @@
 # GaoVM desktop console
 
 The Flutter client for `docs/DEVELOPMENT_PLAN.md` B1.2. This implements initial
-VM catalog/detail, lifecycle, linked-Operation, and durable history slices,
-not complete Beta acceptance. History advances PRD UI-005/UI-007 and presents
-the public OP-003/OP-008 fields; it does not prove native or cross-client Beta gates.
+VM catalog/detail, lifecycle, linked-Operation, durable history, and cancellation
+slices, not complete Beta acceptance.
+History advances PRD UI-005/UI-007 and presents the public OP-003/OP-008 fields;
+it does not prove native or cross-client Beta gates.
+Cancellation exposes the existing OP-004/OP-005 public contract without changing
+daemon cleanup semantics or proving native cleanup completion.
 
 ## Run and check
 
@@ -48,6 +51,28 @@ socket choice, not proof of daemon health; a failed read is not an empty catalog
   Original request/result JSON and UTC lifecycle/deadline fields remain inspectable.
   Refresh detail is an explicit GET; it never resubmits an action, selects a VM,
   or cancels an Operation. Connect is the explicit catalog-reload path.
+- Cancellation is an explicit, confirmed `POST /v1/operations/{operation_id}/cancel`
+  with an empty object and a fresh idempotency key. Confirmation names the target
+  Operation and resource; Keep running sends no request. Fresh detail determines
+  the initial button's cancellability, but the daemon decides admission and may
+  return a structured `OPERATION_NOT_CANCELLABLE` problem.
+- A validated cancellation acknowledgement identifies a separate `operation.cancel`
+  Operation targeting the original Operation ID. Acceptance never marks the target
+  cancelled or claims cleanup finished. Refresh cancellation reads that receipt,
+  checking its ID, type, target, key, and the original request ID once observed.
+  Only a verified terminal receipt triggers a fresh selected-target GET; the UI
+  displays that target's actual state, even if it is still running.
+- Lost or malformed cancellation responses remain unknown outcomes. Explicit
+  Retry cancellation reuses the same socket, target, body, and key, including after
+  pane changes, reconnecting to that socket, or target completion. Receipts are
+  local to the application's lifetime and scoped by socket/Operation ID, not
+  persisted as durable state. A new request after a verified terminal receipt
+  requires fresh target eligibility, another confirmation, and a new key.
+- Closing or leaving the pane releases its local submission/read sockets without
+  issuing another cancel, VM action, or service command. An interrupted submission
+  remains an unknown intent available for same-key replay while the app stays open.
+  Read errors preserve the accepted receipt, and late replies cannot refresh a
+  different selection or overwrite another socket's receipt.
 - Start/Stop/Restart submit `POST /v1/vms/{vm_id}/actions/{action}` with an
   idempotency key and validate the returned `202` acceptance against the selected VM.
   Stop and Restart require confirmation identifying the VM; Cancel sends no command.
@@ -86,8 +111,13 @@ structured read problems, stale selections, and socket EOF on Operation-read tea
 History coverage adds other-client/non-VM resources, independent connection,
 connection-bound navigation/paging, fresh request/result detail, identity and
 page rejection, failed-versus-empty reads, stale replies, and socket EOF on close
-or pane changes. `flutter test` renders `build/ui-catalog-preview.png` and
-`build/ui-operations-preview.png` with bundled fonts for visual inspection.
+or pane changes. Cancellation coverage includes confirmation, fresh eligibility,
+separate acceptance/completion, same-key replay after a lost response and navigation,
+new intents after terminal failure, per-socket receipts, identity rejection,
+structured problems, stale selection, and actual submission/read EOF on teardown.
+`flutter test` renders `build/ui-catalog-preview.png`,
+`build/ui-operations-preview.png`, and `build/ui-cancellation-preview.png`
+with bundled fonts for visual inspection.
 These previews use test HTTP servers, not running VMs or a native sandbox probe.
 
 The test listener is explicitly closed separately from `HttpServer.listenOn`.
@@ -100,7 +130,7 @@ change production timeouts or replace the actual socket-disconnect assertion.
 ## Still required by the full plan
 
 - Image catalog; create/edit/delete; independent display control.
-- Operation cancellation UI and filters beyond cursor paging.
+- Operation filters beyond cursor paging.
 - Resumable events, driver/serial logs, TestRun/artifacts, host status.
 - Cross-client creation/takeover and consistent state against the real daemon.
 - Native window-close evidence against running daemon/VMs, not just a test server.

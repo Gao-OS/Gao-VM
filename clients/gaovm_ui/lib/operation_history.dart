@@ -1,9 +1,14 @@
 part of 'main.dart';
 
 class _OperationHistory extends StatefulWidget {
-  const _OperationHistory({super.key, required this.client});
+  const _OperationHistory({
+    super.key,
+    required this.client,
+    required this.cancellations,
+  });
 
   final GaoVmApiClient client;
+  final _OperationCancellations cancellations;
 
   @override
   State<_OperationHistory> createState() => _OperationHistoryState();
@@ -24,7 +29,173 @@ class _OperationHistoryState extends State<_OperationHistory> {
   @override
   void initState() {
     super.initState();
+    widget.cancellations.addListener(_cancellationChanged);
     _load();
+  }
+
+  void _cancellationChanged() {
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _refreshCancellation(_OperationCancellation intent) async {
+    final terminal = await widget.cancellations.observe(intent);
+    if (terminal &&
+        mounted &&
+        _selection?.id == intent.target &&
+        identical(
+          widget.cancellations.get(widget.client, intent.target),
+          intent,
+        )) {
+      await _select(_selection!);
+    }
+  }
+
+  Future<void> _requestCancellation(Operation target) async {
+    final intent = widget.cancellations.get(widget.client, target.id);
+    if (intent?.sending == true ||
+        intent?.operationId != null && !intent!.terminal) {
+      return;
+    }
+    if (intent == null || intent.terminal) {
+      if (!target.cancellable ||
+          !const {
+            OperationState.pending,
+            OperationState.running,
+          }.contains(target.state)) {
+        return;
+      }
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          constraints: const BoxConstraints(maxWidth: 520),
+          backgroundColor: _paper,
+          title: const Text(
+            'Cancel this Operation?',
+            style: TextStyle(fontFamily: 'InstrumentSerif', fontSize: 30),
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(target.type),
+              SelectableText(
+                target.id.value,
+                style: const TextStyle(fontSize: 11),
+              ),
+              const SizedBox(height: 12),
+              SelectableText(
+                target.resourceId.value,
+                style: const TextStyle(fontSize: 11),
+              ),
+              const SizedBox(height: 20),
+              const Text(
+                'Request cancellation through the daemon. Acceptance is not completed cleanup; the target Operation reports its outcome.',
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Keep running'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('Cancel Operation'),
+            ),
+          ],
+        ),
+      );
+      if (!mounted || confirmed != true || !identical(_detail, target)) return;
+    }
+    await widget.cancellations.request(widget.client, target);
+  }
+
+  Widget _cancellationView(Operation target) {
+    final intent = widget.cancellations.get(widget.client, target.id);
+    final eligible =
+        target.cancellable &&
+        const {
+          OperationState.pending,
+          OperationState.running,
+        }.contains(target.state);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        OutlinedButton(
+          style: OutlinedButton.styleFrom(
+            minimumSize: const Size(0, 44),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(6),
+            ),
+          ),
+          onPressed:
+              intent?.sending == true ||
+                  intent?.operationId != null && !intent!.terminal ||
+                  !eligible && intent?.error == null
+              ? null
+              : () => _requestCancellation(target),
+          child: Text(
+            intent?.error != null
+                ? 'Retry cancellation'
+                : intent?.terminal == true
+                ? 'Request cancellation again'
+                : 'Request cancellation',
+          ),
+        ),
+        if (intent?.sending == true) const Text('Submitting cancellation…'),
+        if (intent?.operationId != null) ...[
+          Text('Cancellation accepted · ${intent!.acceptedState!.name}'),
+          SelectableText(
+            intent.operationId!.value,
+            style: const TextStyle(fontSize: 11),
+          ),
+          TextButton(
+            onPressed: intent.reading
+                ? null
+                : () => _refreshCancellation(intent),
+            child: const Text('Refresh cancellation'),
+          ),
+          if (intent.reading) const Text('Reading cancellation…'),
+          if (intent.operation != null) ...[
+            Text('Cancellation · ${intent.operation!.state.name}'),
+            if (intent.operation!.progress.step != null)
+              Text(intent.operation!.progress.step!),
+            if (intent.operation!.progress.percent != null)
+              Text('${intent.operation!.progress.percent}%'),
+            SelectableText(
+              intent.operation!.requestId.value,
+              style: const TextStyle(fontSize: 11),
+            ),
+            if (intent.operation!.error != null) ...[
+              Text(intent.operation!.error!.toJson()['code']! as String),
+              Text(intent.operation!.error!.message),
+              Text(
+                intent.operation!.error!.retryable
+                    ? 'Retryable'
+                    : 'Not retryable',
+              ),
+            ],
+            if (intent.operation!.result != null)
+              SelectableText(
+                const JsonEncoder.withIndent('  ')
+                    .convert(intent.operation!.result!.toJson()),
+                style: const TextStyle(fontSize: 11),
+              ),
+          ],
+          if (intent.observationError != null)
+            _apiFailure(intent.observationError!),
+        ],
+        if (intent?.error != null) ...[
+          if (intent!.error is! ApiProblemException)
+            const Text('Cancellation outcome unknown'),
+          const Text(
+            'Retry sends the same target, body, and idempotency key.',
+            style: TextStyle(fontSize: 11, color: _muted),
+          ),
+          _apiFailure(intent.error!),
+        ],
+      ],
+    );
   }
 
   Future<void> _load({bool more = false}) async {
@@ -95,6 +266,7 @@ class _OperationHistoryState extends State<_OperationHistory> {
   }
 
   Future<void> _select(Operation snapshot) async {
+    widget.cancellations.closeObservations(widget.client);
     _detailRequest?.cancel();
     final pending = _detailRequest = ApiRequestCancellation();
     setState(() {
@@ -216,6 +388,8 @@ class _OperationHistoryState extends State<_OperationHistory> {
         Text('${operation.progress.percent}%'),
       const SizedBox(height: 12),
       Text(operation.cancellable ? 'Cancellable' : 'Not cancellable'),
+      const SizedBox(height: 8),
+      _cancellationView(operation),
       const SizedBox(height: 16),
       SelectableText(
         operation.requestId.value,
@@ -283,6 +457,8 @@ class _OperationHistoryState extends State<_OperationHistory> {
 
   @override
   void dispose() {
+    widget.cancellations.removeListener(_cancellationChanged);
+    widget.cancellations.closeRequests(widget.client);
     _catalogRequest?.cancel();
     _detailRequest?.cancel();
     super.dispose();
