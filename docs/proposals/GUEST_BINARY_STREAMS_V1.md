@@ -5,7 +5,7 @@ document: protocol-proposal
 status: proposed
 accepted: false
 target_work_packages: ["023", "024", "025"]
-updated: 2026-10-08
+updated: 2026-10-10
 ---
 
 # Guest binary stream v1 提案
@@ -218,8 +218,11 @@ source 只允许 kind、output，output 仅 stdout/stderr。必须已有当前 s
 exec.status grant，指定 output 必须为 artifact mode，且其 artifact_id/size 与 sealed
 output 匹配。不能拿任意 op/artifact ID 查询全局存储，不能从 inline reference 下载。
 
-guest 在 seal 阶段用 bounded worker 计算并保留 digest；当前 Executor 尚未提供该
-metadata/registry，必须实现，不得每次 transfer 临时读源文件来掩盖 source 已变化。
+guest 在 seal 阶段计算并保留 digest，不能在每次 transfer 临时重读源文件来掩盖
+source 已变化。当前 library 的 `Executor::output_artifact` 已提供 capture-time SHA-256、
+ID、kind、content type 和 size 的本地 metadata，并受原 session/VM/generation/op 检查约束。
+它不是 wire descriptor，没有 stream_id，也未实现 grant registry 或 binary transfer；
+上述 channel/session 授权与传输仍需接受本提案后实施。
 返回 metadata：
 
 ```json

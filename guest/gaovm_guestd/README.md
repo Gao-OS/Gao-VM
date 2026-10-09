@@ -111,6 +111,22 @@ not silently treated as success. A nonzero command exit is a failed result, not
 a protocol failure. Disabled capture uses the null device and consumes no spool
 budget. Running snapshots contain empty output; output is published on completion.
 
+Capture also hashes the retained bytes incrementally through the existing 8 KiB
+buffer. After file flush/sync, artifact-mode output retains its original SHA-256.
+`Executor::output_artifact` returns local `ArtifactInfo` under the same ready-session,
+capability, VM/generation, and operation checks as `exec.status`. Stdout and stderr
+have independent IDs, sizes, and digests; running output has no descriptor, and
+inline/empty/disabled output returns none. Failed, timed-out, cancelled, or
+output-limited executions may retain diagnostic output, without changing their
+terminal outcome. Overflow metadata describes only the retained prefix.
+
+This metadata does not change the frozen `OutputReference` or control response,
+establish a stream/grant, or prove transport or host publication. It is retained
+from capture, not recomputed from a later spool read. Corrupting or removing a
+local file cannot redefine its original digest; a future receiver must verify the
+actual transferred bytes against it. Identical retained replays preserve metadata;
+internal release retires it while already-open bounded readers remain caller-owned.
+
 The configured spool parent must be owned by the effective user and not group/world
 writable. Owned subdirectories are `0700`, and output files are `0600`. Sealing a
 local file does **not** prove binary transfer, host artifact registration, or durable
@@ -209,6 +225,11 @@ Exec dispatch tests cover real command completion, correlated failures, cancella
 replay/conflicting inputs, admission fences, bounded/spilled output, and a real Unix
 frame round trip with health while an execution is running. Its test-only request
 loop does not establish a production dispatcher service or native vsock acceptance.
+Exec metadata tests cover independent stdout/stderr, non-UTF-8 and 2 MiB output,
+session/capability/binding rejection, pre-seal and non-artifact output, original
+digests after spool corruption/removal, overflow prefixes, timeout/cancellation,
+replay, and release with an already-open reader. They execute real Unix subprocesses
+and files, not a native guest binary transfer.
 
 ## Remaining package and MVP work
 

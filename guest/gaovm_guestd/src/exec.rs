@@ -1,12 +1,14 @@
 //! Per-VM/generation execution behind a negotiated session. This is not a
 //! transport listener, a sandbox, or a durable host operation repository.
 
+use crate::artifact::ArtifactInfo;
 use crate::protocol::{ErrorCode, PROTOCOL_VERSION, ProtocolError, validate_message};
 use crate::session::Session;
 use nix::sys::signal::{Signal, killpg};
 use nix::unistd::{Pid, Uid};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{File, Permissions};
 use std::io;
@@ -118,6 +120,7 @@ struct CaptureOptions {
 struct StoredOutput {
     reference: OutputReference,
     file: Option<NamedTempFile>,
+    digest: Option<String>,
     failure: Option<ErrorCode>,
 }
 
@@ -126,6 +129,7 @@ impl StoredOutput {
         Self {
             reference: empty_output(),
             file: None,
+            digest: None,
             failure: None,
         }
     }
@@ -388,6 +392,50 @@ impl Executor {
             .await
             .map_err(|_| error(ErrorCode::GuestInternalError))?;
         Ok(done.as_ref().expect("completed execution").snapshot.clone())
+    }
+
+    /// Local metadata from sealed capture, not a wire descriptor or transfer grant.
+    /// Requires the same session/binding as an exec.status read; never rehashes
+    /// mutable spool bytes or adds metadata to the frozen control result.
+    pub fn output_artifact(
+        &self,
+        session: &Session,
+        request: &Value,
+        stream: OutputStream,
+    ) -> Result<Option<ArtifactInfo>, ProtocolError> {
+        let operation = self.authorize(session, request, "exec.status")?;
+        let job = self
+            .jobs
+            .get(operation)
+            .ok_or_else(|| error(ErrorCode::ExecNotFound))?;
+        let completed = job.completed.borrow();
+        let done = completed
+            .as_ref()
+            .ok_or_else(|| error(ErrorCode::InvalidRequest))?;
+        let output = match stream {
+            OutputStream::Stdout => &done.stdout,
+            OutputStream::Stderr => &done.stderr,
+        };
+        match &output.reference {
+            OutputReference::Inline { .. } => Ok(None),
+            OutputReference::Artifact {
+                artifact_id,
+                size_bytes,
+            } => Ok(Some(ArtifactInfo {
+                artifact_id: artifact_id.clone(),
+                kind: match stream {
+                    OutputStream::Stdout => "stdout",
+                    OutputStream::Stderr => "stderr",
+                }
+                .to_owned(),
+                content_type: "application/octet-stream".to_owned(),
+                size_bytes: *size_bytes,
+                digest: output
+                    .digest
+                    .clone()
+                    .ok_or_else(|| error(ErrorCode::GuestInternalError))?,
+            })),
+        }
     }
 
     pub fn open_output(
@@ -691,6 +739,7 @@ async fn capture<R: AsyncRead + Unpin>(
         tokio::fs::File::from_std(file.reopen().map_err(|_| ErrorCode::GuestInternalError)?);
     let mut buffer = [0u8; 8192];
     let mut size = 0;
+    let mut hash = Sha256::new();
     let mut failure = None;
     loop {
         let count = pipe
@@ -706,6 +755,7 @@ async fn capture<R: AsyncRead + Unpin>(
             .write_all(&buffer[..allowed])
             .await
             .map_err(|_| ErrorCode::GuestInternalError)?;
+        hash.update(&buffer[..allowed]);
         size += allowed as u64;
         if allowed < count {
             failure = Some(ErrorCode::OutputLimitExceeded);
@@ -742,6 +792,7 @@ async fn capture<R: AsyncRead + Unpin>(
                     size_bytes: size,
                 },
                 file: None,
+                digest: None,
                 failure,
             });
         }
@@ -752,6 +803,13 @@ async fn capture<R: AsyncRead + Unpin>(
             size_bytes: size,
         },
         file: Some(file),
+        digest: Some(format!(
+            "sha256:{}",
+            hash.finalize()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        )),
         failure,
     })
 }
