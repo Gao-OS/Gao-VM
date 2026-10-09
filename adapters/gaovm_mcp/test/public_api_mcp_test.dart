@@ -103,6 +103,91 @@ void main() {
     },
   );
 
+  test('initialization-era clients share the same public VM catalog', () async {
+    final vm = await vms.create(name: 'legacy MCP client', spec: _spec());
+    final initialized = await mcp.legacyRequest(
+      'initialize',
+      params: {
+        'protocolVersion': '2025-11-25',
+        'capabilities': {},
+        'clientInfo': {'name': 'test-client', 'version': '1.0'},
+      },
+    );
+    expect(initialized, containsPair('result', isA<Map>()));
+    expect(initialized['result']['protocolVersion'], '2025-11-25');
+    expect(initialized['result']['capabilities'], {'tools': {}});
+    expect(initialized['result']['serverInfo']['name'], 'gaovm-mcp');
+    mcp.notify('notifications/initialized');
+    final tools = await mcp.legacyRequest('tools/list');
+    expect(tools['result']['tools'], hasLength(16));
+    expect((tools['result'] as Map).containsKey('resultType'), isFalse);
+    final listed = await mcp.legacyRequest(
+      'tools/call',
+      params: {'name': 'vm_list', 'arguments': {}},
+    );
+    expect(listed['result']['structuredContent']['items'], [vm.toJson()]);
+    expect((listed['result'] as Map).containsKey('resultType'), isFalse);
+    final modern = await mcp.call('vm_list');
+    expect(modern['result']['resultType'], 'complete');
+    expect(
+      modern['result']['structuredContent'],
+      listed['result']['structuredContent'],
+    );
+  });
+
+  test(
+    'legacy negotiation never downgrades explicit modern requests',
+    () async {
+      final before = await mcp.legacyRequest('tools/list');
+      expect(before['error']['code'], -32602);
+      final ping = await mcp.legacyRequest('ping');
+      expect(ping['result'], isEmpty);
+      final invalid = await mcp.legacyRequest(
+        'initialize',
+        params: {'protocolVersion': '2025-11-25', 'capabilities': {}},
+      );
+      expect(invalid['error']['code'], -32602);
+      final initialized = await mcp.legacyRequest(
+        'initialize',
+        params: {
+          'protocolVersion': '2024-11-05',
+          'capabilities': {},
+          'clientInfo': {'name': 'older-client', 'version': '1.0'},
+        },
+      );
+      expect(initialized['result']['protocolVersion'], '2025-11-25');
+      final premature = await mcp.legacyRequest('tools/list');
+      expect(premature['error']['code'], -32602);
+      mcp.notify('notifications/initialized');
+      final unsupported = await mcp.request(
+        'tools/list',
+        params: {
+          '_meta': {
+            'io.modelcontextprotocol/protocolVersion': '1900-01-01',
+            'io.modelcontextprotocol/clientCapabilities': {},
+          },
+        },
+      );
+      expect(unsupported['error']['code'], -32022);
+      final incomplete = await mcp.request(
+        'tools/list',
+        params: {
+          '_meta': {'io.modelcontextprotocol/clientCapabilities': {}},
+        },
+      );
+      expect(incomplete['error']['code'], -32602);
+      final next = await mcp.legacyRequest(
+        'tools/list',
+        params: {
+          '_meta': {'progressToken': 'legacy-trace'},
+        },
+      );
+      expect(next['result']['tools'], hasLength(16));
+      final modernPing = await mcp.request('ping');
+      expect(modernPing['error']['code'], -32601);
+    },
+  );
+
   test(
     'tool discovery describes the frozen plan and public request bodies',
     () async {
@@ -384,6 +469,274 @@ void main() {
       },
     );
   });
+  test('a pending HTTP tool does not block protocol discovery', () async {
+    final received = Completer<void>();
+    final release = Completer<void>();
+    await _withHttpMcp(
+      root,
+      (request) async {
+        received.complete();
+        await release.future;
+        request.response.headers.contentType = ContentType.json;
+        request.response.write('{"items":[],"next_cursor":null}');
+        await request.response.close();
+      },
+      (client) async {
+        try {
+          final slow = client.sendRequest(
+            'tools/call',
+            params: {'name': 'vm_list', 'arguments': {}},
+          );
+          await received.future.timeout(const Duration(seconds: 2));
+          final fast = client.sendRequest('server/discover');
+          final discovery = await client.receive(
+            timeout: const Duration(seconds: 2),
+          );
+          expect(discovery['id'], fast);
+          expect(discovery['result']['resultType'], 'complete');
+          release.complete();
+          final tool = await client.receive();
+          expect(tool['id'], slow);
+          expect(tool['result']['isError'], isFalse);
+        } finally {
+          if (!release.isCompleted) release.complete();
+        }
+      },
+    );
+  });
+  test(
+    'MCP cancellation closes HTTP and sends no late tool response',
+    () async {
+      final socketPath = '${root.path}/cancel.sock';
+      final listener = await ServerSocket.bind(
+        InternetAddress(socketPath, type: InternetAddressType.unix),
+        0,
+      );
+      final sockets = <Socket>[];
+      final received = Completer<void>();
+      final peerClosed = Completer<void>();
+      final subscription = listener.listen((socket) {
+        sockets.add(socket);
+        socket.listen(
+          (bytes) {
+            if (!received.isCompleted) received.complete();
+          },
+          onDone: () {
+            if (!peerClosed.isCompleted) peerClosed.complete();
+          },
+        );
+      });
+      final client = _McpClient(
+        GaoVmMcpServer(api: GaoVmApiClient(socketPath: socketPath)),
+      );
+      try {
+        final cancelled = client.sendRequest(
+          'tools/call',
+          params: {'name': 'vm_list', 'arguments': {}},
+        );
+        await received.future.timeout(const Duration(seconds: 2));
+        client.notify(
+          'notifications/cancelled',
+          params: {'requestId': cancelled},
+        );
+        await peerClosed.future.timeout(const Duration(seconds: 2));
+        final next = client.sendRequest('server/discover');
+        final reply = await client.receive();
+        expect(reply['id'], next);
+        expect(reply['result']['resultType'], 'complete');
+        final tools = await client.request('tools/list');
+        expect(tools['result']['tools'], hasLength(16));
+      } finally {
+        for (final socket in sockets) {
+          socket.destroy();
+        }
+        await client.close();
+        await listener.close();
+        await subscription.cancel();
+      }
+    },
+  );
+  test(
+    'input EOF releases pending HTTP instead of waiting for its deadline',
+    () async {
+      final socketPath = '${root.path}/eof.sock';
+      final listener = await ServerSocket.bind(
+        InternetAddress(socketPath, type: InternetAddressType.unix),
+        0,
+      );
+      final sockets = <Socket>[];
+      final received = Completer<void>();
+      final peerClosed = Completer<void>();
+      final subscription = listener.listen((socket) {
+        sockets.add(socket);
+        socket.listen(
+          (bytes) {
+            if (!received.isCompleted) received.complete();
+          },
+          onDone: () {
+            if (!peerClosed.isCompleted) peerClosed.complete();
+          },
+        );
+      });
+      final client = _McpClient(
+        GaoVmMcpServer(api: GaoVmApiClient(socketPath: socketPath)),
+      );
+      try {
+        client.sendRequest(
+          'tools/call',
+          params: {'name': 'vm_list', 'arguments': {}},
+        );
+        await received.future.timeout(const Duration(seconds: 2));
+        await client.finishInput();
+        await peerClosed.future.timeout(const Duration(seconds: 2));
+        await client.finished.timeout(const Duration(seconds: 2));
+      } finally {
+        for (final socket in sockets) {
+          socket.destroy();
+        }
+        await client.close();
+        await listener.close();
+        await subscription.cancel();
+      }
+    },
+  );
+  test('invalid UTF-8 is an isolated framing error', () async {
+    final reply = await mcp.rawBytes([0xff, 10]);
+    expect(reply['error']['code'], -32700);
+    expect(reply['id'], isNull);
+    final next = await mcp.request('server/discover');
+    expect(next['result']['resultType'], 'complete');
+  });
+  test(
+    'oversized framing is bounded and recovers at the next newline',
+    () async {
+      final reply = await mcp.rawBytes(List<int>.filled(1024 * 1024 + 1, 97));
+      expect(reply['error']['code'], -32600);
+      expect(reply['error']['message'], contains('1 MiB'));
+      mcp.sendBytes(utf8.encode('discarded suffix\n'));
+      final next = await mcp.request('server/discover');
+      expect(next['result']['resultType'], 'complete');
+    },
+  );
+
+  test(
+    'an unterminated EOF frame is rejected before reaching the API',
+    () async {
+      final calls = <String>[];
+      await _withHttpMcp(
+        root,
+        (request) async {
+          calls.add(request.uri.path);
+          request.response.headers.contentType = ContentType.json;
+          request.response.write('{"items":[],"next_cursor":null}');
+          await request.response.close();
+        },
+        (client) async {
+          final reply = client.receive();
+          client.sendBytes(
+            utf8.encode(
+              jsonEncode({
+                'jsonrpc': '2.0',
+                'id': 'partial',
+                'method': 'tools/call',
+                'params': {
+                  '_meta': {
+                    'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+                    'io.modelcontextprotocol/clientCapabilities': {},
+                  },
+                  'name': 'vm_list',
+                  'arguments': {},
+                },
+              }),
+            ),
+          );
+          await client.finishInput();
+          expect((await reply)['error']['code'], -32700);
+          await client.finished;
+          expect(calls, isEmpty);
+        },
+      );
+    },
+  );
+  test('serve waits for asynchronous protocol output to drain', () async {
+    final input = StreamController<List<int>>();
+    final started = Completer<void>();
+    final release = Completer<void>();
+    final written = <Map>[];
+    final serving =
+        GaoVmMcpServer(api: GaoVmApiClient(socketPath: api.socketPath)).serve(
+          input.stream,
+          (message) async {
+            started.complete();
+            await release.future;
+            written.add(jsonDecode(message) as Map);
+          },
+        );
+    try {
+      input.add(
+        utf8.encode(
+          '${jsonEncode({
+            'jsonrpc': '2.0',
+            'id': 'drain-1',
+            'method': 'server/discover',
+            'params': {
+              '_meta': {'io.modelcontextprotocol/protocolVersion': '2026-07-28', 'io.modelcontextprotocol/clientCapabilities': {}},
+            },
+          })}\n',
+        ),
+      );
+      await started.future.timeout(const Duration(seconds: 2));
+      await input.close();
+      await expectLater(
+        serving.timeout(const Duration(milliseconds: 30)),
+        throwsA(isA<TimeoutException>()),
+      );
+      release.complete();
+      await serving;
+      expect(written.single['id'], 'drain-1');
+    } finally {
+      if (!release.isCompleted) release.complete();
+      await input.close();
+      await serving;
+    }
+  });
+  test(
+    'failed protocol output terminates serve even while input stays open',
+    () async {
+      final input = StreamController<List<int>>();
+      final serving = GaoVmMcpServer(
+        api: GaoVmApiClient(socketPath: api.socketPath),
+      ).serve(input.stream, (_) async => throw StateError('closed output'));
+      final failed = expectLater(
+        serving,
+        throwsA(
+          isA<StateError>().having(
+            (error) => error.message,
+            'message',
+            'closed output',
+          ),
+        ),
+      );
+      try {
+        input.add(
+          utf8.encode(
+            '${jsonEncode({
+              'jsonrpc': '2.0',
+              'id': 'broken-output',
+              'method': 'server/discover',
+              'params': {
+                '_meta': {'io.modelcontextprotocol/protocolVersion': '2026-07-28', 'io.modelcontextprotocol/clientCapabilities': {}},
+              },
+            })}\n',
+          ),
+        );
+        await failed.timeout(const Duration(seconds: 2));
+      } finally {
+        await input.close();
+        await serving.catchError((Object _) {});
+      }
+    },
+  );
 }
 
 Future<void> _withHttpMcp(
@@ -442,29 +795,63 @@ final class _McpClient {
     String method, {
     Map<String, Object?> params = const {},
   }) async {
-    return raw(
-      '${jsonEncode({
-        'jsonrpc': '2.0',
-        'id': ++_id,
-        'method': method,
-        'params': {
-          '_meta': {'io.modelcontextprotocol/protocolVersion': '2026-07-28', 'io.modelcontextprotocol/clientCapabilities': {}},
-          ...params,
-        },
-      })}\n',
-    );
+    sendRequest(method, params: params);
+    return receive();
   }
+
+  int sendRequest(String method, {Map<String, Object?> params = const {}}) {
+    final id = ++_id;
+    _input.add(
+      utf8.encode(
+        '${jsonEncode({
+          'jsonrpc': '2.0',
+          'id': id,
+          'method': method,
+          'params': {
+            '_meta': {'io.modelcontextprotocol/protocolVersion': '2026-07-28', 'io.modelcontextprotocol/clientCapabilities': {}},
+            ...params,
+          },
+        })}\n',
+      ),
+    );
+    return id;
+  }
+
+  Future<Map<String, dynamic>> legacyRequest(
+    String method, {
+    Map<String, Object?> params = const {},
+  }) => raw(
+    '${jsonEncode({'jsonrpc': '2.0', 'id': ++_id, 'method': method, 'params': params})}\n',
+  );
 
   Future<Map<String, dynamic>> raw(String line) async {
     _input.add(utf8.encode(line));
-    if (!await _replies.moveNext().timeout(const Duration(seconds: 5))) {
+    return receive();
+  }
+
+  Future<Map<String, dynamic>> rawBytes(List<int> bytes) {
+    _input.add(bytes);
+    return receive();
+  }
+
+  void sendBytes(List<int> bytes) => _input.add(bytes);
+
+  Future<Map<String, dynamic>> receive({
+    Duration timeout = const Duration(seconds: 5),
+  }) async {
+    if (!await _replies.moveNext().timeout(timeout)) {
       throw StateError('MCP ended without replying');
     }
     return _replies.current;
   }
 
-  void notify(String method) => _input.add(
-    utf8.encode('${jsonEncode({'jsonrpc': '2.0', 'method': method})}\n'),
+  void notify(
+    String method, {
+    Map<String, Object?> params = const {},
+  }) => _input.add(
+    utf8.encode(
+      '${jsonEncode({'jsonrpc': '2.0', 'method': method, if (params.isNotEmpty) 'params': params})}\n',
+    ),
   );
 
   Future<void> close() async {
@@ -473,6 +860,9 @@ final class _McpClient {
     await _serving;
     await _output.close();
   }
+
+  Future<void> finishInput() => _input.close();
+  Future<void> get finished => _serving;
 }
 
 VmSpec _spec({ImageId? kernel}) => VmSpec(
