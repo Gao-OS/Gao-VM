@@ -2,7 +2,8 @@
 
 The Flutter client for `docs/DEVELOPMENT_PLAN.md` B1.2. This implements initial
 VM catalog/detail, lifecycle, linked-Operation, durable history, cancellation,
-resumable-event, image-catalog, host-status, and confirmed VM-deletion slices,
+resumable-event, image-catalog, host-status, schema-validated VM create/edit,
+and confirmed VM-deletion slices,
 not complete Beta acceptance.
 History advances PRD UI-005/UI-007 and presents the public OP-003/OP-008 fields;
 it does not prove native or cross-client Beta gates.
@@ -17,6 +18,8 @@ and API-008 structured errors. It advances UI-007 without treating host reports
 as VM or guest readiness.
 Deletion advances UI-002/UI-007 through the existing VM-007/VM-008 and
 API-005/API-006 contracts. It does not prove native managed-file cleanup.
+Create/edit advances UI-002/UI-007 using the existing VM-002/VM-005 and
+API-005/API-006/API-007 contracts, not native provisioning or applied-spec proof.
 
 ## Run and check
 
@@ -63,6 +66,9 @@ socket choice, not proof of daemon health; a failed read is not an empty catalog
   `GET /v1/system/capabilities`, and `GET /v1/system/doctor`.
 - Confirmed VM deletion uses only `DELETE /v1/vms/{vm_id}` and correlated public
   Operation reads, without direct filesystem or driver access.
+- VM create/edit uses public `POST /v1/vms` and `PATCH /v1/vms/{vm_id}` with
+  typed request inputs, idempotency keys, and the edit's fresh strong ETag.
+  PATCH uses `application/merge-patch+json`; server-owned metadata is not input.
 - Event subscriptions use only public `GET /v1/events`, not a driver connection
   or direct SQLite/filesystem access. The public API contract is unchanged.
 - Operation history is independent of UI-submitted actions and VM selection.
@@ -159,11 +165,17 @@ completion, atomic acknowledgement/Operation rejection, stable original request
 correlation, structured failures, independent VM/socket scopes, late replies,
 explicit catalog reload, new confirmed keys after terminal failure, and actual
 submission/read EOF on navigation, reconnect, and close.
+Create/edit coverage adds closed input validation, fresh-revision admission,
+merge-patch media type, unknown-outcome replay of identical request bytes,
+atomic acknowledgement/Operation rejection, explicit resource reload, and actual
+submission EOF when navigating away. These checks use the real shared HTTP client
+against Unix-socket fixtures; they are not installed-daemon acceptance.
 `flutter test` renders `build/ui-catalog-preview.png`,
 `build/ui-operations-preview.png`, `build/ui-cancellation-preview.png`,
 `build/ui-events-preview.png`, `build/ui-images-preview.png`,
-`build/ui-host-preview.png`, and `build/ui-vm-deletion-preview.png` with bundled
-fonts for visual inspection.
+`build/ui-host-preview.png`, `build/ui-vm-deletion-preview.png`,
+`build/ui-vm-write-draft-preview.png`, and `build/ui-vm-write-preview.png` with
+bundled fonts for visual inspection.
 These previews use test HTTP servers, not running VMs or a native sandbox probe.
 
 The test listener is explicitly closed separately from `HttpServer.listenOn`.
@@ -175,6 +187,38 @@ change production timeouts or replace the actual socket-disconnect assertion.
 Deletion tests also flush superseded rendered selections and use condition-based
 pumping while independent reads are pending, rather than settling their loading
 animations against a virtual clock. Their pointer hit-test warnings are fatal.
+
+## VM create and edit
+
+Create VM opens a complete JSON request editor. Supply a name, optional labels,
+and the full desired spec using public image IDs. Edit VM first fetches the exact
+selected VM and requires a strong ETag matching its current revision plus a valid
+response request ID. The editor starts with current desired metadata/spec and
+accepts partial metadata/spec updates. Omitted fields, explicit nullable
+`guest_profile`, empty labels, and `false` remain distinct. Invalid JSON or typed
+input stays in the editor without submitting; Discard draft sends no command.
+
+Each submitted draft owns an immutable body, socket, target, revision precondition
+when editing, and idempotency key. Only a complete validated `202` acknowledgement
+becomes an accepted receipt. Acceptance, including `succeeded`, neither updates
+the displayed VM nor proves provisioning or applied configuration. Restart-required
+spec changes remain daemon-owned staging decisions; the UI does not automatically
+start or restart a VM, copy images, or write managed files.
+
+Lost or invalid replies remain unknown. Replay VM write resends the same intent,
+including its original ETag, without silently rebasing or allocating a new key.
+Refresh write Operation explicitly reads and validates the receipt's action, target,
+key, and original request correlation. Failed reads retain the last validated
+Operation. Only a verified terminal Operation enables Reload written VM catalog,
+which explicitly reads current resources rather than inferring them from receipts.
+
+Write intents are local to this application's lifetime, scoped by socket and VM,
+not a second durable repository. Leaving, reconnecting, or closing releases local
+submission/read sockets without cancelling durable Operations or stopping VMs.
+After reopening, use durable Operation history to reconcile uncertain outcomes.
+An accepted or unknown edit prevents another fresh-key edit for that target until
+a terminal Operation is verified; a structured rejection permits a new explicit
+edit with a fresh resource read and revision precondition.
 
 ## VM deletion
 
@@ -307,7 +351,7 @@ by the server.
 
 ## Still required by the full plan
 
-- Image import/delete and VM create/edit; independent display control.
+- Image import/delete and independent display control.
 - Operation filters beyond cursor paging.
 - Driver/serial log contents and tailing, TestRun/artifacts.
 - Production capabilities/quota policy and native host-diagnostic evidence.

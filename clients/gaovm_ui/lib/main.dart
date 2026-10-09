@@ -14,6 +14,7 @@ part 'event_journal.dart';
 part 'image_catalog.dart';
 part 'host_status.dart';
 part 'vm_deletion.dart';
+part 'vm_writes.dart';
 
 void main() {
   LicenseRegistry.addLicense(() async* {
@@ -178,6 +179,7 @@ class _ConsoleState extends State<_Console> {
   final _actions = <(String, VmId), _VmAction>{};
   final _cancellations = _OperationCancellations();
   final _deletions = _VmDeletions();
+  final _writes = _VmWrites();
 
   bool _canSubmit(_VmAction? action, _VmVerb verb) =>
       action?.sending != true &&
@@ -563,9 +565,19 @@ class _ConsoleState extends State<_Console> {
         style: TextStyle(fontSize: 11, letterSpacing: 1.8, color: _muted),
       ),
       const SizedBox(height: 12),
-      Text(
-        vm.metadata.name,
-        style: const TextStyle(fontFamily: 'InstrumentSerif', fontSize: 34),
+      Row(
+        children: [
+          Expanded(
+            child: Text(
+              vm.metadata.name,
+              style: const TextStyle(
+                fontFamily: 'InstrumentSerif',
+                fontSize: 34,
+              ),
+            ),
+          ),
+          _editButton(vm),
+        ],
       ),
       const SizedBox(height: 8),
       SelectableText(
@@ -788,12 +800,112 @@ class _ConsoleState extends State<_Console> {
     child: Text(label, style: const TextStyle(fontSize: 11)),
   );
 
+  Widget _editButton(VirtualMachine vm) => ListenableBuilder(
+    listenable: _writes,
+    builder: (_, _) => TextButton(
+      style: TextButton.styleFrom(minimumSize: const Size(0, 36)),
+      onPressed: _client != null && _writes.canEdit(_client!, vm.metadata.id)
+          ? () => _editVm(vm)
+          : null,
+      child: const Text('Edit VM', style: TextStyle(fontSize: 11)),
+    ),
+  );
+
+  Future<void> _editVm(VirtualMachine selected) async {
+    final client = _client;
+    if (client == null || !_writes.canEdit(client, selected.metadata.id)) {
+      return;
+    }
+    _detailRequest?.cancel();
+    final pending = _detailRequest = ApiRequestCancellation();
+    setState(() {
+      _selected = null;
+      _detailError = null;
+    });
+    try {
+      final response = await client.request(
+        'GET',
+        '/v1/vms/${selected.metadata.id.value}',
+        cancellation: pending,
+      );
+      final vm = VirtualMachine.fromJson(response.body.toJson());
+      if (response.status != 200 ||
+          response.requestId == null ||
+          vm.metadata.id != selected.metadata.id ||
+          response.etag != '"${vm.metadata.revision}"') {
+        throw const ApiProtocolException(
+          'Editing requires a matching VM revision and strong ETag.',
+        );
+      }
+      RequestId(response.requestId!);
+      if (!mounted || pending.isCancelled) return;
+      setState(() => _selected = vm);
+      final input = await showDialog<VmPatchRequest>(
+        context: context,
+        builder: (_) => _VmWriteEditor<VmPatchRequest>(
+          title: 'Edit VM configuration',
+          explanation:
+              '${vm.metadata.name}\n${vm.metadata.id.value}\nRestart-required fields are staged, not immediately applied to a running VM.',
+          submit: 'Submit update',
+          initial: const JsonEncoder.withIndent('  ').convert({
+            'metadata': {
+              'name': vm.metadata.name,
+              'labels': vm.metadata.labels,
+            },
+            'spec': vm.spec.toJson(),
+          }),
+          parse: (text) => VmPatchRequest.fromJson(jsonDecode(text)),
+          revision: response.etag,
+        ),
+      );
+      if (mounted &&
+          !pending.isCancelled &&
+          input != null &&
+          identical(_client, client) &&
+          _selectedId == vm.metadata.id &&
+          _view == _ConsoleView.vms) {
+        await _writes.patch(client, vm, input, response.etag!);
+      }
+    } on ApiRequestCancelledException {
+      // Local read cancellation never submits or cancels a VM write.
+    } catch (error) {
+      if (mounted && !pending.isCancelled) setState(() => _detailError = error);
+    }
+  }
+
+  Future<void> _createVm() async {
+    final client = _client;
+    if (client == null) return;
+    final input = await showDialog<VmCreateRequest>(
+      context: context,
+      builder: (_) => _VmWriteEditor<VmCreateRequest>(
+        title: 'Create VM',
+        explanation: 'Enter a complete desired spec using public image IDs. Host admission and managed-disk provisioning are daemon decisions.',
+        submit: 'Submit create',
+        initial: const JsonEncoder.withIndent('  ').convert({
+          'api_version': vmApiVersion,
+          'kind': vmKind,
+          'metadata': {'name': '', 'labels': <String, String>{}},
+          'spec': {},
+        }),
+        parse: (text) => VmCreateRequest.fromJson(jsonDecode(text)),
+      ),
+    );
+    if (mounted &&
+        input != null &&
+        identical(_client, client) &&
+        _view == _ConsoleView.vms) {
+      await _writes.create(client, input);
+    }
+  }
+
   @override
   void dispose() {
     _catalogRequest?.cancel();
     _detailRequest?.cancel();
     _cancellations.dispose();
     _deletions.dispose();
+    _writes.dispose();
     for (final action in _actions.values) {
       action.request.cancel();
       action.observation?.cancel();
@@ -927,15 +1039,27 @@ class _ConsoleState extends State<_Console> {
                           ],
                         ),
                       ),
-                      Text(
-                        _client == null
-                            ? 'DISCONNECTED'
-                            : _view != _ConsoleView.vms ||
-                                  _loading ||
-                                  _error != null
-                            ? 'API CONFIGURED'
-                            : '${_vms.length} loaded',
-                        style: const TextStyle(fontSize: 11, color: _muted),
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.end,
+                        children: [
+                          Text(
+                            _client == null
+                                ? 'DISCONNECTED'
+                                : _view != _ConsoleView.vms ||
+                                      _loading ||
+                                      _error != null
+                                ? 'API CONFIGURED'
+                                : '${_vms.length} loaded',
+                            style: const TextStyle(fontSize: 11, color: _muted),
+                          ),
+                          if (_view == _ConsoleView.vms) ...[
+                            const SizedBox(height: 12),
+                            OutlinedButton(
+                              onPressed: _client == null ? null : _createVm,
+                              child: const Text('Create VM'),
+                            ),
+                          ],
+                        ],
                       ),
                     ],
                   ),
@@ -1039,6 +1163,14 @@ class _ConsoleState extends State<_Console> {
                                       ),
                                     ),
                                     const SizedBox(height: 12),
+                                    if (_client != null)
+                                      _VmWriteShelf(
+                                        key: ValueKey(('vm-writes', _client)),
+                                        writes: _writes,
+                                        client: _client!,
+                                        onReloadCatalog: () =>
+                                            _connect(client: _client),
+                                      ),
                                     if (_client != null)
                                       _VmDeletionShelf(
                                         key: ObjectKey(_client),
