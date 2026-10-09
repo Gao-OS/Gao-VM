@@ -19,9 +19,10 @@ newline-delimited JSON protocol messages; usage and diagnostics go to stderr.
 ## Implemented boundary
 
 `GaoVmMcpServer.serve` reads newline-delimited UTF-8 JSON requests and emits one
-serialized JSON response per callback. It awaits asynchronous output callbacks;
-an output error terminates the server and releases pending API connections. The
-standalone entrypoint adds the newline and reserves stdout for protocol messages.
+serialized JSON response per callback. Output callbacks are serialized and must
+not block the isolate; their futures acknowledge drain. The standalone entrypoint
+uses Dart's [non-blocking stdout sink](https://api.dart.dev/dart-io/Stdout/nonBlocking.html),
+adds the newline, and flushes each response before writing the next one.
 Input frames are limited to 1 MiB, invalid UTF-8 and oversized frames recover at
 the next newline, and an incomplete EOF frame is rejected without reaching the API.
 
@@ -46,6 +47,29 @@ cancellation. `notifications/cancelled` releases the matching local HTTP request
 and suppresses its late response. Input EOF releases outstanding HTTP requests
 and drains pending output before returning. Local cancellation does not call the
 durable Operation cancellation endpoint.
+
+## Backpressure and shutdown
+
+At most 64 tool requests can await API/output completion. Additional valid tool
+calls return the retryable structured `MCP_SERVER_BUSY` error before reaching the
+API. Discovery and cancellation still work while those tool slots are occupied.
+At 128 total pending requests, input consumption pauses until a slot is released,
+bounding the response queue as well as HTTP concurrency.
+
+Each output write has a five-second deadline. EOF cancels unfinished HTTP work,
+then grants one five-second deadline to drain completed responses; progress does
+not restart this shutdown budget for every queued response. Explicit cancellation
+also suppresses responses that are queued but not yet written.
+
+An output error or expired deadline fails the transport and releases pending API
+connections. The standalone process reports the failure on stderr and exits with
+code 1, including when a native stdout write remains stalled. This is not graceful
+success: normal EOF still drains output and exits naturally with code 0. A failed
+or unread diagnostics pipe cannot retain the failed process.
+
+None of these local limits cancels a durable Operation already accepted by the
+daemon. Retry mutations with the same idempotency key or query/cancel the Operation
+explicitly through another public client.
 
 Tool results retain the public JSON body as both `structuredContent` and serialized
 text, including resource/Operation IDs and API Problems. Request IDs, HTTP status,
@@ -75,15 +99,18 @@ mise exec dart@3.9 -- dart run tool/generate_contract.dart | cmp - lib/src/gener
 Tests use real HTTP Unix sockets. SQLite-backed handlers demonstrate catalog/get
 agreement with the CLI and a create retry shared between MCP and CLI returning
 the same durable acceptance. These checks do not prove VM provisioning or boot.
+Holding the response after real SQLite acceptance verifies that MCP cancellation
+and EOF preserve the Operation and its CLI idempotent replay.
 Owned, unhardened compiled-process fixtures check clean protocol stdout and
 natural EOF exit, including peer-observed closure of a pending HTTP connection.
+An unread-stdout fixture checks actual pipe backpressure, failed native exit and
+HTTP closure. A library-level check separately proves HTTP release without using
+process exit to close the connection.
 Fixture files are removed only after confirmed child exit. These checks do not
 prove production signing or installed-daemon integration.
 
 ## Remaining B1 work
 
-- Bounded in-flight dispatch, serialized output backpressure, and a stalled-output
-  shutdown policy; the current entrypoint writes to stdout and flushes at EOF.
 - Installed-daemon interoperability and broader native transport failure checks.
 - Service-level acceptance for every tool, full TestRun execution, and the
   CLI/MCP/UI cross-client Beta matrix.

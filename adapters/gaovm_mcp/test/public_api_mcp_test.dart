@@ -314,6 +314,127 @@ void main() {
     },
   );
 
+  for (final mode in ['cancellation', 'EOF']) {
+    test(
+      'local MCP $mode preserves an already accepted durable Operation',
+      () async {
+        final manifest = ImageManifest.create(
+          type: ImageType.linuxKernel,
+          objects: {
+            'payload': {
+              'digest': contentDigest('kernel fixture'),
+              'size_bytes': 1,
+            },
+          },
+        );
+        final kernel = Image(
+          id: ImageId.generate(),
+          digest: manifest.digest,
+          type: ImageType.linuxKernel,
+          architecture: Architecture.arm64,
+          manifest: JsonObjectValue.fromJson(manifest.toJson()),
+          createdAt: DateTime.now().toUtc(),
+        );
+        await ImageRepository(database).insert(kernel);
+        final body = {
+          'api_version': vmApiVersion,
+          'kind': vmKind,
+          'metadata': {'name': 'accepted before MCP $mode'},
+          'spec': _spec(kernel: kernel.id).toJson(),
+        };
+        final accepted = Completer<OperationAcceptance>();
+        final release = Completer<void>();
+        final paths = <String>[];
+        await _withHttpMcp(
+          root,
+          (request) async {
+            paths.add(request.uri.path);
+            final response = await GaoVmApiClient(socketPath: api.socketPath)
+                .request(
+                  request.method,
+                  request.uri.path,
+                  body: JsonObjectValue.fromJson(
+                    jsonDecode(await utf8.decoder.bind(request).join()),
+                  ),
+                  idempotencyKey: request.headers.value('idempotency-key'),
+                );
+            accepted.complete(
+              OperationAcceptance.fromJson(response.body.toJson()),
+            );
+            // Hold the reply after real SQLite acceptance, not before dispatch.
+            await release.future;
+          },
+          (client) async {
+            try {
+              final id = client.sendRequest(
+                'tools/call',
+                params: {
+                  'name': 'vm_create',
+                  'arguments': {
+                    'body': body,
+                    'idempotency_key': 'accepted-once',
+                  },
+                },
+              );
+              final operation = await accepted.future.timeout(
+                const Duration(seconds: 3),
+              );
+              expect(operation.state, OperationState.pending);
+              if (mode == 'cancellation') {
+                client.notify(
+                  'notifications/cancelled',
+                  params: {'requestId': id},
+                );
+                expect(
+                  (await client.request(
+                    'server/discover',
+                  ))['result']['resultType'],
+                  'complete',
+                );
+              } else {
+                await client.finishInput();
+                await client.finished.timeout(const Duration(seconds: 3));
+              }
+              final output = StringBuffer();
+              final error = StringBuffer();
+              expect(
+                await runCli(
+                  [
+                    '--socket-path',
+                    api.socketPath,
+                    'vm',
+                    'create',
+                    '--json',
+                    '--body-json',
+                    jsonEncode(body),
+                    '--idempotency-key',
+                    'accepted-once',
+                  ],
+                  output: output.writeln,
+                  error: error.writeln,
+                ),
+                0,
+                reason: error.toString(),
+              );
+              expect(jsonDecode(output.toString()), operation.toJson());
+              final status = await mcp.call('operation_get', {
+                'operation_id': operation.operationId.value,
+              });
+              expect(status['result']['structuredContent']['state'], 'pending');
+              expect(
+                status['result']['structuredContent']['resource_id'],
+                operation.resourceId.value,
+              );
+              expect(paths, ['/v1/vms']);
+            } finally {
+              release.complete();
+            }
+          },
+        );
+      },
+    );
+  }
+
   test('unknown and driver-passthrough tools are protocol errors', () async {
     for (final name in ['driver.exec', 'not_a_tool']) {
       final reply = await mcp.call(name);
@@ -600,6 +721,45 @@ void main() {
       }
     },
   );
+  test(
+    'tool saturation returns a retryable error without blocking discovery',
+    () async {
+      final full = Completer<void>();
+      final release = Completer<void>();
+      var calls = 0;
+      await _withHttpMcp(
+        root,
+        (request) async {
+          if (++calls == 64) full.complete();
+          await release.future;
+        },
+        (client) async {
+          try {
+            for (var i = 0; i < 64; i++) {
+              client.sendRequest('tools/call', params: {'name': 'vm_list'});
+            }
+            await full.future.timeout(const Duration(seconds: 3));
+            client.sendRequest('tools/call', params: {'name': 'vm_list'});
+            final busy = await client.receive(
+              timeout: const Duration(seconds: 2),
+            );
+            expect(busy['result']['isError'], isTrue);
+            expect(
+              busy['result']['structuredContent']['code'],
+              'MCP_SERVER_BUSY',
+            );
+            expect(busy['result']['structuredContent']['retryable'], isTrue);
+            expect(calls, 64);
+            final discovery = await client.request('server/discover');
+            expect(discovery['result']['resultType'], 'complete');
+          } finally {
+            release.complete();
+          }
+        },
+      );
+    },
+  );
+
   test('invalid UTF-8 is an isolated framing error', () async {
     final reply = await mcp.rawBytes([0xff, 10]);
     expect(reply['error']['code'], -32700);

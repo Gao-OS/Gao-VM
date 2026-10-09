@@ -11,6 +11,9 @@ import 'src/tool_bindings.dart';
 part 'src/stdio_framing.dart';
 
 final _toolContracts = jsonDecode(toolContractsJson) as Map<String, dynamic>;
+const _maximumTools = 64;
+const _maximumPending = 128;
+const _outputDeadline = Duration(seconds: 5);
 
 enum _LegacyPhase { disconnected, negotiated, ready }
 
@@ -27,9 +30,68 @@ final class GaoVmMcpServer {
     final session = _McpSession(api);
     final pending = <Future<void>>{};
     final cancellations = <Object, ApiRequestCancellation>{};
+    final awaitingOutput = <ApiRequestCancellation>{};
+    final tools = <ApiRequestCancellation>{};
+    Completer<void>? capacity;
+    Completer<void>? activeWrite;
     final failure = Completer<void>();
     void fail(Object error, StackTrace stack) {
-      if (!failure.isCompleted) failure.completeError(error, stack);
+      if (!failure.isCompleted) {
+        failure.completeError(error, stack);
+        if (activeWrite != null && !activeWrite!.isCompleted) {
+          activeWrite!.completeError(error, stack);
+        }
+      }
+    }
+
+    void finished(Future<void> task) {
+      pending.remove(task);
+      if (pending.length < _maximumPending && capacity != null) {
+        final available = capacity!;
+        capacity = null;
+        available.complete();
+      }
+    }
+
+    var writing = Future<void>.value();
+    Future<void> emit(String message, {ApiRequestCancellation? cancellation}) {
+      if (cancellation != null) awaitingOutput.add(cancellation);
+      final emitted = writing.then<void>((_) async {
+        if (!failure.isCompleted && cancellation?.isCancelled != true) {
+          final completed = Completer<void>();
+          activeWrite = completed;
+          unawaited(
+            Future<void>.sync(() => output(message)).then<void>(
+              (_) {
+                if (!completed.isCompleted) completed.complete();
+              },
+              onError: (Object error, StackTrace stack) {
+                if (!completed.isCompleted)
+                  completed.completeError(error, stack);
+              },
+            ),
+          );
+          final deadline = Timer(_outputDeadline, () {
+            if (!completed.isCompleted) {
+              completed.completeError(
+                TimeoutException(
+                  'Protocol output did not drain',
+                  _outputDeadline,
+                ),
+                StackTrace.current,
+              );
+            }
+          });
+          try {
+            await completed.future;
+          } finally {
+            deadline.cancel();
+            activeWrite = null;
+          }
+        }
+      });
+      writing = emitted.catchError(fail);
+      return emitted.whenComplete(() => awaitingOutput.remove(cancellation));
     }
 
     void dispatch(Object? decoded) {
@@ -38,39 +100,45 @@ final class GaoVmMcpServer {
       if (id != null && cancellations.containsKey(id)) {
         late Future<void> task;
         task = Future<void>.sync(
-          () => output(
+          () => emit(
             _rpcError(const {}, -32600, 'Duplicate in-flight request ID'),
           ),
-        ).catchError(fail).whenComplete(() => pending.remove(task));
+        ).catchError(fail).whenComplete(() => finished(task));
         pending.add(task);
         return;
       }
       final cancellation = ApiRequestCancellation();
       if (id != null) cancellations[id] = cancellation;
+      final tool =
+          id != null && decoded is Map && decoded['method'] == 'tools/call';
+      final busy = tool && tools.length >= _maximumTools;
+      if (tool && !busy) tools.add(cancellation);
       late Future<void> task;
       task = session
-          .respond(decoded, cancellation: cancellation)
+          .respond(decoded, cancellation: cancellation, busy: busy)
           .then<void>(
             (response) async {
               if (!cancellation.isCancelled && response != null)
-                await output(response);
+                await emit(response, cancellation: cancellation);
             },
             onError: (Object error, StackTrace stack) async {
               if (cancellation.isCancelled ||
                   error is ApiRequestCancelledException)
                 return;
-              await output(
+              await emit(
                 _rpcError(
                   decoded is Map ? decoded : const {},
                   -32603,
                   'Internal error',
                 ),
+                cancellation: cancellation,
               );
             },
           )
           .catchError(fail)
           .whenComplete(() {
-            pending.remove(task);
+            finished(task);
+            tools.remove(cancellation);
             if (id != null && identical(cancellations[id], cancellation)) {
               cancellations.remove(id);
             }
@@ -79,18 +147,26 @@ final class GaoVmMcpServer {
     }
 
     final frames = StreamIterator<_McpFrame>(_mcpFrames(input));
+    var ended = false;
     Future<void> read() async {
-      while (await frames.moveNext()) {
+      while (true) {
+        while (pending.length >= _maximumPending) {
+          // One waiter, rather than attaching new listeners to every long-lived
+          // request each time a short request releases a slot.
+          capacity ??= Completer<void>();
+          await capacity!.future;
+        }
+        if (!await frames.moveNext()) break;
         final frame = frames.current;
         if (frame.code != null) {
-          await output(_rpcError(const {}, frame.code!, frame.detail!));
+          await emit(_rpcError(const {}, frame.code!, frame.detail!));
           continue;
         }
         Object? decoded;
         try {
           decoded = jsonDecode(frame.line!);
         } on FormatException {
-          await output(_rpcError(const {}, -32700, 'Parse error'));
+          await emit(_rpcError(const {}, -32700, 'Parse error'));
           continue;
         }
         if (decoded is Map &&
@@ -99,22 +175,48 @@ final class GaoVmMcpServer {
             decoded['method'] == 'notifications/cancelled') {
           final params = decoded['params'];
           final id = params is Map ? params['requestId'] : null;
-          if (id is int || id is String) cancellations.remove(id)?.cancel();
+          if (id is int || id is String) {
+            final cancellation = cancellations.remove(id);
+            if (cancellation != null) {
+              tools.remove(cancellation);
+              cancellation.cancel();
+            }
+          }
           continue;
         }
         dispatch(decoded);
       }
+      ended = true;
     }
 
     try {
       await Future.any([read(), failure.future]);
     } finally {
-      await frames.cancel();
       for (final cancellation in cancellations.values.toList(growable: false)) {
-        cancellation.cancel();
+        if (!ended ||
+            failure.isCompleted ||
+            !awaitingOutput.contains(cancellation)) {
+          cancellation.cancel();
+        }
       }
       cancellations.clear();
-      await Future.wait(pending);
+      await frames.cancel();
+      final deadline = ended
+          ? Timer(_outputDeadline, () {
+              fail(
+                TimeoutException(
+                  'Protocol output did not drain before shutdown deadline',
+                  _outputDeadline,
+                ),
+                StackTrace.current,
+              );
+            })
+          : null;
+      try {
+        await Future.wait(pending);
+      } finally {
+        deadline?.cancel();
+      }
     }
     if (failure.isCompleted) await failure.future;
   }
@@ -128,6 +230,7 @@ final class _McpSession {
   Future<String?> respond(
     Object? decoded, {
     ApiRequestCancellation? cancellation,
+    bool busy = false,
   }) async {
     if (decoded is! Map<String, dynamic>) {
       return _rpcError(const {}, -32600, 'Invalid request');
@@ -260,12 +363,20 @@ final class _McpSession {
       arguments,
       _toolContracts[binding.name]['inputSchema'] as Map,
     );
-    if (invalid != null) {
-      final problem = {
-        'code': 'MCP_INVALID_ARGUMENT',
-        'detail': invalid,
-        'retryable': false,
-      };
+    if (invalid != null || busy) {
+      final problem = invalid != null
+          ? {
+              'code': 'MCP_INVALID_ARGUMENT',
+              'detail': invalid,
+              'retryable': false,
+            }
+          : {
+              'code': 'MCP_SERVER_BUSY',
+              'detail':
+                  'At most $_maximumTools tool requests can be in flight. Reuse the '
+                  'idempotency_key when retrying a mutation.',
+              'retryable': true,
+            };
       return jsonEncode({
         'jsonrpc': '2.0',
         'id': request['id'],
