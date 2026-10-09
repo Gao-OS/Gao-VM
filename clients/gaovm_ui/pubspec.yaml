@@ -1,0 +1,33 @@
+name: gaovm_ui
+description: GaoVM desktop console for the public HTTP over Unix socket API.
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.13.5
+
+dependencies:
+  flutter:
+    sdk: flutter
+  gaovm_api_client:
+    path: ../../libs/gaovm_api_client
+  gaovm_models:
+    path: ../../libs/gaovm_models
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/fonts/InstrumentSerif-OFL.txt
+    - assets/fonts/JetBrainsMono-OFL.txt
+  fonts:
+    - family: InstrumentSerif
+      fonts:
+        - asset: assets/fonts/InstrumentSerif-Regular.ttf
+    - family: JetBrainsMono
+      fonts:
+        - asset: assets/fonts/JetBrainsMono-Regular.ttf
