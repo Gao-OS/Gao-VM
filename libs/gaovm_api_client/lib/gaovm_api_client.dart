@@ -50,6 +50,7 @@ final class GaoVmApiClient {
     );
   }
 
+  /// [cancellation] releases the local connection, not a durable Operation.
   Future<ApiResponse> request(
     String method,
     String path, {
@@ -57,6 +58,7 @@ final class GaoVmApiClient {
     JsonObjectValue? body,
     String? idempotencyKey,
     String? ifMatch,
+    ApiRequestCancellation? cancellation,
     Duration timeout = const Duration(seconds: 30),
   }) async {
     if (!path.startsWith('/v1/') || timeout <= Duration.zero) {
@@ -64,9 +66,19 @@ final class GaoVmApiClient {
         'a public /v1 path and positive timeout are required',
       );
     }
+    if (cancellation?.isCancelled == true) {
+      throw const ApiRequestCancelledException();
+    }
     final client = _newHttpClient(socketPath, timeout);
+    final cancelled = cancellation == null ? null : Completer<ApiResponse>();
+    final unsubscribe = cancellation?._subscribe(() {
+      if (!cancelled!.isCompleted) {
+        cancelled.completeError(const ApiRequestCancelledException());
+      }
+      client.close(force: true);
+    });
     try {
-      return await _send(
+      final response = _send(
         client,
         method,
         path,
@@ -75,11 +87,15 @@ final class GaoVmApiClient {
         idempotencyKey,
         ifMatch,
       ).timeout(timeout, onTimeout: () => throw ApiTimeoutException(timeout));
+      return await (cancelled == null
+          ? response
+          : Future.any([response, cancelled.future]));
     } on SocketException catch (error) {
       throw ApiTransportException(error.toString());
     } on HttpException catch (error) {
       throw ApiTransportException(error.toString());
     } finally {
+      unsubscribe?.call();
       client.close(force: true);
     }
   }
@@ -126,6 +142,40 @@ final class GaoVmApiClient {
     );
     return ApiResponse(response.statusCode, json, Map.unmodifiable(headers));
   }
+}
+
+/// One-way local cancellation; completed requests detach their listeners.
+final class ApiRequestCancellation {
+  var _cancelled = false;
+  final _listeners = <void Function()>{};
+
+  bool get isCancelled => _cancelled;
+
+  void cancel() {
+    if (_cancelled) return;
+    _cancelled = true;
+    final listeners = _listeners.toList(growable: false);
+    _listeners.clear();
+    for (final listener in listeners) {
+      listener();
+    }
+  }
+
+  void Function() _subscribe(void Function() listener) {
+    if (_cancelled) {
+      listener();
+    } else {
+      _listeners.add(listener);
+    }
+    return () => _listeners.remove(listener);
+  }
+}
+
+final class ApiRequestCancelledException implements Exception {
+  const ApiRequestCancelledException();
+
+  @override
+  String toString() => 'public API request was cancelled';
 }
 
 HttpClient _newHttpClient(String socketPath, Duration timeout) => HttpClient()
