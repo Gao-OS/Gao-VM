@@ -132,8 +132,17 @@ final class GaoVmApiClient {
       request.add(utf8.encode(jsonEncode(body.toJson())));
     }
     final response = await request.close();
-    final json = await _readPublicJson(response);
-    if (response.statusCode < 200 || response.statusCode >= 300) {
+    final healthProbe = method == 'GET'
+        ? switch (path) {
+            '/v1/system/live' => SystemHealthProbe.live,
+            '/v1/system/ready' => SystemHealthProbe.ready,
+            _ => null,
+          }
+        : null;
+    final json = await _readPublicJson(response, healthProbe: healthProbe);
+    if ((response.statusCode < 200 || response.statusCode >= 300) &&
+        !(response.statusCode == HttpStatus.serviceUnavailable &&
+            healthProbe != null)) {
       throw const ApiProtocolException('unexpected HTTP response status');
     }
     final headers = <String, String>{};
@@ -186,7 +195,10 @@ HttpClient _newHttpClient(String socketPath, Duration timeout) => HttpClient()
     0,
   );
 
-Future<JsonObjectValue> _readPublicJson(HttpClientResponse response) async {
+Future<JsonObjectValue> _readPublicJson(
+  HttpClientResponse response, {
+  SystemHealthProbe? healthProbe,
+}) async {
   final bytes = BytesBuilder(copy: false);
   await for (final chunk in response) {
     if (bytes.length + chunk.length > 1024 * 1024)
@@ -200,6 +212,15 @@ Future<JsonObjectValue> _readPublicJson(HttpClientResponse response) async {
     final json = JsonObjectValue.fromJson(
       jsonDecode(utf8.decode(bytes.takeBytes())),
     );
+    if (response.statusCode == HttpStatus.serviceUnavailable &&
+        healthProbe != null &&
+        type == 'application/json') {
+      final health = SystemHealth.fromJson(json.toJson(), probe: healthProbe);
+      if (health.healthy) {
+        throw const ApiProtocolException('unavailable health must be false');
+      }
+      return json;
+    }
     if (response.statusCode >= 400) {
       final problem = Problem.fromJson(json.toJson());
       if (problem.status != response.statusCode)

@@ -7,6 +7,144 @@ import 'package:gaovm_models/gaovm_models.dart';
 import 'package:test/test.dart';
 
 void main() {
+  test('an unavailable readiness snapshot remains a health response', () async {
+    final requestId = RequestId.generate();
+    await _serve(
+      (request) async {
+        expect(request.method, 'GET');
+        expect(request.uri.path, '/v1/system/ready');
+        request.response.statusCode = HttpStatus.serviceUnavailable;
+        request.response.headers.contentType = ContentType.json;
+        request.response.headers.set('X-Request-ID', requestId.value);
+        request.response.write(
+          jsonEncode({
+            'ready': false,
+            'checks': {'database': false, 'runtime': 'not ready'},
+          }),
+        );
+        await request.response.close();
+      },
+      (client) async {
+        final result = await client.request('GET', '/v1/system/ready');
+        expect(result.status, HttpStatus.serviceUnavailable);
+        expect(result.requestId, requestId.value);
+        expect(result.body.toJson(), {
+          'ready': false,
+          'checks': {'database': false, 'runtime': 'not ready'},
+        });
+      },
+    );
+  });
+
+  test('unavailable liveness permits omitted checks', () async {
+    await _serve(
+      (request) async {
+        request.response.statusCode = 503;
+        request.response.headers.contentType = ContentType.json;
+        request.response.write('{"live":false}');
+        await request.response.close();
+      },
+      (client) async {
+        final result = await client.request('GET', '/v1/system/live');
+        expect(result.status, 503);
+        expect(result.body.toJson(), {'live': false});
+      },
+    );
+  });
+
+  for (final probe in ['live', 'ready']) {
+    for (final invalid in ['true', 'missing', 'flag type', 'checks', 'extra']) {
+      test('unavailable $probe rejects $invalid health data', () async {
+        final body = <String, Object?>{probe: false, 'checks': {}};
+        switch (invalid) {
+          case 'true':
+            body[probe] = true;
+          case 'missing':
+            body.remove(probe);
+          case 'flag type':
+            body[probe] = 'false';
+          case 'checks':
+            body['checks'] = [];
+          case 'extra':
+            body['state'] = 'running';
+        }
+        await _serve(
+          (request) async {
+            request.response.statusCode = 503;
+            request.response.headers.contentType = ContentType.json;
+            request.response.write(jsonEncode(body));
+            await request.response.close();
+          },
+          (client) async {
+            await expectLater(
+              client.request('GET', '/v1/system/$probe'),
+              throwsA(isA<ApiProtocolException>()),
+            );
+          },
+        );
+      });
+    }
+  }
+
+  for (final request in [
+    ('POST', '/v1/system/ready'),
+    ('GET', '/v1/system/ready/'),
+    ('GET', '/v1/vms'),
+  ]) {
+    test('health 503 handling is not applied to $request', () async {
+      await _serve(
+        (request) async {
+          request.response.statusCode = 503;
+          request.response.headers.contentType = ContentType.json;
+          request.response.write('{"ready":false,"checks":{}}');
+          await request.response.close();
+        },
+        (client) async {
+          await expectLater(
+            client.request(request.$1, request.$2),
+            throwsA(isA<ApiProtocolException>()),
+          );
+        },
+      );
+    });
+  }
+
+  test('a health endpoint still preserves a structured 503 Problem', () async {
+    final problem = Problem(
+      type: Uri.parse('https://gaovm.dev/problems/internal-error'),
+      title: 'Dependencies unavailable',
+      status: 503,
+      code: ErrorCode.internalError,
+      detail: 'Cannot perform the health check.',
+      requestId: RequestId.generate(),
+      retryable: true,
+      details: JsonObjectValue.empty,
+    );
+    await _serve(
+      (request) async {
+        request.response.statusCode = 503;
+        request.response.headers.contentType = ContentType(
+          'application',
+          'problem+json',
+        );
+        request.response.write(jsonEncode(problem.toJson()));
+        await request.response.close();
+      },
+      (client) async {
+        await expectLater(
+          client.request('GET', '/v1/system/ready'),
+          throwsA(
+            isA<ApiProblemException>().having(
+              (error) => error.problem,
+              'problem',
+              problem,
+            ),
+          ),
+        );
+      },
+    );
+  });
+
   test('HTTP/1.1 UDS JSON preserves request ID and ETag', () async {
     final requestId = RequestId.generate();
     await _serve(
