@@ -2,7 +2,8 @@
 
 The Flutter client for `docs/DEVELOPMENT_PLAN.md` B1.2. This implements initial
 VM catalog/detail, lifecycle, linked-Operation, durable history, cancellation,
-resumable-event, image-catalog, and host-status slices, not complete Beta acceptance.
+resumable-event, image-catalog, host-status, and confirmed VM-deletion slices,
+not complete Beta acceptance.
 History advances PRD UI-005/UI-007 and presents the public OP-003/OP-008 fields;
 it does not prove native or cross-client Beta gates.
 Cancellation exposes the existing OP-004/OP-005 public contract without changing
@@ -14,6 +15,8 @@ catalog API. It does not verify image integrity or prove import/provisioning gat
 Host status uses the existing diagnostics API with API-004 request correlation
 and API-008 structured errors. It advances UI-007 without treating host reports
 as VM or guest readiness.
+Deletion advances UI-002/UI-007 through the existing VM-007/VM-008 and
+API-005/API-006 contracts. It does not prove native managed-file cleanup.
 
 ## Run and check
 
@@ -58,6 +61,8 @@ socket choice, not proof of daemon health; a failed read is not an empty catalog
   `GET /v1/operations/{operation_id}`.
 - Host reads use only public `GET /v1/system/live`, `GET /v1/system/ready`,
   `GET /v1/system/capabilities`, and `GET /v1/system/doctor`.
+- Confirmed VM deletion uses only `DELETE /v1/vms/{vm_id}` and correlated public
+  Operation reads, without direct filesystem or driver access.
 - Event subscriptions use only public `GET /v1/events`, not a driver connection
   or direct SQLite/filesystem access. The public API contract is unchanged.
 - Operation history is independent of UI-submitted actions and VM selection.
@@ -148,10 +153,17 @@ Host coverage adds independent reads without a VM catalog, valid HTTP 503 health
 snapshots, strict report/status/request-ID validation, failed-refresh retention,
 missing capabilities, configured-socket refresh, partial availability, and actual
 initial/refresh socket EOF on navigation, reconnect, and close.
+Deletion coverage adds exact-target confirmation, no-command cancellation,
+empty-body admission, unknown-outcome same-key replay, separate acceptance and
+completion, atomic acknowledgement/Operation rejection, stable original request
+correlation, structured failures, independent VM/socket scopes, late replies,
+explicit catalog reload, new confirmed keys after terminal failure, and actual
+submission/read EOF on navigation, reconnect, and close.
 `flutter test` renders `build/ui-catalog-preview.png`,
 `build/ui-operations-preview.png`, `build/ui-cancellation-preview.png`,
-`build/ui-events-preview.png`, `build/ui-images-preview.png`, and
-`build/ui-host-preview.png` with bundled fonts for visual inspection.
+`build/ui-events-preview.png`, `build/ui-images-preview.png`,
+`build/ui-host-preview.png`, and `build/ui-vm-deletion-preview.png` with bundled
+fonts for visual inspection.
 These previews use test HTTP servers, not running VMs or a native sandbox probe.
 
 The test listener is explicitly closed separately from `HttpServer.listenOn`.
@@ -160,6 +172,50 @@ not the widget test's virtual-clock zone. Reads started in widget initialization
 also need condition-based pumping between real-I/O turns, so the harness drains
 widget-zone microtasks while awaiting peer acceptance and EOF. This does not
 change production timeouts or replace the actual socket-disconnect assertion.
+Deletion tests also flush superseded rendered selections and use condition-based
+pumping while independent reads are pending, rather than settling their loading
+animations against a virtual clock. Their pointer hit-test warnings are fatal.
+
+## VM deletion
+
+Delete requires confirmation naming the exact VM and immutable ID. Keep VM or
+dismissing the dialog sends no command. A confirmed request sends an empty-body
+DELETE with one idempotency key to the configured public socket; admission and
+stop-before-delete ordering remain daemon decisions. The UI never deletes files,
+and the public contract preserves external disks.
+
+Only a complete schema-shaped `202` acknowledgement with the matching VM ID and
+a valid response request ID becomes an accepted receipt. Acceptance, including
+an acknowledgement whose state is `succeeded`, does not remove a catalog row or
+establish the current VM phase. Missing/malformed/lost replies remain unknown
+outcomes. Replay deletion uses that same confirmed target, empty body, socket,
+and key without silently creating a new intent. Editing the socket field alone
+does not retarget it.
+
+Deletion intents are scoped by socket and VM, separate from lifecycle receipts
+and VM selection. They remain available while this app stays open, including
+after pane changes, reconnecting to the same socket, or reloading an empty catalog.
+They are local correlation, not a second VM repository; closing the app does not
+persist their keys. After reopening, inspect durable Operation history to reconcile
+an uncertain outcome.
+
+Refresh deletion Operation is an explicit GET. It checks the Operation ID, action
+type, resource type/ID, idempotency key, and original request ID once observed.
+The response's own request ID is validated separately; an idempotent replay need
+not have the original Operation's request ID. The shared typed model supplies
+state, progress, error, result, and full JSON inspection. A failed or invalid read
+keeps the accepted identity and last validated Operation, not an inferred outcome.
+
+Even terminal Operation state does not overwrite a VM snapshot. Reload VM catalog
+explicitly reads current resource presence through the configured client and clears
+selection; it never submits another delete. Another attempt after a verified
+terminal failure requires fresh confirmation and a new key. The daemon still
+decides whether the resource can accept it.
+
+Navigation, Connect, and window close release only local submission/read sockets.
+An interrupted submission stays unknown and replayable while the app is open;
+releasing an Operation read does not cancel the durable deletion. Late replies
+cannot change a different VM selection or another socket's displayed snapshot.
 
 ## Event journal
 
@@ -251,7 +307,7 @@ by the server.
 
 ## Still required by the full plan
 
-- Image import/delete and VM create/edit/delete; independent display control.
+- Image import/delete and VM create/edit; independent display control.
 - Operation filters beyond cursor paging.
 - Driver/serial log contents and tailing, TestRun/artifacts.
 - Production capabilities/quota policy and native host-diagnostic evidence.

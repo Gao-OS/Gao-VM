@@ -13,6 +13,7 @@ part 'operation_cancellation.dart';
 part 'event_journal.dart';
 part 'image_catalog.dart';
 part 'host_status.dart';
+part 'vm_deletion.dart';
 
 void main() {
   LicenseRegistry.addLicense(() async* {
@@ -176,6 +177,7 @@ class _ConsoleState extends State<_Console> {
   bool get _operationsView => _view == _ConsoleView.operations;
   final _actions = <(String, VmId), _VmAction>{};
   final _cancellations = _OperationCancellations();
+  final _deletions = _VmDeletions();
 
   bool _canSubmit(_VmAction? action, _VmVerb verb) =>
       action?.sending != true &&
@@ -406,6 +408,7 @@ class _ConsoleState extends State<_Console> {
                         : verb.label,
                   ),
                 ),
+            _deleteButton(vm),
           ],
         ),
         if (action != null) ...[
@@ -790,6 +793,7 @@ class _ConsoleState extends State<_Console> {
     _catalogRequest?.cancel();
     _detailRequest?.cancel();
     _cancellations.dispose();
+    _deletions.dispose();
     for (final action in _actions.values) {
       action.request.cancel();
       action.observation?.cancel();
@@ -1035,6 +1039,14 @@ class _ConsoleState extends State<_Console> {
                                       ),
                                     ),
                                     const SizedBox(height: 12),
+                                    if (_client != null)
+                                      _VmDeletionShelf(
+                                        key: ObjectKey(_client),
+                                        deletions: _deletions,
+                                        client: _client!,
+                                        onReloadCatalog: () =>
+                                            _connect(client: _client),
+                                      ),
                                     Expanded(
                                       child: _vms.isEmpty
                                           ? Center(

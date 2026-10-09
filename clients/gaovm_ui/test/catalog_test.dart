@@ -14,6 +14,7 @@ part 'operation_cancellation_cases.dart';
 part 'event_journal_cases.dart';
 part 'image_catalog_cases.dart';
 part 'host_status_cases.dart';
+part 'vm_deletion_cases.dart';
 
 // Exercise real HTTP/Unix sockets, not Flutter's default HTTP-400 substitute.
 class _SocketTestBinding extends AutomatedTestWidgetsFlutterBinding {
@@ -40,6 +41,7 @@ void main() {
   _eventJournalTests();
   _imageCatalogTests();
   _hostStatusTests();
+  _vmDeletionTests();
 
   testWidgets('connect shows the public VM catalog without selecting a VM', (
     tester,
