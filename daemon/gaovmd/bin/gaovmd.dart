@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:gaovmd/gaovmd.dart';
+import 'package:gaovmd/src/daemon_launch_configuration.dart';
 
 Future<void> main(List<String> args) async {
   if (args.contains('--help')) {
@@ -19,7 +20,7 @@ Future<void> main(List<String> args) async {
   }
   DaemonApplication application;
   try {
-    final config = _Config.parse(args);
+    final config = DaemonLaunchConfiguration.parse(args);
     final openapi = await loadPublicOpenApiDocument(File(config.openapi));
     application = await DaemonApplication.start(
       stateDirectory: Directory(config.state),
@@ -64,56 +65,4 @@ Future<void> main(List<String> args) async {
   stdout.writeln('gaovmd listening on unix:${application.socketPath}');
   await stopped.future;
   for (final signal in signals) await signal.cancel();
-}
-
-final class _Config {
-  _Config(
-    this.state,
-    this.socket,
-    this.driver,
-    this.openapi,
-    this.maxRunning,
-    this.maxBoots,
-  );
-  final String state;
-  final String? socket;
-  final String driver;
-  final String openapi;
-  final int maxRunning;
-  final int maxBoots;
-
-  static _Config parse(List<String> args) {
-    final values = <String, String>{};
-    const allowed = {
-      '--state-dir',
-      '--socket-path',
-      '--driver-bin',
-      '--openapi-path',
-      '--max-running-vms',
-      '--max-concurrent-boots',
-    };
-    for (var i = 0; i < args.length; i += 2) {
-      if (!allowed.contains(args[i]) || i + 1 >= args.length) {
-        throw FormatException('unknown option or missing value: ${args[i]}');
-      }
-      values[args[i]] = args[i + 1];
-    }
-    String absolute(String path) => File(path).absolute.path;
-    return _Config(
-      absolute(values['--state-dir'] ?? 'state'),
-      values['--socket-path'] == null
-          ? null
-          : absolute(values['--socket-path']!),
-      absolute(
-        values['--driver-bin'] ??
-            Platform.environment['GAOVM_DRIVER_BIN'] ??
-            '../../drivers/vz_macos/.build/debug/gaovm-driver-vz',
-      ),
-      absolute(
-        values['--openapi-path'] ?? '../../schemas/openapi/gaovm-v1.yaml',
-      ),
-      int.parse(values['--max-running-vms'] ?? '8'),
-      int.parse(values['--max-concurrent-boots'] ?? '2'),
-    );
-  }
 }

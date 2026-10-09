@@ -6,6 +6,8 @@ import 'dart:math';
 import 'package:gaovm_api_client/gaovm_api_client.dart';
 import 'package:gaovm_models/gaovm_models.dart';
 
+import 'src/default_socket_path.dart';
+
 /// Exit codes: 0 success, 1 API/action failure, 2 usage, 3 transport,
 /// 4 invalid server response, 124 deadline, 130 SIGINT, 143 SIGTERM.
 /// All diagnostic output is JSON.
@@ -551,7 +553,7 @@ final class _Options {
   final Map<String, String> query;
 
   static _Options parse(List<String> args) {
-    var socket = File('state/run/api.sock').absolute.path;
+    String? socket;
     var seconds = 30;
     var timeoutExplicit = false;
     var help = false;
@@ -711,7 +713,12 @@ final class _Options {
       throw FormatException('${unsupported.join(', ')} not supported by $verb');
     }
     return _Options(
-      socket: socket,
+      // Help and an empty invocation never connect or require installed state.
+      socket:
+          socket ??
+          (help || command.isEmpty
+              ? File('state/run/api.sock').absolute.path
+              : defaultGaovmSocketPath()),
       timeout: Duration(seconds: seconds),
       command: command,
       help: help,

@@ -150,8 +150,11 @@ dart pub get
 
 The [macOS packaging tool](docs/MACOS_PACKAGING.md) assembles and signs prebuilt
 ARM64 daemon, CLI, and driver binaries with the canonical schemas. This is a
-build-time component, not an installer: launchd, bundle-relative runtime defaults,
-update/uninstall, notarization, and native VM release acceptance remain pending.
+build-time component, not an installer. Packaged executables resolve assets from
+their app bundle and use `~/Library/Application Support/GaoVM` for state.
+Hardened-runtime execution is an unresolved validation blocker; launchd,
+installation/update/uninstall, notarization, and native VM release acceptance
+remain pending.
 
 ## Running the Current Prototype Daemon (`gaovmd`)
 
@@ -188,7 +191,12 @@ The prototype organizes its state directory as follows. M1 migrates these inputs
 
 ## Public API CLI (`gaovm_cli`)
 
-The CLI now uses `gaovm_api_client` for HTTP/1.1 over the daemon's public Unix socket (`state/run/api.sock` relative to the CLI's working directory by default). It has no driver RPC or daemon business-logic path. Use `--socket-path` explicitly when running from another directory.
+The CLI now uses `gaovm_api_client` for HTTP/1.1 over the daemon's public Unix
+socket. Source runs default to `state/run/api.sock` relative to the CLI's working
+directory; the compiled app-bundle CLI defaults to
+`~/Library/Application Support/GaoVM/run/api.sock`. It has no driver RPC or daemon
+business-logic path. Use `--socket-path` explicitly for a custom daemon socket or
+when running from another source directory.
 
 Implemented commands at this checkpoint:
 
