@@ -315,6 +315,46 @@ impl Executor {
             .snapshot())
     }
 
+    /// Dispatch a frozen exec control request. Transport authentication,
+    /// negotiation and delivery remain the caller's responsibility.
+    /// Invalid/session-foreign input returns Err; authorised execution faults
+    /// are correlated wire errors, retaining terminal results when available.
+    pub fn handle(&mut self, session: &Session, request: &Value) -> Result<Value, ProtocolError> {
+        let method = request["method"]
+            .as_str()
+            .ok_or_else(|| error(ErrorCode::InvalidRequest))?;
+        // A wire error is permitted only after schema, session, capability and
+        // executor binding checks. Never reflect an unauthorised correlation.
+        self.authorize(session, request, method)?;
+        let outcome = match method {
+            "exec.start" => self.start(session, request),
+            "exec.status" => self.status(session, request),
+            "exec.cancel" => self.cancel(session, request),
+            _ => return Err(error(ErrorCode::CapabilityNotSupported)),
+        };
+        let mut response = json!({"protocol_version": PROTOCOL_VERSION, "kind": "response", "id": request["id"],
+            "method": method, "vm_id": self.vm_id,
+            "driver_generation": self.generation, "operation_id": request["operation_id"]});
+        match outcome {
+            Ok(snapshot) => {
+                if let Some(code) = snapshot.failure {
+                    response["kind"] = json!("error");
+                    response["error"] = json!({"code": code, "message": "guest execution failed", "retryable": false,
+                        "details": {"result": snapshot.result}});
+                } else {
+                    response["result"] = json!(snapshot.result);
+                }
+            }
+            Err(fault) => {
+                response["kind"] = json!("error");
+                response["error"] =
+                    json!({"code": fault.code, "message": fault.message, "retryable": false});
+            }
+        }
+        validate_message(&response).map_err(|_| error(ErrorCode::GuestInternalError))?;
+        Ok(response)
+    }
+
     pub fn cancel(
         &mut self,
         session: &Session,

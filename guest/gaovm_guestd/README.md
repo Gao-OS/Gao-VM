@@ -68,6 +68,21 @@ appropriate negotiated capability, and matching request correlation. Completion
 snapshots retain VM ID, generation, and operation ID; they are not wire envelopes.
 The frozen `ExecResult` payload and error codes remain unchanged.
 
+`Executor::handle` dispatches `exec.start`, `exec.status`, and `exec.cancel` into
+schema-validated response/error envelopes. Request ID, method, VM, generation and
+operation correlation are preserved. Malformed, unnegotiated, unsupported-capability,
+or foreign-binding requests return a protocol error before execution admission;
+they are not reflected as authorized wire replies. Bound execution/admission errors
+return correlated `kind: error` replies without echoing argv, cwd, or environment.
+Timeout/output-limit errors retain the terminal `ExecResult` in `error.details.result`.
+A normal nonzero command exit instead returns a response with `state: failed`.
+Cancellation acknowledges intent, not exit; cleanup faults remain error replies.
+
+This dispatcher does not negotiate a connection, authenticate a peer, run a
+listener, advertise implemented capabilities, or deliver a message. The caller
+still owns framing and write deadlines. Artifact-mode output names a retained
+local spool, not a completed binary transfer or host artifact publication.
+
 Commands receive an argv vector, cwd, and explicit environment. No shell is added
 implicitly. The parent environment is cleared, a baseline `PATH=/usr/bin:/bin`
 is set, request environment entries are applied, and stdin is closed. Execution
@@ -190,12 +205,16 @@ are not native virtio-vsock acceptance.
 Negotiation tests include a real Unix-socket hello/health round trip, both hello
 orderings, capability intersection, identity/version failures, malformed/EOF
 frames, silence, and cancellation/failure/deadline during the final buffered flush.
+Exec dispatch tests cover real command completion, correlated failures, cancellation,
+replay/conflicting inputs, admission fences, bounded/spilled output, and a real Unix
+frame round trip with health while an execution is running. Its test-only request
+loop does not establish a production dispatcher service or native vsock acceptance.
 
 ## Remaining package and MVP work
 
 - Linux virtio-vsock listener and host-peer verification.
-- RPC dispatch around the execution/collection engines and system queries; an
-  executable, least-privilege service installation, signal handling, crash cleanup,
+- Service dispatch/composition around the execution/collection engines and system
+  queries; an executable, least-privilege service installation, signal handling, crash cleanup,
   and reconnect/disconnect policy.
 - Separate bounded binary artifact streams; their wire/channel binding still
   needs an explicit interoperability decision. Do not send base64 artifact bodies
