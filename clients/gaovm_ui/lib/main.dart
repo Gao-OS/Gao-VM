@@ -12,6 +12,7 @@ part 'operation_history.dart';
 part 'operation_cancellation.dart';
 part 'event_journal.dart';
 part 'image_catalog.dart';
+part 'host_status.dart';
 
 void main() {
   LicenseRegistry.addLicense(() async* {
@@ -72,7 +73,7 @@ enum _VmVerb {
   final String label;
 }
 
-enum _ConsoleView { vms, images, operations, events }
+enum _ConsoleView { vms, images, operations, events, host }
 
 // Local intent/correlation only. The daemon remains the source of VM/Operation state.
 class _VmAction {
@@ -844,6 +845,8 @@ class _ConsoleState extends State<_Console> {
                 _navigation('Operations', view: _ConsoleView.operations),
                 const SizedBox(height: 8),
                 _navigation('Events', view: _ConsoleView.events),
+                const SizedBox(height: 8),
+                _navigation('Host status', view: _ConsoleView.host),
                 const Spacer(),
                 const Icon(Icons.hub_outlined, color: _lime, size: 22),
                 const SizedBox(height: 16),
@@ -880,6 +883,7 @@ class _ConsoleState extends State<_Console> {
                                   'CONTROL PLANE / HISTORY',
                                 _ConsoleView.events =>
                                   'CONTROL PLANE / JOURNAL',
+                                _ConsoleView.host => 'CONTROL PLANE / HOST',
                               },
                               style: const TextStyle(
                                 fontSize: 10,
@@ -894,6 +898,7 @@ class _ConsoleState extends State<_Console> {
                                 _ConsoleView.images => 'Images',
                                 _ConsoleView.operations => 'Operations',
                                 _ConsoleView.events => 'Events',
+                                _ConsoleView.host => 'Host status',
                               },
                               style: const TextStyle(
                                 fontFamily: 'InstrumentSerif',
@@ -908,6 +913,7 @@ class _ConsoleState extends State<_Console> {
                                 _ConsoleView.images => 'Immutable image records from the daemon. Inspect a manifest without opening local files.',
                                 _ConsoleView.operations => 'Durable intents from every client. Select an Operation to fetch its current detail.',
                                 _ConsoleView.events => 'Committed events from the daemon. Resume explicitly from the last validated sequence.',
+                                _ConsoleView.host => 'Independent public diagnostics. Refresh explicitly; no host repairs or VM commands.',
                               },
                               style: const TextStyle(
                                 fontSize: 11,
@@ -961,7 +967,18 @@ class _ConsoleState extends State<_Console> {
                     ),
                   const SizedBox(height: 24),
                   Expanded(
-                    child: _view == _ConsoleView.images
+                    child: _view == _ConsoleView.host
+                        ? _client == null
+                              ? _panel(
+                                  const Center(
+                                    child: Text('Connect to read host reports'),
+                                  ),
+                                )
+                              : _HostStatus(
+                                  key: ObjectKey(_client),
+                                  client: _client!,
+                                )
+                        : _view == _ConsoleView.images
                         ? _client == null
                               ? _panel(
                                   const Center(
@@ -1100,6 +1117,7 @@ class _ConsoleState extends State<_Console> {
                     _ConsoleView.images => 'IMAGE SNAPSHOT · Manifest inspection does not import, delete, create, or start a VM.',
                     _ConsoleView.operations => 'OPERATION SNAPSHOT · History reads do not select a VM or submit commands.',
                     _ConsoleView.events => 'DURABLE JOURNAL · Events are evidence, not an inferred resource snapshot.',
+                    _ConsoleView.host => 'HOST SNAPSHOTS · Health, advertisements, and doctor checks do not prove VM or guest readiness.',
                   }, style: const TextStyle(fontSize: 10, color: _muted)),
                 ],
               ),

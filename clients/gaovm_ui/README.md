@@ -2,7 +2,7 @@
 
 The Flutter client for `docs/DEVELOPMENT_PLAN.md` B1.2. This implements initial
 VM catalog/detail, lifecycle, linked-Operation, durable history, cancellation,
-resumable-event, and image-catalog slices, not complete Beta acceptance.
+resumable-event, image-catalog, and host-status slices, not complete Beta acceptance.
 History advances PRD UI-005/UI-007 and presents the public OP-003/OP-008 fields;
 it does not prove native or cross-client Beta gates.
 Cancellation exposes the existing OP-004/OP-005 public contract without changing
@@ -11,6 +11,9 @@ The event pane exposes the existing EVT-001/EVT-002/EVT-003 stream and advances
 UI-005/UI-007 without deriving resource state from events.
 The image pane presents IMG-002/IMG-003 metadata through the existing public
 catalog API. It does not verify image integrity or prove import/provisioning gates.
+Host status uses the existing diagnostics API with API-004 request correlation
+and API-008 structured errors. It advances UI-007 without treating host reports
+as VM or guest readiness.
 
 ## Run and check
 
@@ -29,10 +32,13 @@ flutter run -d macos
 Run these commands from `clients/gaovm_ui`. Enter an absolute path to an already
 running daemon's private public-API socket and click **Connect**. There is no
 automatic daemon start, service registration, driver connection, or default VM.
-Choose Virtual machines, Images, Operations, or Events. Connect binds the explicit socket
-and resets the active view. VM/Operation panes fetch their catalogs; Events waits
-for an explicit Start stream. Images reads its catalog on connection/navigation.
-Images, Operations, and Events can be connected without first loading VMs.
+Choose Virtual machines, Images, Operations, Events, or Host status. Connect binds
+the explicit socket and resets the active view. VM/Operation panes fetch their
+catalogs; Events waits for an explicit Start stream. Images reads its catalog on
+connection/navigation.
+Host status starts four independent diagnostic reads on connection/navigation.
+Images, Operations, Events, and Host status can be connected without first loading
+VMs.
 Switching panes keeps the configured connection, releases
 superseded local reads, and fetches a destination catalog only when applicable.
 Editing the socket field alone never retargets navigation, paging, or detail refresh.
@@ -50,6 +56,8 @@ socket choice, not proof of daemon health; a failed read is not an empty catalog
 - Reads use public `GET /v1/vms`, `GET /v1/vms/{vm_id}`,
   `GET /v1/images`, `GET /v1/operations`, and
   `GET /v1/operations/{operation_id}`.
+- Host reads use only public `GET /v1/system/live`, `GET /v1/system/ready`,
+  `GET /v1/system/capabilities`, and `GET /v1/system/doctor`.
 - Event subscriptions use only public `GET /v1/events`, not a driver connection
   or direct SQLite/filesystem access. The public API contract is unchanged.
 - Operation history is independent of UI-submitted actions and VM selection.
@@ -136,10 +144,14 @@ labels/UTC/full-manifest inspection, connection-bound opaque paging, atomic page
 rejection, duplicate IDs and cursor loops, failed-versus-empty reads, explicit
 reload, structured problems, and actual initial/page-read EOF on navigation,
 reconnect, and close.
+Host coverage adds independent reads without a VM catalog, valid HTTP 503 health
+snapshots, strict report/status/request-ID validation, failed-refresh retention,
+missing capabilities, configured-socket refresh, partial availability, and actual
+initial/refresh socket EOF on navigation, reconnect, and close.
 `flutter test` renders `build/ui-catalog-preview.png`,
 `build/ui-operations-preview.png`, `build/ui-cancellation-preview.png`,
-`build/ui-events-preview.png`, and `build/ui-images-preview.png` with bundled
-fonts for visual inspection.
+`build/ui-events-preview.png`, `build/ui-images-preview.png`, and
+`build/ui-host-preview.png` with bundled fonts for visual inspection.
 These previews use test HTTP servers, not running VMs or a native sandbox probe.
 
 The test listener is explicitly closed separately from `HttpServer.listenOn`.
@@ -206,11 +218,43 @@ image files/objects nor recomputes digests, imports/deletes images, creates VMs,
 or infers provisioning success. Leaving, reconnecting, or closing releases only
 the local read connection. No daemon, driver, VM, or Operation command is issued.
 
+## Host status
+
+Liveness, dependency readiness, public capabilities, and doctor are independent
+snapshots, not an aggregate health verdict. A slow or unavailable report leaves
+the other cards readable and independently refreshable. Refresh uses the configured
+client, ignoring socket-field edits until Connect. There is no automatic polling,
+repair, service command, or VM action.
+
+Each complete report requires its frozen typed shape, expected HTTP status, and a
+valid `X-Request-ID`. The UI shows that correlation, status, and client UTC read
+time; it does not claim the timestamp came from the daemon. Failed refreshes retain
+the last validated snapshot and explicitly label it as retained, rather than
+publishing partial data or hiding the error.
+
+For the exact public GET liveness/readiness routes, schema-valid HTTP 503
+`application/json` with a false health flag is a normal diagnostic snapshot.
+Readiness requires `checks`; liveness permits their omission. The shared client
+rejects malformed health bodies and keeps structured `application/problem+json`
+errors separate. Other methods/routes and event-stream error handling are unchanged.
+
+Capabilities are public advertisements, not negotiated driver capabilities or
+proof of guest readiness. The current production daemon does not yet register
+that route; the UI shows the failed read without inventing limits or hiding other
+reports. The positive defined-VM limit contract still needs an accepted backend
+policy. Doctor displays the server's healthy flag and individual check statuses
+without inferring VM readiness or attempting repairs.
+
+Leaving, reconnecting, or closing cancels only this pane's outstanding HTTP reads.
+The daemon, its durable Operations, driver processes, and VM lifecycle remain owned
+by the server.
+
 ## Still required by the full plan
 
 - Image import/delete and VM create/edit/delete; independent display control.
 - Operation filters beyond cursor paging.
-- Driver/serial log contents and tailing, TestRun/artifacts, host status.
+- Driver/serial log contents and tailing, TestRun/artifacts.
+- Production capabilities/quota policy and native host-diagnostic evidence.
 - Cross-client creation/takeover and consistent state against the real daemon.
 - Native window-close evidence against running daemon/VMs, not just a test server.
 - Native sandbox/private-socket permissions, signing, installation, and release gates.
