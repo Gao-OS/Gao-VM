@@ -7,9 +7,10 @@ import 'package:crypto/crypto.dart' as crypto;
 import 'package:gaovm_models/gaovm_models.dart';
 
 part 'src/artifact_read.dart';
+part 'src/artifact_download.dart';
 part 'src/event_stream.dart';
 
-/// A transport boundary only: no SQLite, VM controller, or driver dependency.
+/// Public transport and caller-owned downloads; no SQLite, controller, or driver.
 /// Each request owns its connection, which is closed even on a local deadline.
 final class GaoVmApiClient {
   GaoVmApiClient({required String socketPath})
@@ -25,6 +26,24 @@ final class GaoVmApiClient {
     ApiRequestCancellation? cancellation,
     Duration timeout = const Duration(seconds: 30),
   }) => _readArtifact(socketPath, artifact, maxBytes, cancellation, timeout);
+
+  /// Stream to a new private child of an existing caller-selected directory.
+  /// Only verified, flushed bytes are returned; failures remove the owned staging
+  /// directory. The caller owns the successful file. Existing files are untouched.
+  Future<ApiArtifactDownload> downloadArtifact(
+    Artifact artifact, {
+    required Directory directory,
+    int maxBytes = 256 * 1024 * 1024,
+    ApiRequestCancellation? cancellation,
+    Duration timeout = const Duration(seconds: 30),
+  }) => _downloadArtifact(
+    socketPath,
+    artifact,
+    directory,
+    maxBytes,
+    cancellation,
+    timeout,
+  );
 
   /// Resume explicitly after the last consumed sequence. No automatic retry.
   /// The deadline bounds the entire subscription, including idle heartbeats.

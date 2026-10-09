@@ -7,9 +7,11 @@ import 'package:gaovm_models/gaovm_models.dart';
 import 'package:test/test.dart';
 
 part 'artifact_cases.dart';
+part 'artifact_download_cases.dart';
 
 void main() {
   _artifactTests();
+  _artifactDownloadTests();
   test('VM PATCH preserves merge-patch media type, revision and key', () async {
     String? mediaType;
     String? revision;

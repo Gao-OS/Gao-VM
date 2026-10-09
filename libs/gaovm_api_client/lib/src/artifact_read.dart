@@ -28,20 +28,7 @@ Future<ApiArtifactResponse> _readArtifact(
   ApiRequestCancellation? cancellation,
   Duration timeout,
 ) async {
-  if (maxBytes <= 0 || timeout <= Duration.zero) {
-    throw ArgumentError('a positive byte budget and timeout are required');
-  }
-  if (cancellation?.isCancelled == true) {
-    throw const ApiRequestCancelledException();
-  }
-  if (artifact.downloadUrl != '/v1/artifacts/${artifact.id.value}') {
-    throw const ApiProtocolException(
-      'Artifact download URL disagrees with its ID.',
-    );
-  }
-  if (artifact.sizeBytes > maxBytes) {
-    throw ApiArtifactSizeLimitException(artifact.sizeBytes, maxBytes);
-  }
+  _checkArtifactRead(artifact, maxBytes, cancellation, timeout);
   final client = _newHttpClient(socketPath, timeout)..autoUncompress = false;
   final cancelled = cancellation == null
       ? null
@@ -71,10 +58,57 @@ Future<ApiArtifactResponse> _readArtifact(
   }
 }
 
+void _checkArtifactRead(
+  Artifact artifact,
+  int maxBytes,
+  ApiRequestCancellation? cancellation,
+  Duration timeout,
+) {
+  if (maxBytes <= 0 || timeout <= Duration.zero) {
+    throw ArgumentError('a positive byte budget and timeout are required');
+  }
+  if (cancellation?.isCancelled == true) {
+    throw const ApiRequestCancelledException();
+  }
+  if (artifact.downloadUrl != '/v1/artifacts/${artifact.id.value}') {
+    throw const ApiProtocolException(
+      'Artifact download URL disagrees with its ID.',
+    );
+  }
+  if (artifact.sizeBytes > maxBytes) {
+    throw ApiArtifactSizeLimitException(artifact.sizeBytes, maxBytes);
+  }
+}
+
 Future<ApiArtifactResponse> _receiveArtifact(
   HttpClient client,
   Artifact artifact,
   int maxBytes,
+) async {
+  final opened = await _openArtifact(client, artifact);
+  final bytes = BytesBuilder(copy: false);
+  await for (final chunk in opened.response) {
+    if (bytes.length + chunk.length > maxBytes ||
+        bytes.length + chunk.length > artifact.sizeBytes) {
+      throw const ApiProtocolException(
+        'Artifact response exceeds its byte limit.',
+      );
+    }
+    bytes.add(chunk);
+  }
+  final payload = bytes.takeBytes();
+  if (payload.length != artifact.sizeBytes ||
+      'sha256:${crypto.sha256.convert(payload)}' != artifact.digest) {
+    throw const ApiProtocolException(
+      'Artifact payload failed length or SHA-256 verification.',
+    );
+  }
+  return ApiArtifactResponse._(artifact, opened.requestId, payload);
+}
+
+Future<({HttpClientResponse response, RequestId requestId})> _openArtifact(
+  HttpClient client,
+  Artifact artifact,
 ) async {
   final request = await client.getUrl(
     Uri(scheme: 'http', host: 'localhost', path: artifact.downloadUrl),
@@ -122,22 +156,5 @@ Future<ApiArtifactResponse> _receiveArtifact(
       'Artifact response digest disagrees with its metadata.',
     );
   }
-  final bytes = BytesBuilder(copy: false);
-  await for (final chunk in response) {
-    if (bytes.length + chunk.length > maxBytes ||
-        bytes.length + chunk.length > artifact.sizeBytes) {
-      throw const ApiProtocolException(
-        'Artifact response exceeds its byte limit.',
-      );
-    }
-    bytes.add(chunk);
-  }
-  final payload = bytes.takeBytes();
-  if (payload.length != artifact.sizeBytes ||
-      'sha256:${crypto.sha256.convert(payload)}' != artifact.digest) {
-    throw const ApiProtocolException(
-      'Artifact payload failed length or SHA-256 verification.',
-    );
-  }
-  return ApiArtifactResponse._(artifact, requestId, payload);
+  return (response: response, requestId: requestId);
 }
