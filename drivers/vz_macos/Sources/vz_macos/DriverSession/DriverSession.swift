@@ -463,6 +463,7 @@ final class DriverSession {
             logger.log(.info, "VM stopped before driver exit")
         }
         listener?.close()
+        _ = logger.flush()
         Foundation.exit(code)
     }
 }

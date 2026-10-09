@@ -15,6 +15,17 @@ enum DriverLaunchMode {
     case .v2(let config): config.logPath
     }
   }
+
+  func makeLogger() -> RotatingLogger {
+    switch self {
+    case .legacy:
+      RotatingLogger(path: logPath)
+    case .v2(let config):
+      RotatingLogger(
+        path: logPath,
+        identity: .init(vmID: config.vmId, driverGeneration: config.generation))
+    }
+  }
 }
 
 func parseArgs(_ args: [String]) throws -> DriverLaunchMode {
@@ -119,8 +130,9 @@ func parseArgs(_ args: [String]) throws -> DriverLaunchMode {
 
 do {
   let launch = try parseArgs(CommandLine.arguments)
-  let logger = RotatingLogger(path: launch.logPath)
-  logger.log(.info, "driver bootstrap")
+  let logger = launch.makeLogger()
+  defer { _ = logger.flush() }
+  logger.log(.info, "driver bootstrap", eventType: .bootstrap)
   let runDriver: () throws -> Void
   switch launch {
   case .legacy(let config):
@@ -139,6 +151,8 @@ do {
         try runDriver()
       } catch {
         fputs("[gaovm-driver-vz] fatal: \(error)\n", stderr)
+        logger.log(.error, "driver application terminated unexpectedly", eventType: .fatal)
+        _ = logger.flush()
         DispatchQueue.main.async {
           NSApplication.shared.terminate(nil)
         }

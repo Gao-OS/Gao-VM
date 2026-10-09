@@ -5,6 +5,31 @@ import XCTest
 @testable import vz_macos
 
 final class DriverLiveV2Tests: XCTestCase {
+  func testLaunchIdentityIsBoundToTheLoggerWithoutIncludingAuthentication() throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("gaovm-launch-log-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let file = root.appendingPathComponent("driver.log")
+    let vmID = "vm_01J00000000000000000000000"
+    let token = "test-only-logging-secret-not-a-real-token"
+    let launch = DriverLaunchMode.v2(
+      Config(
+        vmId: try DriverProtocolV2.VMID(vmID), generation: 7,
+        socketPath: root.appendingPathComponent("control.sock").path,
+        bundlePath: root.appendingPathComponent("vm.gaovm").path,
+        authToken: token, logPath: file.path))
+    let logger = launch.makeLogger()
+    XCTAssertTrue(logger.log(.info, "driver bootstrap"))
+    XCTAssertTrue(logger.flush(timeout: 3))
+    let contents = try Data(contentsOf: file)
+    let record = try XCTUnwrap(JSONSerialization.jsonObject(with: contents) as? [String: Any])
+    XCTAssertEqual(record["vm_id"] as? String, vmID)
+    XCTAssertEqual(record["driver_generation"] as? Int, 7)
+    XCTAssertTrue(record["operation_id"] is NSNull)
+    XCTAssertTrue(record["request_id"] is NSNull)
+    XCTAssertFalse(String(decoding: contents, as: UTF8.self).contains(token))
+  }
+
   func testCLIRequiresAndCapturesV2IdentityWithoutTokenArgument() throws {
     setenv("GAOVM_AUTH_TOKEN", String(repeating: "x", count: 32), 1)
     defer { unsetenv("GAOVM_AUTH_TOKEN") }

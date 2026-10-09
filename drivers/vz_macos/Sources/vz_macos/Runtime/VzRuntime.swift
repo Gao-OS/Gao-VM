@@ -86,7 +86,7 @@ final class VzRuntime: RuntimeServicing {
         let currentRuntimeState: RuntimeObservedState? = nil
       #endif
       self.eventGeneration.observeConfiguration(currentRuntimeState: currentRuntimeState)
-      self.logger.log(.info, "vm configured")
+      self.logRuntime(.info, "vm configured", eventType: .runtimeConfigured)
       completion(.success(self.statusLocked()))
     }
   }
@@ -144,7 +144,7 @@ final class VzRuntime: RuntimeServicing {
               guard !self.isTearingDown, !gate.isFinished else { return }
               switch result {
               case .success:
-                self.logger.log(.info, "vm started")
+                self.logRuntime(.info, "vm started", eventType: .runtimeStarted)
                 guard gate.finish(.success(self.statusLocked())) else { return }
                 eventGeneration.observeState(runtimeObservedState(from: vm.state))
               case .failure(let error):
@@ -236,6 +236,12 @@ final class VzRuntime: RuntimeServicing {
     }
   }
 
+  func logRuntime(_ level: LogLevel, _ message: String, eventType: DriverLogEvent) {
+    vzRuntimeQueue.preconditionIsCurrent()
+    let operationID = currentOperationID.flatMap { try? DriverProtocolV2.OperationID($0) }
+    logger.log(level, message, operationID: operationID, eventType: eventType)
+  }
+
   func shutdown(completion: @escaping RuntimeCompletion) {
     vzRuntimeQueue.async {
       self.isTearingDown = true
@@ -280,7 +286,8 @@ final class VzRuntime: RuntimeServicing {
         }
         if vm.state == .error {
           self.eventGeneration.observeState(.error)
-          self.logger.log(.warn, "vm stop requested while VM is in error state")
+          self.logRuntime(
+            .warn, "vm stop requested while VM is in error state", eventType: .runtimeStopRequested)
           completion(.success(self.statusLocked()))
           return
         }
@@ -297,16 +304,16 @@ final class VzRuntime: RuntimeServicing {
           canRequestStop: { allowGracefulStop && vm.canRequestStop },
           requestStop: {
             try vm.requestStop()
-            self.logger.log(.info, "vm stop requested")
+            self.logRuntime(.info, "vm stop requested", eventType: .runtimeStopRequested)
           },
           forceStop: { callback in
-            self.logger.log(.warn, "attempting force stop")
+            self.logRuntime(.warn, "attempting force stop", eventType: .runtimeForceStop)
             vm.stop(completionHandler: callback)
           }
         ) { result in
           switch result {
           case .success:
-            self.logger.log(.info, "vm stopped")
+            self.logRuntime(.info, "vm stopped", eventType: .runtimeStopped)
             eventGeneration.observeState(runtimeObservedState(from: vm.state))
             completion(.success(self.statusLocked()))
           case .failure(let error):

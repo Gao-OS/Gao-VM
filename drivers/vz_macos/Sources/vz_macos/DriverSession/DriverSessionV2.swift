@@ -163,6 +163,9 @@ final class DriverSessionV2 {
       }
       localHelloAccepted = true
       markAuthenticatedRPC()
+      if authenticated {
+        logger.log(.info, "bidirectional hello authenticated", eventType: .authenticated)
+      }
     case .commandRequest(let id, let command):
       guard authenticated else {
         try send(
@@ -212,6 +215,9 @@ final class DriverSessionV2 {
           acceptedCapabilities: accepted)))
     remoteHelloAccepted = true
     markAuthenticatedRPC()
+    if authenticated {
+      logger.log(.info, "bidirectional hello authenticated", eventType: .authenticated)
+    }
   }
 
   private var authenticated: Bool { localHelloAccepted && remoteHelloAccepted }
@@ -242,11 +248,17 @@ final class DriverSessionV2 {
                 operationId: correlation.operationId,
                 status: status,
                 data: nil)))
+          self.logger.log(
+            .debug, "driver command response sent", operationID: correlation.operationId,
+            eventType: .commandSucceeded)
           if self.isTerminal(command) {
             self.stateQueue.sync { self.terminalExit.completeCommand(succeeded: true) }
             self.exitIfTerminalReady()
           }
         case .failure(let error):
+          self.logger.log(
+            .error, "driver command failed", operationID: correlation.operationId,
+            eventType: .commandFailed)
           try self.send(self.errorResponse(id: id, command: command, error: error))
           if self.isTerminal(command) {
             self.stateQueue.sync { self.terminalExit.completeCommand(succeeded: false) }
@@ -254,7 +266,7 @@ final class DriverSessionV2 {
           }
         }
       } catch {
-        self.recordFatal(error)
+        self.recordFatal(error, operationID: correlation.operationId)
       }
     }
 
@@ -297,6 +309,9 @@ final class DriverSessionV2 {
       let event: DriverProtocolV2.Event
       switch envelope.event {
       case .stateChanged(let date, let observed):
+        logger.log(
+          .info, "runtime state changed to \(observed.rawValue)", operationID: operationID,
+          eventType: .runtimeStateChanged)
         occurredAt = date
         state = runtimeState(observed)
         event = .runtimeStateChanged(
@@ -307,6 +322,9 @@ final class DriverSessionV2 {
           }
         }
       case .cleanShutdown(let date, let observed):
+        logger.log(
+          .info, "runtime clean shutdown observed", operationID: operationID,
+          eventType: .runtimeCleanShutdown)
         occurredAt = date
         state = runtimeState(observed)
         clean = true
@@ -317,6 +335,9 @@ final class DriverSessionV2 {
           terminalExit.observeRuntimeTerminal()
         }
       case .runtimeError(let date, let observed, let runtimeError):
+        logger.log(
+          .error, "runtime error observed: \(runtimeError.classification.rawValue)",
+          operationID: operationID, eventType: .runtimeError)
         occurredAt = date
         state = runtimeState(observed)
         error = eventError(runtimeError)
@@ -331,7 +352,8 @@ final class DriverSessionV2 {
       try send(.event(event))
       exitIfTerminalReady()
     } catch {
-      recordFatal(error)
+      recordFatal(
+        error, operationID: envelope.operationID.flatMap { try? DriverProtocolV2.OperationID($0) })
     }
   }
 
@@ -362,6 +384,7 @@ final class DriverSessionV2 {
       vmRuntime.flushSerialOutput()
       socketWriter.close()
       listener?.close()
+      _ = logger.flush()
       Foundation.exit(exitCode)
     }
   }
@@ -525,9 +548,14 @@ final class DriverSessionV2 {
     }
   }
 
-  private func recordFatal(_ error: Error) {
-    stateQueue.sync {
-      if fatalError == nil { fatalError = error }
+  private func recordFatal(_ error: Error, operationID: DriverProtocolV2.OperationID? = nil) {
+    let firstFailure = stateQueue.sync {
+      guard fatalError == nil else { return false }
+      fatalError = error
+      return true
+    }
+    if firstFailure {
+      logger.log(.error, "fatal driver session error", operationID: operationID, eventType: .fatal)
     }
     socketWriter.close()
   }
@@ -541,13 +569,14 @@ final class DriverSessionV2 {
   }
 
   private func terminate(reason: String, code: Int32) throws -> Never {
-    logger.log(.warn, reason)
+    logger.log(.warn, reason, eventType: .controlLost)
     let finished = DispatchGroup()
     finished.enter()
     runtimeDispatcher.closeAndShutdown(reason: reason) { _ in finished.leave() }
     _ = finished.wait(timeout: .now() + 10)
     socketWriter.close()
     listener?.close()
+    _ = logger.flush()
     Foundation.exit(code)
   }
 }

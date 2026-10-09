@@ -114,7 +114,7 @@ extension VzRuntime {
     let handle = try FileHandle(forWritingTo: url)
     defer { try? handle.close() }
     try handle.truncate(atOffset: UInt64(sizeMiB) * 1024 * 1024)
-    logger.log(.info, "created sparse disk at \(path) sizeMiB=\(sizeMiB)")
+    logRuntime(.info, "created sparse disk at \(path) sizeMiB=\(sizeMiB)", eventType: .diskCreated)
   }
 
   func normalizedConfig(_ root: [String: Any]) throws -> NormalizedVmConfig {

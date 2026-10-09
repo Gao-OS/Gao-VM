@@ -18,6 +18,9 @@ The public API now lists current per-VM log metadata through
 This read-only endpoint returns no log bytes or host paths and does not create
 artifact snapshots. See [VM log references](docs/VM_LOGS.md) for ownership checks,
 artifact boundaries, and verification limits.
+The Swift driver also uses a [bounded asynchronous text-log writer](docs/DRIVER_LOGGING.md)
+with structured VM/generation/operation correlation, so filesystem I/O and rotation
+do not run on its VZ/control caller.
 
 ---
 

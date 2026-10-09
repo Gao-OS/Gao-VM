@@ -6,6 +6,8 @@ It supports the HTTP/UDS, versioned-route, request-correlation and structured-er
 boundaries of PRD `API-001`, `API-002`, `API-004` and `API-008`, and per-VM log
 discovery for `EVT-005`. It does not complete those requirements' native/release
 acceptance or prove log-writer rotation/non-blocking behavior (`EVT-006`).
+The Swift writer's separate bounded-I/O implementation and component checks are
+described in [driver logging](DRIVER_LOGGING.md).
 
 ## Public behavior
 
