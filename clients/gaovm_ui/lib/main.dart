@@ -3,7 +3,7 @@ import 'dart:convert';
 import 'dart:math';
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Image;
 import 'package:flutter/services.dart';
 import 'package:gaovm_api_client/gaovm_api_client.dart';
 import 'package:gaovm_models/gaovm_models.dart';
@@ -11,6 +11,7 @@ import 'package:gaovm_models/gaovm_models.dart';
 part 'operation_history.dart';
 part 'operation_cancellation.dart';
 part 'event_journal.dart';
+part 'image_catalog.dart';
 
 void main() {
   LicenseRegistry.addLicense(() async* {
@@ -71,7 +72,7 @@ enum _VmVerb {
   final String label;
 }
 
-enum _ConsoleView { vms, operations, events }
+enum _ConsoleView { vms, images, operations, events }
 
 // Local intent/correlation only. The daemon remains the source of VM/Operation state.
 class _VmAction {
@@ -838,6 +839,8 @@ class _ConsoleState extends State<_Console> {
                 const SizedBox(height: 16),
                 _navigation('Virtual machines', view: _ConsoleView.vms),
                 const SizedBox(height: 8),
+                _navigation('Images', view: _ConsoleView.images),
+                const SizedBox(height: 8),
                 _navigation('Operations', view: _ConsoleView.operations),
                 const SizedBox(height: 8),
                 _navigation('Events', view: _ConsoleView.events),
@@ -872,6 +875,7 @@ class _ConsoleState extends State<_Console> {
                             Text(
                               switch (_view) {
                                 _ConsoleView.vms => 'CONTROL PLANE / CATALOG',
+                                _ConsoleView.images => 'CONTROL PLANE / IMAGES',
                                 _ConsoleView.operations =>
                                   'CONTROL PLANE / HISTORY',
                                 _ConsoleView.events =>
@@ -887,6 +891,7 @@ class _ConsoleState extends State<_Console> {
                             Text(
                               switch (_view) {
                                 _ConsoleView.vms => 'Virtual machines',
+                                _ConsoleView.images => 'Images',
                                 _ConsoleView.operations => 'Operations',
                                 _ConsoleView.events => 'Events',
                               },
@@ -900,6 +905,7 @@ class _ConsoleState extends State<_Console> {
                             Text(
                               switch (_view) {
                                 _ConsoleView.vms => 'The daemon’s shared catalog. Select a VM to fetch its current detail.',
+                                _ConsoleView.images => 'Immutable image records from the daemon. Inspect a manifest without opening local files.',
                                 _ConsoleView.operations => 'Durable intents from every client. Select an Operation to fetch its current detail.',
                                 _ConsoleView.events => 'Committed events from the daemon. Resume explicitly from the last validated sequence.',
                               },
@@ -955,7 +961,20 @@ class _ConsoleState extends State<_Console> {
                     ),
                   const SizedBox(height: 24),
                   Expanded(
-                    child: _view == _ConsoleView.events
+                    child: _view == _ConsoleView.images
+                        ? _client == null
+                              ? _panel(
+                                  const Center(
+                                    child: Text(
+                                      'Connect to read the image catalog',
+                                    ),
+                                  ),
+                                )
+                              : _ImageCatalog(
+                                  key: ObjectKey(_client),
+                                  client: _client!,
+                                )
+                        : _view == _ConsoleView.events
                         ? _client == null
                               ? _panel(
                                   const Center(
@@ -1078,6 +1097,7 @@ class _ConsoleState extends State<_Console> {
                   const SizedBox(height: 16),
                   Text(switch (_view) {
                     _ConsoleView.vms => 'CATALOG SNAPSHOT · Actions submit durable Operations. Acceptance is not VM completion.',
+                    _ConsoleView.images => 'IMAGE SNAPSHOT · Manifest inspection does not import, delete, create, or start a VM.',
                     _ConsoleView.operations => 'OPERATION SNAPSHOT · History reads do not select a VM or submit commands.',
                     _ConsoleView.events => 'DURABLE JOURNAL · Events are evidence, not an inferred resource snapshot.',
                   }, style: const TextStyle(fontSize: 10, color: _muted)),

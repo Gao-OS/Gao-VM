@@ -2,13 +2,15 @@
 
 The Flutter client for `docs/DEVELOPMENT_PLAN.md` B1.2. This implements initial
 VM catalog/detail, lifecycle, linked-Operation, durable history, cancellation,
-and resumable-event slices, not complete Beta acceptance.
+resumable-event, and image-catalog slices, not complete Beta acceptance.
 History advances PRD UI-005/UI-007 and presents the public OP-003/OP-008 fields;
 it does not prove native or cross-client Beta gates.
 Cancellation exposes the existing OP-004/OP-005 public contract without changing
 daemon cleanup semantics or proving native cleanup completion.
 The event pane exposes the existing EVT-001/EVT-002/EVT-003 stream and advances
 UI-005/UI-007 without deriving resource state from events.
+The image pane presents IMG-002/IMG-003 metadata through the existing public
+catalog API. It does not verify image integrity or prove import/provisioning gates.
 
 ## Run and check
 
@@ -27,15 +29,17 @@ flutter run -d macos
 Run these commands from `clients/gaovm_ui`. Enter an absolute path to an already
 running daemon's private public-API socket and click **Connect**. There is no
 automatic daemon start, service registration, driver connection, or default VM.
-Choose Virtual machines, Operations, or Events. Connect binds the explicit socket
+Choose Virtual machines, Images, Operations, or Events. Connect binds the explicit socket
 and resets the active view. VM/Operation panes fetch their catalogs; Events waits
-for an explicit Start stream. Operations and Events can be connected without
-first loading VMs. Switching panes keeps the configured connection, releases
+for an explicit Start stream. Images reads its catalog on connection/navigation.
+Images, Operations, and Events can be connected without first loading VMs.
+Switching panes keeps the configured connection, releases
 superseded local reads, and fetches a destination catalog only when applicable.
 Editing the socket field alone never retargets navigation, paging, or detail refresh.
 Selecting a VM or Operation row fetches that resource's current detail. Those
-rows are explicitly labeled snapshots, not a live event feed. Selecting an event
-inspects its already consumed journal record without another request.
+rows are explicitly labeled snapshots, not a live event feed. Selecting an image
+or event inspects its already consumed catalog/journal record without another
+request. Reload images explicitly fetches a fresh catalog and clears selection.
 Load more passes opaque continuation cursors unchanged and preserves selection.
 API CONFIGURED indicates a local
 socket choice, not proof of daemon health; a failed read is not an empty catalog.
@@ -44,7 +48,8 @@ socket choice, not proof of daemon health; a failed read is not an empty catalog
 
 - Production dependencies are Flutter, `gaovm_api_client`, and `gaovm_models`.
 - Reads use public `GET /v1/vms`, `GET /v1/vms/{vm_id}`,
-  `GET /v1/operations`, and `GET /v1/operations/{operation_id}`.
+  `GET /v1/images`, `GET /v1/operations`, and
+  `GET /v1/operations/{operation_id}`.
 - Event subscriptions use only public `GET /v1/events`, not a driver connection
   or direct SQLite/filesystem access. The public API contract is unchanged.
 - Operation history is independent of UI-submitted actions and VM selection.
@@ -126,9 +131,15 @@ Event coverage adds explicit connection/subscription, immutable filter scopes,
 cursor/header resume after EOF, comment handling, bounded retention/selection
 eviction, system/non-VM resources, strict frame rejection, structured problems,
 and actual idle/pre-header socket EOF on pause, navigation, reconnect, and close.
+Image coverage adds all four public image types, optional GaoOS metadata,
+labels/UTC/full-manifest inspection, connection-bound opaque paging, atomic page
+rejection, duplicate IDs and cursor loops, failed-versus-empty reads, explicit
+reload, structured problems, and actual initial/page-read EOF on navigation,
+reconnect, and close.
 `flutter test` renders `build/ui-catalog-preview.png`,
 `build/ui-operations-preview.png`, `build/ui-cancellation-preview.png`,
-and `build/ui-events-preview.png` with bundled fonts for visual inspection.
+`build/ui-events-preview.png`, and `build/ui-images-preview.png` with bundled
+fonts for visual inspection.
 These previews use test HTTP servers, not running VMs or a native sandbox probe.
 
 The test listener is explicitly closed separately from `HttpServer.listenOn`.
@@ -174,9 +185,30 @@ Log-content viewing remains unfinished. The existing VM logs API lists only file
 metadata; it provides neither contents nor a tail stream. Implementing that part
 requires a separately accepted bounded public API, not UI filesystem access.
 
+## Image catalog
+
+The pane reads only `GET /v1/images`. Selection displays the shared typed Image
+record from the last validated page; the frozen public API has no separate image
+detail GET. The view includes type, declared digest, architecture, optional guest
+profile/version/build/channel, labels, UTC creation time, and the full manifest.
+Linux kernels, initrds, raw disks, and GaoOS bundles use the same catalog boundary.
+Missing optional metadata is shown as absent, not inferred from the manifest.
+
+Load more forwards opaque cursors unchanged through the configured client, even
+if the socket field is edited without Connect. The entire page must have a valid
+closed shape and shared Image records before any row is appended. Duplicate IDs
+and repeated/looping cursors are rejected. A failed next page preserves validated
+rows, selection, and the cursor for explicit retry; a failed read is not an empty
+catalog. Reload images starts a fresh catalog and clears selection/paging state.
+
+This is a pane-local snapshot, not a second image repository. It neither opens
+image files/objects nor recomputes digests, imports/deletes images, creates VMs,
+or infers provisioning success. Leaving, reconnecting, or closing releases only
+the local read connection. No daemon, driver, VM, or Operation command is issued.
+
 ## Still required by the full plan
 
-- Image catalog; create/edit/delete; independent display control.
+- Image import/delete and VM create/edit/delete; independent display control.
 - Operation filters beyond cursor paging.
 - Driver/serial log contents and tailing, TestRun/artifacts, host status.
 - Cross-client creation/takeover and consistent state against the real daemon.
