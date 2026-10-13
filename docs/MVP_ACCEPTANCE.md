@@ -38,9 +38,13 @@ release publication or remote push is authorized by this ledger.
    [Packaging](MACOS_PACKAGING.md) assembles a new app without replacing an
    installed one; [the helper](MACOS_SERVICE.md) provides scoped native service
    actions, not an upgrade transaction. [Cold backup/restore](DATA_BACKUP.md)
-   explicitly documents that automatic installed-app rollback is absent.
+   provides a manual same-path recipe, not an installed lifecycle transaction.
    DB migrations and conservative manual recovery are not proof of the planned
-   install/update/uninstall and failed-upgrade rollback workflow.
+   install/update/uninstall and failed-upgrade rollback workflow. The plan does
+   not require automatic rollback; [the proposed lifecycle boundary](proposals/MACOS_UPGRADE_ROLLBACK.md)
+   leaves explicit cold versus automatic orchestration to the user. Its
+   component/version, writer-fencing, whole-state rollback and native acceptance
+   work packages remain unimplemented, not waived by the proposal.
 
 These are not all interchangeable with “tests not run”. In particular, a green
 native boot would not itself resolve the missing Guest advertisement, legacy
@@ -290,6 +294,7 @@ All ten PRD section 13 gates remain explicit:
 | 10 README/PRD/OpenAPI/VmSpec/driver versions agree | Needs release audit | Signed release artifact version/role compatibility and documentation/schema parity |
 
 Do not mark M6, M8 or the overall goal complete from this ledger. The next
-decisions are the explicit Guest development acceptance path and legacy CLI
-compatibility scope. Installed upgrade implementation and native/release evidence
-remain separate required work, not silently waived deliverables.
+decisions are the explicit Guest development acceptance path, legacy CLI
+compatibility scope and cold versus automatic installed lifecycle interface.
+Installed upgrade implementation and native/release evidence remain separate
+required work, not silently waived deliverables.
