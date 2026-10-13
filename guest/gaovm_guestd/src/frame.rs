@@ -1,4 +1,6 @@
-use serde_json::Value;
+use serde::de::{Deserialize, Deserializer, Error, MapAccess, SeqAccess, Visitor};
+use serde_json::{Map, Number, Value};
+use std::fmt;
 use std::io::{self, Read, Write};
 
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
@@ -27,8 +29,11 @@ pub fn read_object<R: Read>(reader: &mut R) -> io::Result<Option<Value>> {
 }
 
 pub(crate) fn decode_object(payload: &[u8]) -> io::Result<Value> {
-    let value: Value = serde_json::from_slice(payload)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid control JSON"))?;
+    // Validate raw keys before constructing Value: its ordinary deserializer
+    // silently replaces duplicates, including escaped/nested binding keys.
+    let value = serde_json::from_slice::<UniqueValue>(payload)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid control JSON"))?
+        .0;
     if !value.is_object() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -36,6 +41,67 @@ pub(crate) fn decode_object(payload: &[u8]) -> io::Result<Value> {
         ));
     }
     Ok(value)
+}
+
+struct UniqueValue(Value);
+
+impl<'de> Deserialize<'de> for UniqueValue {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(UniqueVisitor)
+    }
+}
+
+struct UniqueVisitor;
+
+impl<'de> Visitor<'de> for UniqueVisitor {
+    type Value = UniqueValue;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("JSON with unique object keys")
+    }
+
+    fn visit_unit<E: Error>(self) -> Result<UniqueValue, E> {
+        Ok(UniqueValue(Value::Null))
+    }
+    fn visit_bool<E: Error>(self, value: bool) -> Result<UniqueValue, E> {
+        Ok(UniqueValue(Value::Bool(value)))
+    }
+    fn visit_i64<E: Error>(self, value: i64) -> Result<UniqueValue, E> {
+        Ok(UniqueValue(Value::Number(value.into())))
+    }
+    fn visit_u64<E: Error>(self, value: u64) -> Result<UniqueValue, E> {
+        Ok(UniqueValue(Value::Number(value.into())))
+    }
+    fn visit_f64<E: Error>(self, value: f64) -> Result<UniqueValue, E> {
+        Number::from_f64(value)
+            .map(|number| UniqueValue(Value::Number(number)))
+            .ok_or_else(|| E::custom("invalid number"))
+    }
+    fn visit_str<E: Error>(self, value: &str) -> Result<UniqueValue, E> {
+        self.visit_string(value.to_owned())
+    }
+    fn visit_string<E: Error>(self, value: String) -> Result<UniqueValue, E> {
+        Ok(UniqueValue(Value::String(value)))
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<UniqueValue, A::Error> {
+        let mut values = Vec::new();
+        while let Some(value) = sequence.next_element::<UniqueValue>()? {
+            values.push(value.0);
+        }
+        Ok(UniqueValue(Value::Array(values)))
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut object: A) -> Result<UniqueValue, A::Error> {
+        let mut values = Map::new();
+        while let Some(key) = object.next_key::<String>()? {
+            if values.contains_key(&key) {
+                return Err(A::Error::custom("duplicate object key"));
+            }
+            values.insert(key, object.next_value::<UniqueValue>()?.0);
+        }
+        Ok(UniqueValue(Value::Object(values)))
+    }
 }
 
 pub fn write_object<W: Write>(writer: &mut W, value: &Value) -> io::Result<()> {

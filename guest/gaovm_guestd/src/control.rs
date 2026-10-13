@@ -2,7 +2,7 @@
 
 use crate::frame::{MAX_FRAME_BYTES, decode_object, encode_object};
 use crate::protocol::ProtocolError;
-use crate::session::Session;
+use crate::session::{ControlEpoch, Session};
 use serde_json::Value;
 use std::io;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -25,7 +25,7 @@ pub async fn negotiate<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     reader: &mut FrameReader<R>,
     writer: &mut FrameWriter<W>,
     deadline: Instant,
-) -> Result<(), NegotiationError> {
+) -> Result<ControlEpoch, NegotiationError> {
     let mut pending = PendingNegotiation {
         session,
         reader,
@@ -63,8 +63,12 @@ pub async fn negotiate<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     if Instant::now() >= deadline {
         return Err(NegotiationError::Io(io::ErrorKind::TimedOut.into()));
     }
+    let epoch = pending
+        .session
+        .completed_epoch()
+        .map_err(NegotiationError::Protocol)?;
     pending.complete = true;
-    Ok(())
+    Ok(epoch)
 }
 
 struct PendingNegotiation<'a, R: AsyncRead + Unpin, W: AsyncWrite + Unpin> {
@@ -113,6 +117,16 @@ impl<R: AsyncRead + Unpin> FrameReader<R> {
         }
     }
 
+    /// Restore the bytes consumed by the same-port accept demultiplexer. The
+    /// original opening deadline remains attached to this incomplete frame.
+    pub(crate) fn from_length_prefix(reader: R, prefix: [u8; 4], deadline: Instant) -> Self {
+        let mut framed = Self::new(reader);
+        framed.header = prefix;
+        framed.header_read = 4;
+        framed.deadline = Some(deadline);
+        framed
+    }
+
     pub async fn read_object(&mut self, deadline: Instant) -> io::Result<Option<Value>> {
         match self.state {
             ReadState::Eof => return Ok(None),
@@ -151,7 +165,7 @@ impl<R: AsyncRead + Unpin> FrameReader<R> {
         }
     }
 
-    fn invalidate(&mut self) {
+    pub(crate) fn invalidate(&mut self) {
         self.state = ReadState::Failed;
         self.payload = Vec::new();
     }
@@ -211,6 +225,10 @@ impl<W: AsyncWrite + Unpin> FrameWriter<W> {
             writer,
             state: WriteState::Ready,
         }
+    }
+
+    pub(crate) fn invalidate(&mut self) {
+        self.state = WriteState::Failed;
     }
 
     pub async fn write_object(&mut self, value: &Value, deadline: Instant) -> io::Result<()> {

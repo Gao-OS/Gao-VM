@@ -90,6 +90,27 @@ fn oversized_outbound_objects_do_not_publish_a_partial_frame() {
     assert!(bytes.is_empty());
 }
 
+#[test]
+fn raw_nested_and_escaped_duplicate_keys_are_rejected_without_changing_valid_json_values() {
+    for payload in [
+        r#"{"id":1,"id":2}"#,
+        r#"{"vm_id":"a","vm\u005fid":"b"}"#,
+        r#"{"params":{"peer_role":"host","peer_role":"guest"}}"#,
+        r#"{"values":[{"env":{"key":"a","key":"b"}}]}"#,
+    ] {
+        let mut bytes = (payload.len() as u32).to_be_bytes().to_vec();
+        bytes.extend_from_slice(payload.as_bytes());
+        let error = read_object(&mut Cursor::new(bytes)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(error.to_string(), "invalid control JSON");
+    }
+    let message = json!({"values": [null, true, false, -1, u64::MAX, 1.25, "雪", [], {}],
+        "nested": {"key": "same keys in separate objects are valid"}, "other": {"key": 3}});
+    let mut bytes = Vec::new();
+    write_object(&mut bytes, &message).unwrap();
+    assert_eq!(read_object(&mut Cursor::new(bytes)).unwrap(), Some(message));
+}
+
 struct Fragmented {
     bytes: Cursor<Vec<u8>>,
     interrupt_once: bool,

@@ -2,6 +2,9 @@ use crate::protocol::{ErrorCode, PROTOCOL_VERSION, ProtocolError, validate_messa
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use tokio::sync::watch;
 
 pub const CORE_CAPABILITIES: [&str; 6] = [
     "health",
@@ -19,7 +22,87 @@ pub enum Role {
     Guest,
 }
 
+/// Opaque connection identity issued only by successful wire negotiation. It
+/// proves completed hello/flush, not native peer authentication. Never serialize
+/// it or reconstruct it from VM/generation strings supplied on a binary stream.
+#[derive(Clone)]
+pub struct ControlEpoch(Arc<EpochState>);
+
+struct EpochState {
+    role: Role,
+    vm_id: String,
+    driver_generation: u64,
+    active: Mutex<bool>,
+    grant_registry_claimed: AtomicBool,
+    invalidated: watch::Sender<bool>,
+}
+
+impl std::fmt::Debug for ControlEpoch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ControlEpoch")
+            .field("vm_id", &self.0.vm_id)
+            .field("driver_generation", &self.0.driver_generation)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ControlEpoch {
+    pub fn vm_id(&self) -> &str {
+        &self.0.vm_id
+    }
+
+    pub fn driver_generation(&self) -> u64 {
+        self.0.driver_generation
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.0.active.lock().is_ok_and(|active| *active)
+    }
+
+    /// Fence new work before waking transfers. EOF/replacement handlers call
+    /// this first, then abort/close their owned transports and clean up spools.
+    pub fn invalidate(&self) {
+        if let Ok(mut active) = self.0.active.lock() {
+            *active = false;
+        }
+        self.0.invalidated.send_replace(true);
+    }
+
+    pub async fn invalidated(&self) {
+        let mut changed = self.0.invalidated.subscribe();
+        while !*changed.borrow_and_update() {
+            if changed.changed().await.is_err() {
+                break;
+            }
+        }
+    }
+
+    pub(crate) fn same(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
+    pub(crate) fn is_guest(&self) -> bool {
+        self.0.role == Role::Guest
+    }
+
+    pub(crate) fn claim_grant_registry(&self) -> bool {
+        self.while_active(|| !self.0.grant_registry_claimed.swap(true, Ordering::Relaxed))
+            .unwrap_or(false)
+    }
+
+    /// Short synchronous state transitions only. No I/O/await while holding
+    /// this gate; invalidation and authorization have one linearization point.
+    pub(crate) fn while_active<T>(&self, transition: impl FnOnce() -> T) -> Option<T> {
+        let active = self.0.active.lock().ok()?;
+        if !*active {
+            return None;
+        }
+        Some(transition())
+    }
+}
+
 pub struct Session {
+    epoch: ControlEpoch,
     role: Role,
     vm_id: String,
     driver_generation: u64,
@@ -51,7 +134,16 @@ impl Session {
             "params": {"peer_role": role, "offered_capabilities": offered, "required_capabilities": required},
         });
         validate_message(&hello)?;
+        let (invalidated, _) = watch::channel(false);
         Ok(Self {
+            epoch: ControlEpoch(Arc::new(EpochState {
+                role,
+                vm_id: vm_id.to_owned(),
+                driver_generation,
+                active: Mutex::new(true),
+                grant_registry_claimed: AtomicBool::new(false),
+                invalidated,
+            })),
             role,
             vm_id: vm_id.to_owned(),
             driver_generation,
@@ -76,13 +168,14 @@ impl Session {
     pub fn receive_hello(&mut self, message: &Value) -> Result<Option<Value>, ProtocolError> {
         let result = self.process_hello(message);
         if result.is_err() {
-            self.failed = true;
+            self.invalidate();
         }
         result
     }
 
     pub fn is_ready(&self) -> bool {
         !self.failed
+            && self.epoch.is_active()
             && self.sent_hello
             && self.negotiated.is_some()
             && self.negotiated == self.acknowledged
@@ -90,6 +183,18 @@ impl Session {
 
     pub(crate) fn invalidate(&mut self) {
         self.failed = true;
+        self.epoch.invalidate();
+    }
+
+    pub(crate) fn completed_epoch(&self) -> Result<ControlEpoch, ProtocolError> {
+        if !self.is_ready() {
+            return Err(invalid("guest session is not ready"));
+        }
+        Ok(self.epoch.clone())
+    }
+
+    pub(crate) fn belongs_to(&self, epoch: &ControlEpoch) -> bool {
+        self.epoch.same(epoch)
     }
 
     pub fn authorize_request(&self, message: &Value) -> Result<(), ProtocolError> {
@@ -196,6 +301,12 @@ impl Session {
             ));
         }
         Ok(())
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.epoch.invalidate();
     }
 }
 

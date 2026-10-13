@@ -8,6 +8,8 @@ json_schemas=(
   "$repo_root/schemas/vm-spec/v1alpha1.schema.json"
   "$repo_root/schemas/driver-protocol/v2.schema.json"
   "$repo_root/schemas/guest-protocol/v1.schema.json"
+  "$repo_root/schemas/guest-bridge/v1.schema.json"
+  "$repo_root/schemas/guest-binary/v1.schema.json"
 )
 
 python3 - "${json_schemas[@]}" <<'PY'

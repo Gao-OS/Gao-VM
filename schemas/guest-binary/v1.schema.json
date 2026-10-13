@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gaovm.dev/schemas/guest-binary/v1.schema.json",
+  "title": "GaoVM separate guest binary stream v1",
+  "description": "Independent strict artifact headers. Runtime code must enforce 4096 encoded bytes, duplicate-key rejection, authenticated current-session grants, 8 KiB chunks, exact size/digest, deadlines and durable publication before ACK.",
+  "oneOf": [
+    { "$ref": "#/$defs/open" },
+    { "$ref": "#/$defs/ready" },
+    { "$ref": "#/$defs/committed" },
+    { "$ref": "#/$defs/error" }
+  ],
+  "$defs": {
+    "vmId": { "type": "string", "pattern": "^vm_[0-7][0-9A-HJKMNP-TV-Z]{25}$" },
+    "operationId": { "type": "string", "pattern": "^op_[0-7][0-9A-HJKMNP-TV-Z]{25}$" },
+    "artifactId": { "type": "string", "pattern": "^art_[0-7][0-9A-HJKMNP-TV-Z]{25}$" },
+    "streamId": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "size": { "type": "integer", "minimum": 0, "maximum": 268435456 },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "correlation": {
+      "type": "object",
+      "required": ["protocol_version", "kind", "vm_id", "driver_generation", "operation_id"],
+      "properties": {
+        "protocol_version": { "const": "gaovm.binary.v1" },
+        "kind": { "enum": ["open", "ready", "committed", "error"] },
+        "vm_id": { "$ref": "#/$defs/vmId" },
+        "driver_generation": { "type": "integer", "minimum": 1 },
+        "operation_id": { "$ref": "#/$defs/operationId" }
+      }
+    },
+    "source": {
+      "oneOf": [
+        {
+          "type": "object", "required": ["kind", "stream_id"],
+          "properties": {
+            "kind": { "const": "collection" },
+            "stream_id": { "$ref": "#/$defs/streamId" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object", "required": ["kind", "output"],
+          "properties": {
+            "kind": { "const": "exec_output" },
+            "output": { "enum": ["stdout", "stderr"] }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "artifact": {
+      "type": "object",
+      "required": ["artifact_id", "kind", "content_type", "size_bytes", "digest", "stream_id"],
+      "properties": {
+        "artifact_id": { "$ref": "#/$defs/artifactId" },
+        "kind": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "content_type": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "size_bytes": { "$ref": "#/$defs/size" },
+        "digest": { "$ref": "#/$defs/digest" },
+        "stream_id": { "$ref": "#/$defs/streamId" }
+      },
+      "additionalProperties": false
+    },
+    "open": {
+      "allOf": [{ "$ref": "#/$defs/correlation" }],
+      "properties": {
+        "kind": { "const": "open" },
+        "artifact_id": { "$ref": "#/$defs/artifactId" },
+        "source": { "$ref": "#/$defs/source" }
+      },
+      "required": ["artifact_id", "source"],
+      "unevaluatedProperties": false
+    },
+    "ready": {
+      "allOf": [{ "$ref": "#/$defs/correlation" }],
+      "properties": {
+        "kind": { "const": "ready" },
+        "artifact": { "$ref": "#/$defs/artifact" }
+      },
+      "required": ["artifact"],
+      "unevaluatedProperties": false
+    },
+    "committed": {
+      "allOf": [{ "$ref": "#/$defs/correlation" }],
+      "properties": {
+        "kind": { "const": "committed" },
+        "artifact_id": { "$ref": "#/$defs/artifactId" },
+        "stream_id": { "$ref": "#/$defs/streamId" },
+        "size_bytes": { "$ref": "#/$defs/size" },
+        "digest": { "$ref": "#/$defs/digest" }
+      },
+      "required": ["artifact_id", "stream_id", "size_bytes", "digest"],
+      "unevaluatedProperties": false
+    },
+    "error": {
+      "allOf": [{ "$ref": "#/$defs/correlation" }],
+      "properties": {
+        "kind": { "const": "error" },
+        "artifact_id": { "$ref": "#/$defs/artifactId" },
+        "error": {
+          "type": "object", "required": ["code", "message", "retryable"],
+          "properties": {
+            "code": { "enum": ["PROTOCOL_VERSION_MISMATCH", "INVALID_REQUEST", "ARTIFACT_NOT_FOUND", "ARTIFACT_LIMIT_EXCEEDED", "GUEST_INTERNAL_ERROR"] },
+            "message": { "type": "string", "maxLength": 256, "x-gaovm-max-utf8-bytes": 256 },
+            "retryable": { "type": "boolean" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "required": ["artifact_id", "error"],
+      "unevaluatedProperties": false
+    }
+  },
+  "examples": [
+    {
+      "protocol_version": "gaovm.binary.v1", "kind": "open",
+      "vm_id": "vm_01J00000000000000000000000", "driver_generation": 8,
+      "operation_id": "op_01J00000000000000000000001",
+      "artifact_id": "art_01J00000000000000000000002",
+      "source": { "kind": "collection", "stream_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" }
+    },
+    {
+      "protocol_version": "gaovm.binary.v1", "kind": "open",
+      "vm_id": "vm_01J00000000000000000000000", "driver_generation": 8,
+      "operation_id": "op_01J00000000000000000000001",
+      "artifact_id": "art_01J00000000000000000000002",
+      "source": { "kind": "exec_output", "output": "stdout" }
+    },
+    {
+      "protocol_version": "gaovm.binary.v1", "kind": "ready",
+      "vm_id": "vm_01J00000000000000000000000", "driver_generation": 8,
+      "operation_id": "op_01J00000000000000000000001",
+      "artifact": {
+        "artifact_id": "art_01J00000000000000000000002", "kind": "stdout",
+        "content_type": "application/octet-stream", "size_bytes": 11,
+        "digest": "sha256:b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
+        "stream_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      }
+    },
+    {
+      "protocol_version": "gaovm.binary.v1", "kind": "committed",
+      "vm_id": "vm_01J00000000000000000000000", "driver_generation": 8,
+      "operation_id": "op_01J00000000000000000000001",
+      "artifact_id": "art_01J00000000000000000000002",
+      "stream_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "size_bytes": 11,
+      "digest": "sha256:b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+    },
+    {
+      "protocol_version": "gaovm.binary.v1", "kind": "error",
+      "vm_id": "vm_01J00000000000000000000000", "driver_generation": 8,
+      "operation_id": "op_01J00000000000000000000001",
+      "artifact_id": "art_01J00000000000000000000002",
+      "error": { "code": "ARTIFACT_NOT_FOUND", "message": "artifact is not available", "retryable": false }
+    }
+  ]
+}

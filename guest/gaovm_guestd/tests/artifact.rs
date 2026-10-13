@@ -167,7 +167,7 @@ async fn retention_and_total_storage_budgets_reject_new_collections() {
 }
 
 #[tokio::test]
-async fn release_reclaims_capacity_but_already_open_readers_keep_the_sealed_bytes() {
+async fn released_collection_readers_keep_the_bytes_charged_until_they_close() {
     use gaovm_guestd::protocol::ErrorCode;
     use std::io::Write;
 
@@ -202,10 +202,15 @@ async fn release_reclaims_capacity_but_already_open_readers_keep_the_sealed_byte
     );
     let mut second = first.clone();
     second["operation_id"] = json!("op_01J00000000000000000000001");
-    collector.collect(&session, &second).await.unwrap();
+    assert_eq!(
+        collector.collect(&session, &second).await.unwrap_err().code,
+        ErrorCode::ArtifactLimitExceeded
+    );
     let mut bytes = Vec::new();
     reader.read_to_end(&mut bytes).unwrap();
     assert_eq!(bytes, b"1234");
+    drop(reader);
+    collector.collect(&session, &second).await.unwrap();
 }
 
 #[tokio::test]
@@ -593,6 +598,7 @@ async fn empty_binary_and_multichunk_files_keep_exact_bounded_bytes() {
 
 #[tokio::test]
 async fn dropping_an_in_flight_collection_discards_partial_spools_and_allows_retry() {
+    use gaovm_guestd::spool::SpoolBudget;
     use std::future::Future;
     use std::task::Poll;
 
@@ -602,12 +608,14 @@ async fn dropping_an_in_flight_collection_discards_partial_spools_and_allows_ret
         .unwrap()
         .set_len(8 * 1024 * 1024)
         .unwrap();
-    let mut collector = ArtifactCollector::new(
+    let budget = SpoolBudget::default();
+    let mut collector = ArtifactCollector::with_spool_budget(
         VM,
         8,
         source.path(),
         spool.path(),
         ArtifactLimits::default(),
+        budget.clone(),
     )
     .unwrap();
     let session = session();
@@ -619,6 +627,9 @@ async fn dropping_an_in_flight_collection_discards_partial_spools_and_allows_ret
     })
     .await;
     drop(pending);
+    // Caller cancellation is cooperative; inspect cleanup only after the real
+    // copy worker and its discarded owned result have completed.
+    budget.quiesce().await.unwrap();
     let owned = std::fs::read_dir(spool.path())
         .unwrap()
         .next()
@@ -633,8 +644,22 @@ async fn dropping_an_in_flight_collection_discards_partial_spools_and_allows_ret
 #[tokio::test]
 async fn an_observed_source_change_discards_the_entire_collection() {
     use gaovm_guestd::protocol::ErrorCode;
-    use std::future::Future;
-    use std::task::Poll;
+    use std::io::{Seek, SeekFrom, Write};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct Mutation {
+        stop: Arc<AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+    impl Drop for Mutation {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Release);
+            if let Some(thread) = self.thread.take() {
+                thread.join().unwrap();
+            }
+        }
+    }
 
     let source = tempfile::tempdir().unwrap();
     let spool = tempfile::tempdir().unwrap();
@@ -650,17 +675,31 @@ async fn an_observed_source_change_discards_the_entire_collection() {
     .unwrap();
     let session = session();
     let request = request(&["changing"], 8 * 1024 * 1024);
-    let mut pending = Box::pin(collector.collect(&session, &request));
-    std::future::poll_fn(|context| {
-        assert!(pending.as_mut().poll(context).is_pending());
-        Poll::Ready(())
-    })
-    .await;
-    file.set_len(0).unwrap();
-    assert_eq!(
-        pending.await.unwrap_err().code,
-        ErrorCode::GuestInternalError
-    );
+    let stop = Arc::new(AtomicBool::new(false));
+    let stopping = stop.clone();
+    let mut writer = file.try_clone().unwrap();
+    let (started, ready) = tokio::sync::oneshot::channel();
+    let thread = std::thread::spawn(move || {
+        let mut started = Some(started);
+        let mut byte = 0;
+        while !stopping.load(Ordering::Acquire) {
+            writer.seek(SeekFrom::Start(0)).unwrap();
+            writer.write_all(&[byte]).unwrap();
+            byte ^= 0xff;
+            if let Some(started) = started.take() {
+                started.send(()).unwrap();
+            }
+            std::thread::yield_now();
+        }
+    });
+    let mutation = Mutation {
+        stop,
+        thread: Some(thread),
+    };
+    ready.await.unwrap();
+    let result = collector.collect(&session, &request).await;
+    drop(mutation);
+    assert_eq!(result.unwrap_err().code, ErrorCode::GuestInternalError);
     let owned = std::fs::read_dir(spool.path())
         .unwrap()
         .next()
@@ -668,6 +707,7 @@ async fn an_observed_source_change_discards_the_entire_collection() {
         .unwrap()
         .path();
     assert_eq!(std::fs::read_dir(owned).unwrap().count(), 0);
+    file.set_len(0).unwrap();
     assert_eq!(
         collector
             .collect(&session, &request)

@@ -4,13 +4,14 @@
 use crate::artifact::ArtifactInfo;
 use crate::protocol::{ErrorCode, PROTOCOL_VERSION, ProtocolError, validate_message};
 use crate::session::Session;
+use crate::spool::{Reservation, RetainedFile, SpoolBudget, SpoolDirectory, SpoolReader};
 use nix::sys::signal::{Signal, killpg};
 use nix::unistd::{Pid, Uid};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
-use std::fs::{File, Permissions};
+use std::fs::Permissions;
 use std::io;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::process::ExitStatusExt;
@@ -19,8 +20,8 @@ use std::process::{ExitStatus, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use tempfile::{NamedTempFile, TempDir};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tempfile::NamedTempFile;
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::{JoinHandle, JoinSet};
@@ -45,7 +46,7 @@ impl Default for ExecLimits {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ExecState {
     Running,
@@ -54,7 +55,7 @@ pub enum ExecState {
     Cancelled,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "lowercase")]
 pub enum OutputReference {
     Inline {
@@ -68,7 +69,7 @@ pub enum OutputReference {
     },
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ExecResult {
     pub state: ExecState,
     pub exit_code: Option<i32>,
@@ -119,7 +120,7 @@ struct CaptureOptions {
 
 struct StoredOutput {
     reference: OutputReference,
-    file: Option<NamedTempFile>,
+    file: Option<Arc<RetainedFile>>,
     digest: Option<String>,
     failure: Option<ErrorCode>,
 }
@@ -161,8 +162,9 @@ impl Job {
 pub struct Executor {
     vm_id: String,
     generation: u64,
-    spool: Arc<TempDir>,
+    spool: Arc<SpoolDirectory>,
     limits: ExecLimits,
+    budget: SpoolBudget,
     jobs: HashMap<String, Job>,
     closed: bool,
 }
@@ -173,6 +175,22 @@ impl Executor {
         generation: u64,
         spool_parent: &Path,
         limits: ExecLimits,
+    ) -> Result<Self, ProtocolError> {
+        Self::with_spool_budget(
+            vm_id,
+            generation,
+            spool_parent,
+            limits,
+            SpoolBudget::default(),
+        )
+    }
+
+    pub fn with_spool_budget(
+        vm_id: &str,
+        generation: u64,
+        spool_parent: &Path,
+        limits: ExecLimits,
+        budget: SpoolBudget,
     ) -> Result<Self, ProtocolError> {
         validate_message(
             &json!({"protocol_version": PROTOCOL_VERSION, "kind": "request", "id": "exec-binding",
@@ -205,8 +223,10 @@ impl Executor {
         Ok(Self {
             vm_id: vm_id.to_owned(),
             generation,
-            spool: Arc::new(spool),
+            spool: SpoolDirectory::new(spool, budget.clone())
+                .map_err(|_| error(ErrorCode::GuestInternalError))?,
             limits,
+            budget,
             jobs: HashMap::new(),
             closed: false,
         })
@@ -241,8 +261,16 @@ impl Executor {
             return Err(error(ErrorCode::ExecStartFailed));
         }
         tokio::runtime::Handle::try_current().map_err(|_| error(ErrorCode::GuestInternalError))?;
-        let stdout_file = self.capture_file(params.capture.stdout)?;
-        let stderr_file = self.capture_file(params.capture.stderr)?;
+        let reservation = self
+            .budget
+            .try_reserve(if params.capture.stdout || params.capture.stderr {
+                self.limits.max_output_bytes
+            } else {
+                0
+            })
+            .ok_or_else(|| error(ErrorCode::ExecStartFailed))?;
+        let stdout_file = self.capture_file(params.capture.stdout, reservation.clone())?;
+        let stderr_file = self.capture_file(params.capture.stderr, reservation.clone())?;
         let mut command = Command::new(&params.argv[0]);
         command
             .args(&params.argv[1..])
@@ -277,6 +305,7 @@ impl Executor {
                 inline: params.capture.max_inline_bytes,
                 total: self.limits.max_output_bytes,
             }),
+            reservation,
         };
         let child = command
             .spawn()
@@ -443,7 +472,7 @@ impl Executor {
         session: &Session,
         request: &Value,
         stream: OutputStream,
-    ) -> Result<Option<io::Take<File>>, ProtocolError> {
+    ) -> Result<Option<io::Take<SpoolReader>>, ProtocolError> {
         let operation = self.authorize(session, request, "exec.status")?;
         let job = self
             .jobs
@@ -465,7 +494,7 @@ impl Executor {
             .file
             .as_ref()
             .map(|file| {
-                File::open(file.path())
+                file.reader()
                     .map(|file| std::io::Read::take(file, size))
                     .map_err(|_| error(ErrorCode::GuestInternalError))
             })
@@ -499,13 +528,21 @@ impl Executor {
                     .map_err(|_| error(ErrorCode::GuestInternalError))?;
             }
         }
-        Ok(())
+        self.budget
+            .quiesce()
+            .await
+            .map_err(|_| error(ErrorCode::GuestInternalError))
     }
 
-    fn capture_file(&self, enabled: bool) -> Result<Option<NamedTempFile>, ProtocolError> {
+    fn capture_file(
+        &self,
+        enabled: bool,
+        reservation: Arc<Reservation>,
+    ) -> Result<Option<Arc<RetainedFile>>, ProtocolError> {
         enabled
             .then(|| {
                 NamedTempFile::new_in(self.spool.path())
+                    .and_then(|file| RetainedFile::new(file, self.spool.clone(), reservation))
                     .map_err(|_| error(ErrorCode::ExecStartFailed))
             })
             .transpose()
@@ -577,13 +614,14 @@ struct RunPlan {
     started: Instant,
     deadline: tokio::time::Instant,
     limits: Arc<RunLimits>,
+    reservation: Arc<Reservation>,
 }
 
 async fn run(
     mut child: Child,
     mut group: ProcessGroup,
-    stdout_file: Option<NamedTempFile>,
-    stderr_file: Option<NamedTempFile>,
+    stdout_file: Option<Arc<RetainedFile>>,
+    stderr_file: Option<Arc<RetainedFile>>,
     cancel: oneshot::Receiver<()>,
     plan: RunPlan,
 ) -> Completed {
@@ -654,6 +692,7 @@ async fn run(
     }
     let mut stdout = StoredOutput::empty();
     let mut stderr = StoredOutput::empty();
+    let mut captures_complete = true;
     let outputs = tokio::time::timeout(CLEANUP_DEADLINE, async {
         while let Some(result) = readers.join_next().await {
             match result {
@@ -664,7 +703,10 @@ async fn run(
                         OutputStream::Stderr => stderr = output,
                     }
                 }
-                _ => failure = Some(ErrorCode::GuestInternalError),
+                _ => {
+                    captures_complete = false;
+                    failure = Some(ErrorCode::GuestInternalError);
+                }
             }
         }
     })
@@ -672,6 +714,22 @@ async fn run(
     if outputs.is_err() {
         readers.abort_all();
         failure = Some(ErrorCode::GuestInternalError);
+    } else if captures_complete {
+        let retained = [&stdout, &stderr]
+            .iter()
+            .map(|output| {
+                if output.file.is_none() {
+                    return 0;
+                }
+                match &output.reference {
+                    OutputReference::Artifact { size_bytes, .. } => *size_bytes,
+                    OutputReference::Inline { .. } => 0,
+                }
+            })
+            .sum();
+        if plan.reservation.seal(retained).is_err() {
+            failure = Some(ErrorCode::GuestInternalError);
+        }
     }
     let state = if cancelled && status.is_some() {
         ExecState::Cancelled
@@ -711,7 +769,7 @@ fn spawn_capture<R: AsyncRead + Unpin + Send + 'static>(
     readers: &mut JoinSet<CaptureTask>,
     stream: OutputStream,
     pipe: Option<R>,
-    file: Option<NamedTempFile>,
+    file: Option<Arc<RetainedFile>>,
     limits: Arc<RunLimits>,
     total: Arc<AtomicU64>,
     faults: mpsc::Sender<ErrorCode>,
@@ -730,13 +788,12 @@ fn spawn_capture<R: AsyncRead + Unpin + Send + 'static>(
 
 async fn capture<R: AsyncRead + Unpin>(
     mut pipe: R,
-    file: NamedTempFile,
+    file: Arc<RetainedFile>,
     limits: Arc<RunLimits>,
     total: Arc<AtomicU64>,
     faults: &mpsc::Sender<ErrorCode>,
 ) -> Result<StoredOutput, ErrorCode> {
-    let mut writer =
-        tokio::fs::File::from_std(file.reopen().map_err(|_| ErrorCode::GuestInternalError)?);
+    let mut writer = file.writer().map_err(|_| ErrorCode::GuestInternalError)?;
     let mut buffer = [0u8; 8192];
     let mut size = 0;
     let mut hash = Sha256::new();
@@ -752,7 +809,7 @@ async fn capture<R: AsyncRead + Unpin>(
         let before = total.fetch_add(count as u64, Ordering::Relaxed);
         let allowed = (count as u64).min(limits.total.saturating_sub(before)) as usize;
         writer
-            .write_all(&buffer[..allowed])
+            .write_chunk(&buffer[..allowed])
             .await
             .map_err(|_| ErrorCode::GuestInternalError)?;
         hash.update(&buffer[..allowed]);
@@ -764,26 +821,14 @@ async fn capture<R: AsyncRead + Unpin>(
         }
     }
     writer
-        .flush()
+        .sync()
         .await
         .map_err(|_| ErrorCode::GuestInternalError)?;
-    writer
-        .sync_all()
-        .await
-        .map_err(|_| ErrorCode::GuestInternalError)?;
-    drop(writer);
     if size <= limits.inline {
-        let reader =
-            tokio::fs::File::from_std(file.reopen().map_err(|_| ErrorCode::GuestInternalError)?);
-        let mut bytes = Vec::with_capacity(size as usize);
-        reader
-            .take(size)
-            .read_to_end(&mut bytes)
+        let bytes = writer
+            .inline(size)
             .await
             .map_err(|_| ErrorCode::GuestInternalError)?;
-        if bytes.len() as u64 != size {
-            return Err(ErrorCode::GuestInternalError);
-        }
         if let Ok(text) = String::from_utf8(bytes) {
             return Ok(StoredOutput {
                 reference: OutputReference::Inline {
@@ -797,6 +842,7 @@ async fn capture<R: AsyncRead + Unpin>(
             });
         }
     }
+    drop(writer);
     Ok(StoredOutput {
         reference: OutputReference::Artifact {
             artifact_id: format!("art_{}", ulid::Ulid::generate()),

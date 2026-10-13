@@ -6,11 +6,12 @@ rust-version = "1.96"
 publish = false
 
 [dependencies]
+getrandom = "0.4.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 jsonschema = { version = "0.58.6", default-features = false }
-nix = { version = "0.31.3", default-features = false, features = ["signal", "process", "user", "fs", "feature"] }
+nix = { version = "0.31.3", default-features = false, features = ["signal", "process", "user", "fs", "feature", "socket"] }
 sha2 = "0.11.0"
 tempfile = "3.27.0"
-tokio = { version = "1.53.2", features = ["fs", "io-util", "macros", "net", "process", "rt", "sync", "time"] }
+tokio = { version = "1.53.2", features = ["fs", "io-util", "macros", "net", "process", "rt", "signal", "sync", "time"] }
 ulid = "3.0.0"
