@@ -2,8 +2,9 @@
 
 Checked against [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md),
 [PRD.md](PRD.md) and [ARCHITECTURE.md](ARCHITECTURE.md) on 2026-10-13.
-The implementation baseline is `7bc19b7` on local `main`, including the
-`83bdc80` multi-VM smoke recipe and the independent host-guard test budgets.
+The implementation baseline is `b75b5a1` on local `main`, including failed-VM
+retention, the `83bdc80` multi-VM smoke recipe and the independently bounded
+host-guard and artifact-recovery scenarios. Earlier checkpoints remain below.
 
 **The Multi-VM Agent Testing MVP is not release-ready.** This ledger distinguishes
 implementation/test entry points from proof that the product works. A file,
@@ -259,11 +260,76 @@ Previously completed reports inspected directly on this host:
   native executable-unlink case remains unrun; neither positive installed case
   was recertified. See [the migration checkpoint](LEGACY_VM_MIGRATION.md#owned-child-cleanup-checkpoint-2026-10-13).
 
-Local reports are diagnostic evidence, not a GitHub Actions run. Older Swift,
-Rust, AOT and signed-fixture results remain scoped component evidence; this
-ledger does not recertify those suites or infer Apple Silicon execution from
-them. Before release, rerun all ordinary gates at the release revision and attach
-their complete outputs together with the native evidence.
+### Ordinary local matrix refresh (2026-10-13)
+
+The refreshed checks ran on Intel macOS 15.8.1 with Dart 3.9.0, Swift 6.2.4,
+swift-format 6.2.3 and Rust 1.96.1. Swift/Rust and the unchanged Dart library/CLI
+sources were checked before the daemon test repairs; the final daemon matrix,
+formatting, analysis and AOT compilation cover the repaired source baseline.
+
+| Component | Passed tests | Scope |
+| --- | --- | --- |
+| gaovm_models | 101 | Full package suite; zero skips/errors |
+| gaovm_rpc | 5 | Full package suite; zero skips/errors |
+| gaovm_api_client | 87 | Full package suite; zero skips/errors |
+| gaovm_cli | 155 | Full package suite, default concurrency/timeouts; zero skips/errors |
+| gaovmd | 1440 | Filtered suite, default concurrency/timeouts; one Linux-only platform skip, zero errors; three checks excluded below |
+| Swift driver | 142 | Local component suite; zero failures; not native VZ/GaoOS boot acceptance |
+| Swift service helper | 16 | Component/signing checks; registration actions mocked, no installed registration mutation |
+| Rust guest | 195 | Local macOS suite; zero failures/ignored tests; Linux-only vsock suite executes zero cases here |
+
+All five Dart packages passed lockfile enforcement, formatting and analysis.
+Daemon and CLI AOT compilation passed. Both Swift packages passed strict lint
+with the pinned formatter; the service helper's ARM64 release cross-build passed.
+Rust formatting, warning-as-error clippy, locked tests, all-target host build and
+Linux ARM64 static target check passed. JSON Schema/OpenAPI validation passed.
+Neither ARM64 cross-build/check is execution on an ARM64 machine.
+
+The final daemon run supplied the real Rust `host_publication_fixture`; its
+integration cases were not skipped for a missing executable. Its only platform
+skip was `Linux reports clone fallback without creating a destination`.
+The three exclusions remain **unrun, not passing**:
+
+- `installed daemon completes a pre-cancelled TestRun without client polling`
+- `installed daemon serves the VM catalog over HTTP UDS`
+- `unresolved native census rejects startup before legacy migration`
+
+The native census fence was not bypassed and the actual executable-unlink case
+was not rerun. No Chrome work, machine switch, installed service/app replacement,
+native Guest acceptance or release publication follows from these results.
+
+The refresh preserves, rather than erases, the reproduced failures:
+
+- Initial daemon run: 1432 passes, one skip and five failed Supervisor tests;
+  an instrumented rerun had 1431 passes and six failures including the Guest
+  heartbeat timing race. Source fixture startup exceeded the existing
+  connection budget under suite load; narrow imports reduced startup cost and
+  keep the same actual hello, RPC, crash and recovery implementations.
+- After those two repairs: 1434 passes, one skip and three crash-child deadline
+  failures. Narrowing the runtime/collection child imports retained their exact
+  crash checkpoints and exit/recovery assertions. Independent checks also
+  showed reduced startup cost, not a native runtime boot correction.
+- The next run: 1436 passes, one skip and one failed artifact-recovery test.
+  Two independent manifest variants shared a default 30-second budget; a child
+  outlived teardown and then reported a missing fixture directory. The variants
+  now have separate default budgets. All artifact crash children are owned and
+  joined before fixture deletion; an unconfirmed exit retains both directory
+  and open database. Two new receipt checks failed before this change and pass
+  afterwards, including a real child exit and a controlled missing receipt.
+- Guest heartbeat isolation now holds only the first probe's scheduling at the
+  external timer boundary. The real authenticated original channel, healthy
+  Guest replies before/during the probe, matching VM/generation/Operation event
+  and descriptor closure remain asserted. Default production Timer intervals,
+  ping timeouts and shutdown timers are unchanged. Focused process coverage
+  passed 30 tests; final artifact coverage passed 39, both included in the
+  final 1440 daemon passes rather than added again.
+
+Retained diagnostic reports are under `/private/tmp/gaovm-mvp-matrix.sUncEh`;
+`daemon-final.jsonl` has a successful terminal receipt. The earlier red reports
+remain separate. These local reports are not a GitHub Actions run, native
+acceptance or notarized release evidence. Before release, rerun all ordinary
+gates at the release revision, without hiding required checks, and attach their
+complete outputs together with the native evidence.
 
 Repeat the scoped current checks from the repository root:
 
@@ -272,9 +338,16 @@ bash scripts/validate_contracts.sh
 (cd clients/gaovm_cli && mise exec dart@3.9.0 -- dart format --output=none --set-exit-if-changed bin lib test tool)
 (cd clients/gaovm_cli && mise exec dart@3.9.0 -- dart analyze)
 (cd clients/gaovm_cli && mise exec dart@3.9.0 -- dart test --reporter expanded)
+(cd guest/gaovm_guestd && cargo +1.96.1 build --all-targets --locked)
+(
+  export GAOVM_GUEST_FIXTURE="$PWD/guest/gaovm_guestd/target/debug/examples/host_publication_fixture"
+  cd daemon/gaovmd
+  mise exec dart@3.9.0 -- dart test --reporter expanded --name '^(?!.*(?:installed daemon completes a pre-cancelled TestRun without client polling|installed daemon serves the VM catalog over HTTP UDS|unresolved native census rejects startup before legacy migration)).*$'
+)
 ```
 
-These commands do not cover the full daemon/Swift/Rust/native release matrix.
+These commands intentionally select the same daemon subset; they do not cover
+the full unfiltered daemon/Swift/Rust/native release matrix.
 
 ## Release gate checklist
 
@@ -285,7 +358,7 @@ All ten PRD section 13 gates remain explicit:
 | 1 All P0 complete or approved scope changes | Not proven | Close the 94 entries, implementation gaps and compatibility decision above |
 | 2 OpenAPI/implementation contract alignment | Component validation only | Complete live handler/schema contract checks at the release revision |
 | 3 All Dart unit/integration tests pass | Not proven | Unfiltered green release-revision runs; excluded native/cleanup cases are not passes |
-| 4 Swift driver tests pass | Not recertified by this audit | Full pinned-toolchain output at the release revision |
+| 4 Swift driver tests pass | Local component pass | 142 tests and strict lint passed; attach full pinned-toolchain output at the release revision |
 | 5 Apple Silicon self-hosted E2E | Not run | Authorized host/runner execution; user owns current hardware testing |
 | 6 Multi-VM/crash/restart/guest/TestRun/idempotency/event scenarios | Partial component coverage | Native AC scenarios and downloadable Guest/TestRun results, not only acceptance receipts |
 | 7 Driver signing and virtualization entitlement | Assembly/static component coverage | Verify the actual executed native binary and its entitlements |
