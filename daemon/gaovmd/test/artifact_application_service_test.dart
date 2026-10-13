@@ -10,13 +10,87 @@ import 'package:gaovmd/src/artifact_retention_loop.dart';
 import 'package:sqlite3/sqlite3.dart';
 import 'package:test/test.dart';
 
+import 'helpers/owned_test_process.dart';
+
 void main() {
   late Directory temporary;
   late GaoVmDatabase database;
   late OwnedImageDirectory root;
   late TestRun run;
+  final children = <OwnedTestProcess>[];
+  var fixtureClosed = false;
   ArtifactApplicationService service() =>
       ArtifactApplicationService(database: database, directory: root);
+
+  Future<ProcessResult> crashArtifact(String checkpoint) async {
+    final child = OwnedTestProcess(
+      await Process.start(Platform.resolvedExecutable, [
+        '--packages=${Directory.current.path}/.dart_tool/package_config.json',
+        'test/helpers/artifact_crash_child.dart',
+        root.path,
+        '${temporary.path}/catalog.db',
+        run.id.value,
+        run.operationId.value,
+        checkpoint,
+      ]),
+    );
+    children.add(child);
+    return child.result(timeout: const Duration(seconds: 30));
+  }
+
+  Future<void> closeFixture() async {
+    if (fixtureClosed) return;
+    final unconfirmed = <int>[];
+    for (final child in children) {
+      if (!await child.terminate()) unconfirmed.add(child.pid);
+    }
+    if (unconfirmed.isNotEmpty) {
+      throw StateError(
+        'artifact fixture retained at ${temporary.path}; '
+        'child exit unconfirmed: ${unconfirmed.join(', ')}',
+      );
+    }
+    root.close();
+    database.close();
+    await temporary.delete(recursive: true);
+    fixtureClosed = true;
+  }
+
+  test('artifact fixture confirms child exit before deleting state', () async {
+    final child = OwnedTestProcess(await Process.start('/bin/sleep', ['60']));
+    children.add(child);
+    try {
+      await closeFixture();
+      expect(child.exitConfirmed, isTrue);
+      expect(await temporary.exists(), isFalse);
+    } finally {
+      await child.terminate();
+    }
+  });
+
+  test('artifact fixture retains state without a child exit receipt', () async {
+    final exit = Completer<int>();
+    final child = OwnedTestProcess(_UnconfirmedProcess(exit.future));
+    children.add(child);
+    try {
+      await expectLater(
+        closeFixture(),
+        throwsA(
+          isA<StateError>().having(
+            (error) => error.message,
+            'retention diagnostic',
+            contains('retained'),
+          ),
+        ),
+      );
+      expect(child.exitConfirmed, isFalse);
+      expect(await temporary.exists(), isTrue);
+      expect(await SqliteTestRunRepository(database).get(run.id), run);
+    } finally {
+      exit.complete(0);
+      await child.terminate();
+    }
+  });
 
   test(
     'retention collection removes only expired unreferenced managed bytes',
@@ -83,6 +157,8 @@ void main() {
   );
 
   setUp(() async {
+    children.clear();
+    fixtureClosed = false;
     temporary = await Directory.systemTemp.createTemp('gvm-art-store-');
     final directory = await Directory('${temporary.path}/artifacts').create();
     imageFileMode(directory.path, 0x1c0);
@@ -205,11 +281,7 @@ void main() {
     expect(() => loop.start(), throwsStateError);
   });
 
-  tearDown(() async {
-    root.close();
-    database.close();
-    await temporary.delete(recursive: true);
-  });
+  tearDown(closeFixture);
 
   test('a server-reserved publication replays after catalog reopen', () async {
     final id = ArtifactId.generate();
@@ -648,15 +720,7 @@ void main() {
   test(
     'process exit after staging leaves no accepted artifact and is recoverable',
     () async {
-      final child = await Process.run(Platform.resolvedExecutable, [
-        'run',
-        'test/helpers/artifact_crash_child.dart',
-        root.path,
-        '${temporary.path}/catalog.db',
-        run.id.value,
-        run.operationId.value,
-        'staged',
-      ]);
+      final child = await crashArtifact('staged');
       expect(child.exitCode, 73, reason: '${child.stdout}\n${child.stderr}');
       final proof =
           jsonDecode(
@@ -696,15 +760,7 @@ void main() {
     test(
       'process exit at $checkpoint respects the catalog commit boundary',
       () async {
-        final child = await Process.run(Platform.resolvedExecutable, [
-          'run',
-          'test/helpers/artifact_crash_child.dart',
-          root.path,
-          '${temporary.path}/catalog.db',
-          run.id.value,
-          run.operationId.value,
-          checkpoint,
-        ]);
+        final child = await crashArtifact(checkpoint);
         expect(child.exitCode, 73, reason: '${child.stdout}\n${child.stderr}');
         final proof =
             jsonDecode(
@@ -919,17 +975,10 @@ void main() {
     },
   );
 
-  test('recovery resumes unpublished cleanup after payload removal', () async {
-    for (final removeManifest in [false, true]) {
-      final child = await Process.run(Platform.resolvedExecutable, [
-        'run',
-        'test/helpers/artifact_crash_child.dart',
-        root.path,
-        '${temporary.path}/catalog.db',
-        run.id.value,
-        run.operationId.value,
-        'published',
-      ]);
+  for (final removeManifest in [false, true]) {
+    test('recovery resumes unpublished cleanup after payload removal '
+        '(manifest ${removeManifest ? 'removed' : 'present'})', () async {
+      final child = await crashArtifact('published');
       expect(child.exitCode, 73, reason: '${child.stdout}\n${child.stderr}');
       final proof =
           jsonDecode(
@@ -952,21 +1001,13 @@ void main() {
       expect(result.retainedNames, isEmpty);
       expect(await ArtifactRepository(database).get(id), isNull);
       expect(await Directory('${root.path}/${id.value}').exists(), isFalse);
-    }
-  });
+    });
+  }
 
   test(
     'malformed unpublished manifests are retained without aborting recovery',
     () async {
-      final child = await Process.run(Platform.resolvedExecutable, [
-        'run',
-        'test/helpers/artifact_crash_child.dart',
-        root.path,
-        '${temporary.path}/catalog.db',
-        run.id.value,
-        run.operationId.value,
-        'published',
-      ]);
+      final child = await crashArtifact('published');
       expect(child.exitCode, 73, reason: '${child.stdout}\n${child.stderr}');
       final proof =
           jsonDecode(
@@ -992,4 +1033,27 @@ void main() {
       expect(await ArtifactRepository(database).get(id), isNull);
     },
   );
+}
+
+final class _UnconfirmedProcess implements Process {
+  _UnconfirmedProcess(this.exitCode);
+
+  @override
+  final Future<int> exitCode;
+
+  @override
+  int get pid => 2147483647;
+
+  @override
+  Stream<List<int>> get stdout => const Stream.empty();
+
+  @override
+  Stream<List<int>> get stderr => const Stream.empty();
+
+  @override
+  bool kill([ProcessSignal signal = ProcessSignal.sigterm]) => true;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) =>
+      throw UnsupportedError('unused process member: ${invocation.memberName}');
 }
