@@ -50,7 +50,7 @@ jobs:
             entrypoint: bin/gaovmd.dart
           - package: gaovm_cli
             directory: clients/gaovm_cli
-            paths: bin lib test
+            paths: bin lib test tool
             entrypoint: bin/gaovm_cli.dart
     defaults:
       run:
@@ -85,8 +85,47 @@ jobs:
         if: matrix.entrypoint != ''
         run: dart compile exe ${{ matrix.entrypoint }} -o "${RUNNER_TEMP}/${{ matrix.package }}"
 
+  macos-package-components:
+    name: macOS packaging component checks
+    runs-on: macos-14
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Dart
+        uses: dart-lang/setup-dart@v1
+        with:
+          sdk: 3.9.0
+
+      - name: Build ARM64 service helper for assembly checks
+        working-directory: services/macos_service
+        run: swift build -c release --triple arm64-apple-macosx14.0
+
+      - name: Resolve daemon dependencies
+        working-directory: daemon/gaovmd
+        run: dart pub get --enforce-lockfile
+
+      - name: Check bundle assembly and daemon launch paths
+        working-directory: daemon/gaovmd
+        run: >-
+          dart test test/macos_app_package_test.dart
+          test/vm_bundle_filesystem_test.dart
+          test/daemon_launch_configuration_test.dart
+          test/packaged_daemon_launch_test.dart --concurrency=1
+
+      - name: Resolve CLI dependencies
+        working-directory: clients/gaovm_cli
+        run: dart pub get --enforce-lockfile
+
+      - name: Check CLI launch paths and public API overrides
+        working-directory: clients/gaovm_cli
+        run: >-
+          dart test test/default_socket_path_test.dart
+          test/packaged_cli_launch_test.dart
+          test/public_api_cli_test.dart --concurrency=1
+
   rust-guest-static:
-    name: Rust guest protocol static checks
+    name: Rust guest and host publication checks
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -117,6 +156,68 @@ jobs:
 
       - name: Check Linux ARM64 guest target
         run: cargo +1.96.1 check --locked --target aarch64-unknown-linux-gnu
+
+      - name: Set up Dart for host publication integration
+        uses: dart-lang/setup-dart@v1
+        with:
+          sdk: 3.9.0
+
+      - name: Resolve host dependencies
+        working-directory: daemon/gaovmd
+        run: dart pub get --enforce-lockfile
+
+      - name: Test real Rust guest to Dart host publication
+        working-directory: daemon/gaovmd
+        env:
+          GAOVM_GUEST_FIXTURE: ${{ github.workspace }}/guest/gaovm_guestd/target/debug/examples/host_publication_fixture
+        run: dart test test/host_guest_artifacts_test.dart --name 'real Rust guest' --concurrency=1
+
+  swift-style:
+    name: Swift format and lint (${{ matrix.package }})
+    runs-on: macos-15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package: vz_macos
+            directory: drivers/vz_macos
+          - package: gaovm_service
+            directory: services/macos_service
+    defaults:
+      run:
+        working-directory: ${{ matrix.directory }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Verify pinned formatter
+        run: |
+          swift --version
+          test "$(swift format --version)" = "6.2.3"
+
+      - name: Check formatting and lint
+        run: swift format lint --strict --recursive Package.swift Sources Tests
+
+  macos-service:
+    name: macOS service helper
+    runs-on: macos-14
+    defaults:
+      run:
+        working-directory: services/macos_service
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build native helper
+        run: swift build
+
+      - name: Check commands, signing, and registration boundary
+        run: swift test
+
+      - name: Build ARM64 release helper
+        run: swift build -c release --triple arm64-apple-macosx14.0
 
   swift-build:
     name: Swift build
