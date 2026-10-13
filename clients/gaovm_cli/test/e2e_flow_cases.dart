@@ -285,28 +285,32 @@ void _e2eFlowTests() {
       }
     },
   );
-  test(
-    'native entrypoint rejects unsupported hosts before creating state',
-    () async {
-      if (Platform.isMacOS &&
-          (await Process.run('/usr/bin/uname', [
-                '-m',
-              ])).stdout.toString().trim() ==
-              'arm64') {
-        markTestSkipped(
-          'unsupported-host guard applies only outside Apple Silicon macOS',
+  for (final args in [
+    <String>[],
+    ['--multi-vm'],
+  ]) {
+    test(
+      'native entrypoint rejects unsupported hosts before creating state (${args.isEmpty ? 'display' : 'multi-vm'})',
+      () async {
+        if (Platform.isMacOS &&
+            (await Process.run('/usr/bin/uname', [
+                  '-m',
+                ])).stdout.toString().trim() ==
+                'arm64' &&
+            int.parse(
+                  (await Process.run('/usr/bin/sw_vers', [
+                    '-productVersion',
+                  ])).stdout.toString().split('.').first,
+                ) >=
+                14) {
+          markTestSkipped('host supports native VM execution');
+          return;
+        }
+        final directory = await Directory.systemTemp.createTemp(
+          'e2e-host-guard-',
         );
-        return;
-      }
-      final directory = await Directory.systemTemp.createTemp(
-        'e2e-host-guard-',
-      );
-      try {
-        final state = '${directory.path}/must-not-exist';
-        for (final args in [
-          <String>[],
-          ['--multi-vm'],
-        ]) {
+        try {
+          final state = '${directory.path}/must-not-exist';
           final result = await Process.run(
             '/bin/bash',
             ['../../scripts/e2e_macos14_happy_path.sh', ...args],
@@ -322,12 +326,12 @@ void _e2eFlowTests() {
           expect(result.exitCode, 2, reason: '${result.stderr}');
           expect(result.stderr, contains('requires Apple Silicon macOS 14+'));
           expect(await Directory(state).exists(), isFalse);
+        } finally {
+          await directory.delete(recursive: true);
         }
-      } finally {
-        await directory.delete(recursive: true);
-      }
-    },
-  );
+      },
+    );
+  }
   test(
     'E2E shell entrypoint provides help without host inputs or side effects',
     () async {
