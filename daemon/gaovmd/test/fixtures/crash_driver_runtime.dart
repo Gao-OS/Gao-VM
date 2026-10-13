@@ -2,7 +2,10 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:gaovm_models/gaovm_models.dart';
-import 'package:gaovmd/gaovmd.dart';
+import 'package:gaovmd/src/daemon_ownership.dart' show DaemonOwnership;
+import 'package:gaovmd/src/driver_runtime_layout.dart' show DriverRuntimeLayout;
+import 'package:gaovmd/src/image_filesystem.dart' show OwnedImageDirectory;
+import 'package:gaovmd/src/runtime_driver.dart' show DriverCorrelation;
 
 Future<void> main(List<String> args) async {
   final state = await OwnedImageDirectory.open(Directory(args.single));

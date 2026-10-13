@@ -1,6 +1,9 @@
 import 'dart:io';
 
-import 'package:gaovmd/gaovmd.dart';
+import 'package:gaovmd/src/artifact_application_service.dart'
+    show ArtifactApplicationService;
+import 'package:gaovmd/src/image_filesystem.dart' show OwnedImageDirectory;
+import 'package:gaovmd/src/sqlite_database.dart' show GaoVmDatabase;
 import 'package:gaovmd/src/test_run_collection_worker.dart';
 
 Future<void> main(List<String> args) async {

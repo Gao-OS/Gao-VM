@@ -50,7 +50,7 @@ void main() {
 
         final s = supervisor.status();
         expect(s['desired'], 'running');
-        expect(s['driverActual'], 'running');
+        expect(s['driverActual'], 'running', reason: '$s');
         expect(s['vmState'], 'stopped');
         expect(s['actual'], 'stopped');
       });

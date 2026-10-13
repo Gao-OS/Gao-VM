@@ -2,7 +2,8 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:gaovm_rpc/gaovm_rpc.dart';
-import 'package:gaovmd/gaovmd.dart';
+import 'package:gaovmd/src/daemon_server.dart'
+    show DriverSupervisor, RpcChannel;
 
 Future<void> main(List<String> args) async {
   final socketPath = _optionValue(args, '--socket-path');
