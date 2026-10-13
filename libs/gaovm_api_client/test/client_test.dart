@@ -8,8 +8,10 @@ import 'package:test/test.dart';
 
 part 'artifact_cases.dart';
 part 'artifact_download_cases.dart';
+part 'display_cases.dart';
 
 void main() {
+  _displayTests();
   _artifactTests();
   _artifactDownloadTests();
   test('VM PATCH preserves merge-patch media type, revision and key', () async {

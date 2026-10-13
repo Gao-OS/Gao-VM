@@ -320,6 +320,62 @@ paths:
           $ref: '#/components/responses/Problem'
         default:
           $ref: '#/components/responses/Problem'
+  /v1/vms/{vm_id}/actions/open-display:
+    post:
+      tags: [VirtualMachines]
+      operationId: openVmDisplay
+      summary: Open the driver-owned display without changing VM desired state
+      parameters:
+        - $ref: '#/components/parameters/VmId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        $ref: '#/components/requestBodies/Action'
+      responses:
+        '202':
+          $ref: '#/components/responses/OperationAccepted'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /v1/vms/{vm_id}/actions/close-display:
+    post:
+      tags: [VirtualMachines]
+      operationId: closeVmDisplay
+      summary: Close the driver-owned display without stopping its VM
+      parameters:
+        - $ref: '#/components/parameters/VmId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        $ref: '#/components/requestBodies/Action'
+      responses:
+        '202':
+          $ref: '#/components/responses/OperationAccepted'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /v1/vms/{vm_id}/display:
+    get:
+      tags: [VirtualMachines]
+      operationId: getVmDisplay
+      summary: Read the last committed display observation, not VM or guest health
+      parameters:
+        - $ref: '#/components/parameters/VmId'
+      responses:
+        '200':
+          description: Display observation; unknown before any applicable observation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VmDisplayStatus'
+        '404':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
   /v1/vms/{vm_id}/actions/clone:
     post:
       tags: [VirtualMachines]
@@ -1241,6 +1297,24 @@ components:
           maxLength: 128
         labels:
           $ref: '#/components/schemas/Labels'
+      additionalProperties: false
+    VmDisplayStatus:
+      type: object
+      required: [vm_id, driver_generation, state, observed_at]
+      properties:
+        vm_id:
+          $ref: '#/components/schemas/VmId'
+        driver_generation:
+          type: [integer, 'null']
+          minimum: 1
+          description: Last catalog driver generation, null before the first generation; not proof of a live driver
+        state:
+          type: string
+          enum: [unknown, closed, opening, open, closing, error]
+        observed_at:
+          type: [string, 'null']
+          format: date-time
+          description: Observation time, null for an unknown state or inferred no-driver close
       additionalProperties: false
     VmWaitRequest:
       type: object

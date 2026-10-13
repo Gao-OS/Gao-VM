@@ -6,6 +6,7 @@ environment:
   sdk: ^3.9.0
 dependencies:
   crypto: 3.0.7
+  ffi: 2.2.0
   gaovm_models:
     path: ../gaovm_models
 dev_dependencies:

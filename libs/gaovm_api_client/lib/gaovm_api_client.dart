@@ -1,9 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:ffi';
 import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart' as crypto;
+import 'package:ffi/ffi.dart';
 import 'package:gaovm_models/gaovm_models.dart';
 
 part 'src/artifact_read.dart';
@@ -16,6 +18,108 @@ final class GaoVmApiClient {
   GaoVmApiClient({required String socketPath})
     : socketPath = File(socketPath).absolute.path;
   final String socketPath;
+
+  Future<VmDisplayActionAcceptance> openDisplay(
+    VmId vmId, {
+    required String idempotencyKey,
+    String? reason,
+    DateTime? deadlineAt,
+    ApiRequestCancellation? cancellation,
+    Duration timeout = const Duration(seconds: 30),
+  }) => _changeDisplay(
+    vmId,
+    true,
+    idempotencyKey,
+    reason,
+    deadlineAt,
+    cancellation,
+    timeout,
+  );
+
+  Future<VmDisplayActionAcceptance> closeDisplay(
+    VmId vmId, {
+    required String idempotencyKey,
+    String? reason,
+    DateTime? deadlineAt,
+    ApiRequestCancellation? cancellation,
+    Duration timeout = const Duration(seconds: 30),
+  }) => _changeDisplay(
+    vmId,
+    false,
+    idempotencyKey,
+    reason,
+    deadlineAt,
+    cancellation,
+    timeout,
+  );
+
+  Future<VmDisplayActionAcceptance> _changeDisplay(
+    VmId vmId,
+    bool open,
+    String key,
+    String? reason,
+    DateTime? deadlineAt,
+    ApiRequestCancellation? cancellation,
+    Duration timeout,
+  ) async {
+    if (!RegExp(r'^[\x21-\x7e]{1,255}$').hasMatch(key)) {
+      throw ArgumentError.value(
+        key,
+        'idempotencyKey',
+        'must be 1-255 visible ASCII characters',
+      );
+    }
+    final response = await request(
+      'POST',
+      '/v1/vms/${vmId.value}/actions/${open ? 'open-display' : 'close-display'}',
+      idempotencyKey: key,
+      cancellation: cancellation,
+      timeout: timeout,
+      body: JsonObjectValue.fromJson({
+        if (reason != null) 'reason': reason,
+        if (deadlineAt != null)
+          'deadline_at': deadlineAt.toUtc().toIso8601String(),
+      }),
+    );
+    try {
+      final accepted = VmDisplayActionAcceptance.fromJson(
+        response.body.toJson(),
+      );
+      if (response.status != HttpStatus.accepted || accepted.vmId != vmId) {
+        throw const ApiProtocolException('invalid display action acceptance');
+      }
+      return accepted;
+    } on FormatException {
+      throw const ApiProtocolException('invalid display action acceptance');
+    } on ArgumentError {
+      throw const ApiProtocolException('invalid display action acceptance');
+    }
+  }
+
+  /// Last committed observation; this GET never probes or contacts a driver.
+  Future<VmDisplayStatus> displayStatus(
+    VmId vmId, {
+    ApiRequestCancellation? cancellation,
+    Duration timeout = const Duration(seconds: 30),
+  }) async {
+    final response = await request(
+      'GET',
+      '/v1/vms/${vmId.value}/display',
+      cancellation: cancellation,
+      timeout: timeout,
+    );
+    try {
+      final status = VmDisplayStatus.fromJson(response.body.toJson());
+      if (response.status != HttpStatus.ok || status.vmId != vmId) {
+        throw const ApiProtocolException('invalid display status response');
+      }
+      return status;
+    } on FormatException {
+      throw const ApiProtocolException('invalid display status response');
+    } on ArgumentError {
+      throw const ApiProtocolException('invalid display status response');
+    }
+  }
 
   /// Read a small artifact only after verifying its complete length and SHA-256.
   /// Larger artifacts require streaming, not increasing a UI's preview budget.

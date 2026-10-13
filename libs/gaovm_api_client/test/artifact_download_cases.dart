@@ -332,7 +332,7 @@ void _artifactDownloadTests() {
   );
 
   test(
-    'disk artifact download writes incrementally and cleans up before cancellation returns',
+    'disk artifact download writes incrementally in private staging and cleans up before cancellation returns',
     () async {
       final output = await Directory.systemTemp.createTemp(
         'artifact-download-',
@@ -385,6 +385,11 @@ void _artifactDownloadTests() {
                       .where((entity) => entity is Directory)
                       .cast<Directory>()
                       .toList()) {
+                expect(
+                  (await directory.stat()).mode & 0x1ff,
+                  0x1c0,
+                  reason: 'Staging must be private while payload bytes arrive.',
+                );
                 for (final file
                     in await directory
                         .list()

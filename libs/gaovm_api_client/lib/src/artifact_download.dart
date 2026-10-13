@@ -8,6 +8,51 @@ final class ApiArtifactDownload {
   final File file;
 }
 
+final _artifactLibc = DynamicLibrary.process();
+final _artifactMkdtemp = _artifactLibc
+    .lookupFunction<
+      Pointer<Utf8> Function(Pointer<Utf8>),
+      Pointer<Utf8> Function(Pointer<Utf8>)
+    >('mkdtemp');
+final _artifactChmod = _artifactLibc
+    .lookupFunction<
+      Int32 Function(Pointer<Utf8>, Uint32),
+      int Function(Pointer<Utf8>, int)
+    >('chmod');
+
+Directory _createPrivateArtifactStage(Directory parent) {
+  // Dart's Linux createTemp uses 0777 minus umask; mkdtemp is private at creation.
+  final template =
+      '${parent.path}${Platform.pathSeparator}gaovm-artifact-XXXXXX'
+          .toNativeUtf8();
+  try {
+    if (_artifactMkdtemp(template) == nullptr) {
+      throw FileSystemException(
+        'cannot create private artifact staging directory',
+        parent.path,
+      );
+    }
+    return Directory(template.toDartString());
+  } finally {
+    malloc.free(template);
+  }
+}
+
+void _setArtifactStageMode(Directory stage) {
+  final path = stage.path.toNativeUtf8();
+  try {
+    // Restore owner bits if umask removed them, without exposing group/other bits.
+    if (_artifactChmod(path, 0x1c0) != 0) {
+      throw FileSystemException(
+        'cannot set artifact staging permissions',
+        stage.path,
+      );
+    }
+  } finally {
+    malloc.free(path);
+  }
+}
+
 Future<ApiArtifactDownload> _downloadArtifact(
   String socketPath,
   Artifact artifact,
@@ -38,7 +83,8 @@ Future<ApiArtifactDownload> _downloadArtifact(
   try {
     final parent = Directory(await directory.resolveSymbolicLinks());
     check();
-    stage = await parent.createTemp('gaovm-artifact-');
+    stage = _createPrivateArtifactStage(parent);
+    _setArtifactStageMode(stage);
     check();
     final partial = File('${stage.path}${Platform.pathSeparator}payload.part');
     file = await partial.open(mode: FileMode.write);
