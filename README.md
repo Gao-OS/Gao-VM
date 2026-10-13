@@ -573,6 +573,8 @@ inventory. The actual build/sign/boot/display or multi-VM branch has not been
 run on this Intel host. Framebuffer/input, GaoOS guest survival/exec/TestRun,
 multi-VM fault isolation, installed service, upgrade and distribution remain
 separate required gates.
+For the complete P0 traceability index, known implementation gaps and release
+gate evidence boundaries, see [the MVP acceptance ledger](docs/MVP_ACCEPTANCE.md).
 
 ---
 
