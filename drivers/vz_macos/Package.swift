@@ -2,27 +2,27 @@
 import PackageDescription
 
 let package = Package(
-    name: "vz_macos",
-    platforms: [
-        .macOS(.v14)
-    ],
-    products: [
-        .executable(name: "gaovm-driver-vz", targets: ["vz_macos"])
-    ],
-    targets: [
-        .executableTarget(
-            name: "vz_macos",
-            path: "Sources/vz_macos"
-        ),
-        .target(
-            name: "SocketWriteTestSupport",
-            path: "Tests/SocketWriteTestSupport",
-            publicHeadersPath: "include"
-        ),
-        .testTarget(
-            name: "vz_macosTests",
-            dependencies: ["vz_macos", "SocketWriteTestSupport"],
-            path: "Tests/vz_macosTests"
-        )
-    ]
+  name: "vz_macos",
+  platforms: [
+    .macOS(.v14)
+  ],
+  products: [
+    .executable(name: "gaovm-driver-vz", targets: ["vz_macos"])
+  ],
+  targets: [
+    .executableTarget(
+      name: "vz_macos",
+      path: "Sources/vz_macos"
+    ),
+    .target(
+      name: "SocketWriteTestSupport",
+      path: "Tests/SocketWriteTestSupport",
+      publicHeadersPath: "include"
+    ),
+    .testTarget(
+      name: "vz_macosTests",
+      dependencies: ["vz_macos", "SocketWriteTestSupport"],
+      path: "Tests/vz_macosTests"
+    ),
+  ]
 )

@@ -16,16 +16,26 @@ final class VzRuntime: RuntimeServicing {
   private let eventDelivery: RuntimeEventDelivery
   private var eventGeneration: RuntimeEventGeneration
   var config: NormalizedVmConfig?
+  let displayObservation = DisplayObservation()
   private var isTearingDown = false
+  private var guestConnector: GuestNativeConnector?
+  private var guestChannelsFenced = true
+  private var appliedGuestPort: UInt32?
   private var currentOperationID: String?
+  private let serialDrains = DispatchGroup()
+  private var serialDrainFailure: Error?
+  private var pendingStart: RuntimeResultGate?
   var serialController: SerialController?
   #if canImport(Virtualization)
     var virtualMachine: VZVirtualMachine?
   #endif
   #if canImport(AppKit) && canImport(Virtualization)
-    var displayWindow: NSWindow?
-    var displayView: VZVirtualMachineView?
-    var windowCloseObserver: NSObjectProtocol?
+    var displayBinding: DisplayBinding?
+    @MainActor lazy var displayController = DisplayController(
+      observation: displayObservation,
+      onState: { [weak self] binding, state, operationID in
+        self?.observeDisplay(binding, state: state, operationID: operationID)
+      })
   #endif
 
   init(
@@ -67,6 +77,17 @@ final class VzRuntime: RuntimeServicing {
     }
   }
 
+  #if canImport(AppKit) && canImport(Virtualization)
+    private func observeDisplay(
+      _ binding: DisplayBinding, state: DriverProtocolV2.DisplayState, operationID: String?
+    ) {
+      vzRuntimeQueue.async {
+        guard self.displayBinding === binding, binding.isActive else { return }
+        self.eventGeneration.observeDisplayState(state, operationID: operationID)
+      }
+    }
+  #endif
+
   func configure(with config: [String: Any], completion: @escaping RuntimeCompletion) {
     do {
       configure(with: try normalizedConfig(config), completion: completion)
@@ -103,94 +124,137 @@ final class VzRuntime: RuntimeServicing {
           completion(.failure(DriverError.invalidArgs("vm is not configured")))
           return
         }
-        do {
-          let spec = config
-          if let vm = self.virtualMachine {
-            switch vm.state {
-            case .running, .starting, .pausing, .paused, .resuming, .stopping, .saving,
-              .restoring:
-              self.eventGeneration.observeState(runtimeObservedState(from: vm.state))
-              completion(.success(self.statusLocked()))
-              return
-            case .stopped, .error:
-              break
-            @unknown default:
-              break
-            }
+        guard !self.isTearingDown, self.pendingStart == nil else {
+          completion(.failure(DriverError.invalidArgs("runtime is starting or shutting down")))
+          return
+        }
+        if let vm = self.virtualMachine {
+          switch vm.state {
+          case .running, .starting, .pausing, .paused, .resuming, .stopping, .saving, .restoring:
+            self.eventGeneration.observeState(runtimeObservedState(from: vm.state))
+            completion(.success(self.statusLocked()))
+            return
+          case .stopped, .error:
+            break
+          @unknown default:
+            break
           }
-
-          self.beginRuntimeGenerationLocked()
-          let eventGeneration = self.eventGeneration
-          for disk in spec.disks {
-            if let sizeMiB = disk.createSizeMiB {
-              try self.ensureSparseDisk(disk.path, sizeMiB: sizeMiB)
-            }
+        }
+        self.beginRuntimeGenerationLocked()
+        let eventGeneration = self.eventGeneration
+        let gate = RuntimeResultGate(completion: completion)
+        self.pendingStart = gate
+        // Include retired writers and serial preparation in the existing deadline.
+        // A late preparation must be closed, never applied to a replacement VM.
+        self.vzRuntimeQueue.asyncAfter(deadline: .now() + 30) {
+          guard self.pendingStart === gate, !gate.isFinished else { return }
+          let error = RuntimeLifecycleTimeoutError("vm start timed out after 30s")
+          self.failStartLocked(error, generation: eventGeneration, gate: gate)
+          eventGeneration.poison()
+        }
+        self.afterSerialDrainLocked { result in
+          guard self.pendingStart === gate, !gate.isFinished, !self.isTearingDown else { return }
+          if case .failure(let error) = result {
+            self.failStartLocked(error, generation: eventGeneration, gate: gate)
+            return
           }
-          let vmConfig = try self.buildConfiguration(spec)
-          let vm = VZVirtualMachine(
-            configuration: vmConfig, queue: self.vzRuntimeQueue.dispatchQueue)
-          let delegate = VzVirtualMachineDelegateAdapter(
-            queue: self.vzRuntimeQueue,
-            generation: eventGeneration,
-            now: self.eventNow)
-          self.delegateLifetime.retain(delegate)
-          vm.delegate = delegate
-          self.virtualMachine = vm
-          let gate = RuntimeResultGate(completion: completion)
-          eventGeneration.observeState(.starting)
-
-          vm.start { result in
+          guard let serial = config.serial, serial.capture else {
+            self.startConfiguredMachineLocked(config, generation: eventGeneration, gate: gate)
+            return
+          }
+          self.serialDrains.enter()
+          SerialController.prepare(path: serial.logPath) { result in
             self.vzRuntimeQueue.async {
-              guard !self.isTearingDown, !gate.isFinished else { return }
+              defer { self.serialDrains.leave() }
+              guard self.pendingStart === gate, !gate.isFinished, !self.isTearingDown else {
+                if case .success(let controller) = result { self.retireSerialLocked(controller) }
+                return
+              }
               switch result {
-              case .success:
-                self.logRuntime(.info, "vm started", eventType: .runtimeStarted)
-                guard gate.finish(.success(self.statusLocked())) else { return }
-                eventGeneration.observeState(runtimeObservedState(from: vm.state))
+              case .success(let controller):
+                self.serialController = controller
+                controller.start()
+                if let path = controller.snapshot.logPath {
+                  eventGeneration.observeConsoleReady(logPath: path)
+                }
+                self.startConfiguredMachineLocked(config, generation: eventGeneration, gate: gate)
               case .failure(let error):
-                guard gate.finish(.failure(error)) else { return }
-                eventGeneration.observeCommandError(
-                  error,
-                  classification: .startFailed,
-                  kind: runtimeErrorKind(
-                    for: error,
-                    invalidArgumentKind: .invalidConfiguration,
-                    defaultKind: .virtualization),
-                  state: runtimeObservedState(from: vm.state),
-                  occurredAt: self.eventNow())
+                self.failStartLocked(error, generation: eventGeneration, gate: gate)
               }
             }
           }
-          self.vzRuntimeQueue.asyncAfter(deadline: .now() + 30) {
-            let error = RuntimeLifecycleTimeoutError("vm start timed out after 30s")
-            guard gate.finish(.failure(error)) else { return }
-            eventGeneration.observeCommandError(
-              error,
-              classification: .startFailed,
-              kind: .timeout,
-              state: runtimeObservedState(from: vm.state),
-              occurredAt: self.eventNow())
-            eventGeneration.poison()
-          }
-        } catch {
-          let state =
-            self.virtualMachine.map { runtimeObservedState(from: $0.state) } ?? .configured
-          self.eventGeneration.observeCommandError(
-            error,
-            classification: .startFailed,
-            kind: runtimeErrorKind(
-              for: error,
-              invalidArgumentKind: .invalidConfiguration,
-              defaultKind: .virtualization),
-            state: state,
-            occurredAt: self.eventNow())
-          completion(.failure(error))
         }
       #else
         completion(.failure(DriverError.invalidArgs("Virtualization.framework unavailable")))
       #endif
     }
   }
+
+  #if canImport(Virtualization)
+    @available(macOS 14.0, *)
+    private func startConfiguredMachineLocked(
+      _ spec: NormalizedVmConfig, generation: RuntimeEventGeneration, gate: RuntimeResultGate
+    ) {
+      vzRuntimeQueue.preconditionIsCurrent()
+      do {
+        for disk in spec.disks {
+          if let sizeMiB = disk.createSizeMiB { try ensureSparseDisk(disk.path, sizeMiB: sizeMiB) }
+        }
+        let vmConfig = try buildConfiguration(spec, serialOutput: serialController?.driverOutput)
+        let vm = VZVirtualMachine(configuration: vmConfig, queue: vzRuntimeQueue.dispatchQueue)
+        let delegate = VzVirtualMachineDelegateAdapter(
+          queue: vzRuntimeQueue, generation: generation, now: eventNow)
+        delegateLifetime.retain(delegate)
+        vm.delegate = delegate
+        virtualMachine = vm
+        if spec.graphicsEnabled {
+          displayBinding = DisplayBinding(width: spec.graphicsWidth, height: spec.graphicsHeight) {
+            let view = VZVirtualMachineView(
+              frame: NSRect(x: 0, y: 0, width: spec.graphicsWidth, height: spec.graphicsHeight))
+            // AppKit owns the view; no VM property or lifecycle access occurs here.
+            view.virtualMachine = vm
+            return view
+          }
+        }
+        appliedGuestPort = spec.guestAgent?.vsockPort
+        guestChannelsFenced = false
+        generation.observeState(.starting)
+        vm.start { result in
+          self.vzRuntimeQueue.async {
+            guard self.pendingStart === gate, !gate.isFinished, !self.isTearingDown else { return }
+            switch result {
+            case .success:
+              self.pendingStart = nil
+              self.logRuntime(.info, "vm started", eventType: .runtimeStarted)
+              guard gate.finish(.success(self.statusLocked())) else { return }
+              generation.observeState(runtimeObservedState(from: vm.state))
+            case .failure(let error):
+              self.failStartLocked(error, generation: generation, gate: gate)
+            }
+          }
+        }
+      } catch {
+        closeSerialLocked()
+        failStartLocked(error, generation: generation, gate: gate)
+      }
+    }
+
+    private func failStartLocked(
+      _ error: Error, generation: RuntimeEventGeneration, gate: RuntimeResultGate
+    ) {
+      vzRuntimeQueue.preconditionIsCurrent()
+      guard pendingStart === gate, !gate.isFinished else { return }
+      pendingStart = nil
+      generation.observeCommandError(
+        error, classification: .startFailed,
+        kind: runtimeErrorKind(
+          for: error, invalidArgumentKind: .invalidConfiguration,
+          defaultKind: error is RuntimeLifecycleTimeoutError ? .timeout : .virtualization),
+        state: virtualMachine.map { runtimeObservedState(from: $0.state) } ?? .configured,
+        occurredAt: eventNow())
+      gate.finish(.failure(error))
+    }
+  #endif
 
   func stop(completion: @escaping RuntimeCompletion) {
     stop(
@@ -229,11 +293,89 @@ final class VzRuntime: RuntimeServicing {
     }
   }
 
-  func flushSerialOutput() {
-    vzRuntimeQueue.sync {
-      serialController?.close()
-      serialController = nil
+  func consoleStatus(completion: @escaping RuntimeCompletion) {
+    vzRuntimeQueue.async {
+      let snapshot = self.serialController?.snapshot
+      completion(
+        .success([
+          "ready": snapshot?.ready ?? false,
+          "log_path": snapshot?.logPath as Any? ?? NSNull(),
+        ]))
     }
+  }
+
+  /// An internal native channel attempt, never a public API or guest-ready signal.
+  /// The caller must authenticate the bridge opening before reaching this entry.
+  func openGuestChannel(
+    streamKind: GuestBridgeProtocol.StreamKind, deadline: DispatchTime,
+    beforeNativeClose: @escaping GuestNativeConnector.BeforeNativeClose = { $0() },
+    opened: @escaping GuestNativeConnector.Opened, closed: @escaping () -> Void
+  ) -> GuestNativeOpening {
+    vzRuntimeQueue.sync {
+      let connector: GuestNativeConnector
+      if let existing = guestConnector {
+        connector = existing
+      } else {
+        connector = GuestNativeConnector(queue: vzRuntimeQueue) { [weak self] callback in
+          guard let self else {
+            callback(.failure(GuestNativeError.unavailable))
+            return
+          }
+          self.vzRuntimeQueue.preconditionIsCurrent()
+          #if canImport(Virtualization)
+            guard !self.isTearingDown, !self.guestChannelsFenced,
+              let port = self.appliedGuestPort, let vm = self.virtualMachine,
+              vm.state == .running,
+              let device = vm.socketDevices.first as? VZVirtioSocketDevice
+            else {
+              callback(.failure(GuestNativeError.unavailable))
+              return
+            }
+            let queue = self.vzRuntimeQueue
+            device.connect(toPort: port) { result in
+              queue.async {
+                callback(
+                  result.map {
+                    VzGuestNativeSocket(connection: $0, machine: vm, queue: queue)
+                      as GuestNativeSocket
+                  })
+              }
+            }
+          #else
+            callback(.failure(GuestNativeError.unavailable))
+          #endif
+        }
+        guestConnector = connector
+      }
+      return connector.open(
+        streamKind: streamKind, deadline: deadline, beforeNativeClose: beforeNativeClose,
+        opened: opened, closed: closed)
+    }
+  }
+
+  @discardableResult
+  func flushSerialOutput(timeout: TimeInterval = 10) -> Bool {
+    let finished = DispatchGroup()
+    finished.enter()
+    let resultLock = NSLock()
+    var succeeded = false
+    vzRuntimeQueue.sync {
+      releaseRuntimeGenerationLocked()
+      afterSerialDrainLocked { result in
+        resultLock.lock()
+        if case .success = result { succeeded = true }
+        resultLock.unlock()
+        finished.leave()
+      }
+    }
+    // Process-exit callers may join off the VZ queue with a bounded deadline.
+    // On that queue, cleanup is requested but never synchronously awaited.
+    guard !vzRuntimeQueue.isCurrent,
+      finished.wait(timeout: .now() + max(0, timeout)) == .success
+    else { return false }
+    resultLock.lock()
+    defer { resultLock.unlock() }
+    return succeeded
   }
 
   func logRuntime(_ level: LogLevel, _ message: String, eventType: DriverLogEvent) {
@@ -245,6 +387,9 @@ final class VzRuntime: RuntimeServicing {
   func shutdown(completion: @escaping RuntimeCompletion) {
     vzRuntimeQueue.async {
       self.isTearingDown = true
+      self.pendingStart?.finish(.failure(DriverError.io("vm start cancelled by shutdown")))
+      self.pendingStart = nil
+      self.fenceGuestChannelsLocked()
       self.stop(
         gracePeriod: 30,
         forceTimeout: 5,
@@ -253,7 +398,12 @@ final class VzRuntime: RuntimeServicing {
       ) { result in
         self.vzRuntimeQueue.async {
           self.releaseRuntimeGenerationLocked()
-          completion(result)
+          self.afterSerialDrainLocked { drainResult in
+            switch (result, drainResult) {
+            case (.success, .failure(let error)): completion(.failure(error))
+            default: completion(result)
+            }
+          }
         }
       }
     }
@@ -268,6 +418,7 @@ final class VzRuntime: RuntimeServicing {
     completion: @escaping RuntimeCompletion
   ) {
     vzRuntimeQueue.async {
+      self.fenceGuestChannelsLocked()
       #if canImport(Virtualization)
         guard #available(macOS 14.0, *) else {
           completion(
@@ -361,18 +512,101 @@ final class VzRuntime: RuntimeServicing {
 
   private func releaseRuntimeGenerationLocked() {
     vzRuntimeQueue.preconditionIsCurrent()
+    #if canImport(AppKit) && canImport(Virtualization)
+      if let binding = displayBinding {
+        binding.invalidate()
+        displayBinding = nil
+        DispatchQueue.main.async { self.displayController.retire(binding) }
+      }
+    #endif
+    fenceGuestChannelsLocked()
+    guestConnector = nil
+    appliedGuestPort = nil
     #if canImport(Virtualization)
       virtualMachine?.delegate = nil
     #endif
     delegateLifetime.release()
     eventGeneration.close()
-    serialController?.close()
-    serialController = nil
     #if canImport(Virtualization)
       virtualMachine = nil
     #endif
+    closeSerialLocked()
+  }
+
+  private func closeSerialLocked() {
+    vzRuntimeQueue.preconditionIsCurrent()
+    guard let controller = serialController else { return }
+    serialController = nil
+    retireSerialLocked(controller)
+  }
+
+  private func retireSerialLocked(_ controller: SerialController) {
+    vzRuntimeQueue.preconditionIsCurrent()
+    let operationID = currentOperationID.flatMap { try? DriverProtocolV2.OperationID($0) }
+    serialDrains.enter()
+    controller.close { result in
+      self.vzRuntimeQueue.async {
+        if case .failure(let error) = result {
+          self.serialDrainFailure = error
+          self.logger.log(
+            .error, "serial drain failed: \(error)", operationID: operationID,
+            eventType: .runtimeError)
+        }
+        self.serialDrains.leave()
+      }
+    }
+  }
+
+  private func afterSerialDrainLocked(_ completion: @escaping (Result<Void, Error>) -> Void) {
+    vzRuntimeQueue.preconditionIsCurrent()
+    serialDrains.notify(queue: vzRuntimeQueue.dispatchQueue) {
+      if let error = self.serialDrainFailure {
+        completion(.failure(error))
+      } else {
+        completion(.success(()))
+      }
+    }
+  }
+
+  private func fenceGuestChannelsLocked() {
+    vzRuntimeQueue.preconditionIsCurrent()
+    guestChannelsFenced = true
+    guestConnector?.shutdown()
   }
 }
+
+#if canImport(Virtualization)
+  /// Keep the original machine through late completion and actual connection close.
+  private final class VzGuestNativeSocket: GuestNativeSocket {
+    private let queue: VzRuntimeQueue
+    private var connection: VZVirtioSocketConnection?
+    private var machine: VZVirtualMachine?
+
+    init(connection: VZVirtioSocketConnection, machine: VZVirtualMachine, queue: VzRuntimeQueue) {
+      queue.preconditionIsCurrent()
+      self.queue = queue
+      self.connection = connection
+      self.machine = machine
+    }
+
+    var fileDescriptor: Int32 {
+      queue.preconditionIsCurrent()
+      return connection?.fileDescriptor ?? -1
+    }
+
+    func close() {
+      queue.preconditionIsCurrent()
+      connection?.close()
+      connection = nil
+      machine = nil
+    }
+
+    deinit {
+      queue.preconditionIsCurrent()
+      connection?.close()
+    }
+  }
+#endif
 
 private final class RuntimeResultGate {
   private var completion: RuntimeCompletion?

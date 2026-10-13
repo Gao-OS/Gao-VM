@@ -6,6 +6,7 @@ struct DriverTerminalExitGate {
   private(set) var commandResponseSent = false
   private(set) var runtimeTerminalObserved = false
   private var requestedExitCode: Int32 = 0
+  private(set) var committedExitCode: Int32?
 
   mutating func beginCommand(exitCode: Int32) {
     commandExpected = true
@@ -28,8 +29,14 @@ struct DriverTerminalExitGate {
   }
 
   var readyExitCode: Int32? {
+    if let committedExitCode { return committedExitCode }
     guard runtimeTerminalObserved, !commandExpected || commandResponseSent else { return nil }
     return commandExpected ? requestedExitCode : 0
+  }
+
+  mutating func commitControlClose(exitCode: Int32) -> Int32 {
+    if committedExitCode == nil { committedExitCode = exitCode }
+    return committedExitCode!
   }
 
   var acceptsTerminalState: Bool {
@@ -52,17 +59,25 @@ final class DriverSessionV2 {
   private let stateQueue = DispatchQueue(label: "gaovm.driver.v2.state")
   private var listener: UnixListener?
   private var socket: UnixSocket?
+  private var guestBridge: GuestBridgeListener?
+  private var guestBridgeFenced = false
   private var nextID = 0
   private var pendingHelloID: DriverProtocolV2.JSONRPCID?
   private var localHelloAccepted = false
   private var remoteHelloAccepted = false
+  private var localAcceptedCapabilities: Set<DriverProtocolV2.Capability>?
+  private var remoteAcceptedCapabilities: Set<DriverProtocolV2.Capability>?
   private var authenticationDeadline = DispatchTime.now() + 15
   private var fatalError: Error?
   private var terminalExit = DriverTerminalExitGate()
 
-  private static let capabilities: [DriverProtocolV2.Capability] = [
+  private static let requiredCapabilities: [DriverProtocolV2.Capability] = [
     .runtimeConfigure, .runtimeStart, .runtimeStop, .runtimeKill, .runtimeStatus,
   ]
+  private static let offeredCapabilities =
+    requiredCapabilities + [
+      DriverProtocolV2.Capability.displayOpen, .displayClose, .displayStatus, .consoleStatus,
+    ]
 
   init(config: Config, logger: RotatingLogger) {
     self.config = config
@@ -85,9 +100,17 @@ final class DriverSessionV2 {
       let socket = try listener.acceptOne(
         deadline: currentAuthenticationDeadline(),
         writeDeadline: { [weak self] in self?.currentAuthenticationDeadline() ?? .now() })
+      var peerUID: uid_t = 0
+      var peerGID: gid_t = 0
+      guard Darwin.getpeereid(socket.fd, &peerUID, &peerGID) == 0, peerUID == geteuid() else {
+        socket.close()
+        listener.close()
+        throw DriverError.handshakeFailed("daemon control peer UID mismatch")
+      }
       self.socket = socket
       try socketWriter.attach(socket)
       defer {
+        closeGuestBridge()
         socketWriter.close()
         listener.close()
       }
@@ -96,12 +119,20 @@ final class DriverSessionV2 {
       while true {
         if let fatal = takeFatalError() { throw fatal }
         if heartbeatExpired() { throw ControlSocketDeadlineExpired() }
-        if try !socket.pollReadable(timeoutMs: 500) { continue }
         do {
+          if try !socket.pollReadable(timeoutMs: 500) { continue }
           try handle(readMessage())
         } catch DriverError.eof {
+          if let code = stateQueue.sync(execute: { terminalExit.committedExitCode }) {
+            Foundation.exit(code)
+          }
           if let fatal = takeFatalError() { throw fatal }
           try terminate(reason: "control socket EOF", code: 0)
+        } catch {
+          if let code = stateQueue.sync(execute: { terminalExit.committedExitCode }) {
+            Foundation.exit(code)
+          }
+          throw error
         }
       }
     } catch is ControlSocketDeadlineExpired {
@@ -146,8 +177,8 @@ final class DriverSessionV2 {
       driverGeneration: config.generation,
       operationId: nil,
       authToken: config.authToken,
-      offeredCapabilities: Self.capabilities,
-      requiredCapabilities: Self.capabilities,
+      offeredCapabilities: Self.offeredCapabilities,
+      requiredCapabilities: Self.requiredCapabilities,
       implementation: .init(name: "gaovm-driver-vz", version: "0.1.0"))
   }
 
@@ -163,12 +194,15 @@ final class DriverSessionV2 {
         result.vmId == config.vmId,
         result.driverGeneration == config.generation,
         result.operationId == nil,
-        Set(Self.capabilities).isSubset(of: Set(result.acceptedCapabilities))
+        Set(Self.requiredCapabilities).isSubset(of: Set(result.acceptedCapabilities)),
+        Set(result.acceptedCapabilities).isSubset(of: Set(Self.offeredCapabilities))
       else {
         throw DriverError.handshakeFailed("daemon hello result mismatch")
       }
-      localHelloAccepted = true
+      try acceptCapabilities(result.acceptedCapabilities, fromPeerHello: false)
+      pendingHelloID = nil
       markAuthenticatedRPC()
+      enableGuestBridgeIfAuthenticated()
       if authenticated {
         logger.log(.info, "bidirectional hello authenticated", eventType: .authenticated)
       }
@@ -184,6 +218,15 @@ final class DriverSessionV2 {
         return
       }
       try requireSessionCorrelation(command)
+      if let capability = commandCapability(command),
+        !stateQueue.sync(execute: { remoteAcceptedCapabilities?.contains(capability) ?? false })
+      {
+        try send(
+          errorResponse(
+            id: id, command: command, code: .capabilityNotNegotiated,
+            message: "command capability was not negotiated", retryable: false))
+        return
+      }
       markAuthenticatedRPC()
       dispatch(id: id, command: command)
     case .errorResponse(_, let error):
@@ -207,9 +250,10 @@ final class DriverSessionV2 {
     }
     let local = localHello(role: .driver)
     let accepted = try DriverProtocolV2.negotiateCapabilities(local: local, remote: hello)
-    guard Set(Self.capabilities).isSubset(of: Set(accepted)) else {
+    guard Set(Self.requiredCapabilities).isSubset(of: Set(accepted)) else {
       throw DriverError.handshakeFailed("daemon did not offer runtime core")
     }
+    try acceptCapabilities(accepted, fromPeerHello: true)
     try send(
       .helloSuccessResponse(
         id,
@@ -219,14 +263,77 @@ final class DriverSessionV2 {
           driverGeneration: config.generation,
           operationId: nil,
           acceptedCapabilities: accepted)))
-    remoteHelloAccepted = true
     markAuthenticatedRPC()
+    enableGuestBridgeIfAuthenticated()
     if authenticated {
       logger.log(.info, "bidirectional hello authenticated", eventType: .authenticated)
     }
   }
 
-  private var authenticated: Bool { localHelloAccepted && remoteHelloAccepted }
+  private var authenticated: Bool { stateQueue.sync { localHelloAccepted && remoteHelloAccepted } }
+
+  private func acceptCapabilities(
+    _ capabilities: [DriverProtocolV2.Capability], fromPeerHello: Bool
+  ) throws {
+    try stateQueue.sync {
+      let accepted = Set(capabilities)
+      let other = fromPeerHello ? localAcceptedCapabilities : remoteAcceptedCapabilities
+      guard other == nil || other == accepted else {
+        throw DriverError.handshakeFailed("bidirectional hello capability mismatch")
+      }
+      if fromPeerHello {
+        guard !remoteHelloAccepted else {
+          throw DriverError.protocolViolation("duplicate daemon hello")
+        }
+        remoteAcceptedCapabilities = accepted
+        remoteHelloAccepted = true
+      } else {
+        localAcceptedCapabilities = accepted
+        localHelloAccepted = true
+      }
+    }
+  }
+
+  private var guestSessionActive: Bool {
+    stateQueue.sync {
+      localHelloAccepted && remoteHelloAccepted && !guestBridgeFenced && fatalError == nil
+        && DispatchTime.now() < authenticationDeadline
+    }
+  }
+
+  private func enableGuestBridgeIfAuthenticated() {
+    guard guestSessionActive, stateQueue.sync(execute: { guestBridge == nil }) else { return }
+    let runtime = vmRuntime
+    do {
+      let bridge = try GuestBridgeListener(
+        config: config, isSessionActive: { [weak self] in self?.guestSessionActive ?? false },
+        openNative: { kind, deadline, beforeClose, opened, closed in
+          runtime.openGuestChannel(
+            streamKind: kind, deadline: deadline, beforeNativeClose: beforeClose,
+            opened: opened, closed: closed)
+        })
+      let retained = stateQueue.sync {
+        guard !guestBridgeFenced, fatalError == nil else { return false }
+        guestBridge = bridge
+        return true
+      }
+      if !retained { bridge.close() }
+    } catch {
+      // The optional bridge must not disable generic VM lifecycle commands.
+      // Never log untrusted framing values, the path, or authentication material.
+      logger.log(.warn, "private guest bridge unavailable")
+    }
+  }
+
+  private func closeGuestBridge() {
+    let bridge = stateQueue.sync {
+      guestBridgeFenced = true
+      let bridge = guestBridge
+      guestBridge = nil
+      return bridge
+    }
+    bridge?.close()
+  }
 
   private func dispatch(
     id: DriverProtocolV2.JSONRPCID,
@@ -241,7 +348,7 @@ final class DriverSessionV2 {
       guard let self else { return }
       do {
         switch result {
-        case .success:
+        case .success(let payload):
           let status: DriverProtocolV2.CommandStatus =
             self.isLifecycle(command)
             ? .accepted : .succeeded
@@ -253,7 +360,9 @@ final class DriverSessionV2 {
                 driverGeneration: self.config.generation,
                 operationId: correlation.operationId,
                 status: status,
-                data: nil)))
+                data: try JSONDecoder().decode(
+                  [String: DriverProtocolV2.JSONValue].self,
+                  from: JSONSerialization.data(withJSONObject: payload)))))
           self.logger.log(
             .debug, "driver command response sent", operationID: correlation.operationId,
             eventType: .commandSucceeded)
@@ -300,7 +409,17 @@ final class DriverSessionV2 {
       runtimeDispatcher.kill(operationID: operationID, completion: completion)
     case .runtimeStatus:
       runtimeDispatcher.status(completion: completion)
-    case .displayOpen, .displayClose, .displayStatus, .consoleStatus, .guestStatus:
+    case .displayOpen(let value):
+      runtimeDispatcher.openDisplay(
+        activate: value.display?.activate ?? true,
+        operationID: operationID, completion: completion)
+    case .displayClose:
+      runtimeDispatcher.closeDisplay(operationID: operationID, completion: completion)
+    case .displayStatus:
+      runtimeDispatcher.displayStatus(completion: completion)
+    case .consoleStatus:
+      runtimeDispatcher.consoleStatus(completion: completion)
+    case .guestStatus:
       completion(.failure(DriverError.invalidArgs("capability not negotiated")))
     }
   }
@@ -314,6 +433,21 @@ final class DriverSessionV2 {
       let occurredAt: Date
       let event: DriverProtocolV2.Event
       switch envelope.event {
+      case .consoleReady(let date, let logPath):
+        logger.log(
+          .info, "serial capture ready", operationID: operationID, eventType: .consoleReady)
+        occurredAt = date
+        event = .consoleReady(
+          eventParameters(
+            operationID: operationID, occurredAt: date,
+            console: .init(ready: true, logPath: logPath)))
+      case .displayStateChanged(let date, let displayState):
+        logger.log(
+          .info, "display state changed to \(displayState.rawValue)", operationID: operationID,
+          eventType: .displayStateChanged)
+        occurredAt = date
+        event = .displayStateChanged(
+          eventParameters(operationID: operationID, occurredAt: date, displayState: displayState))
       case .stateChanged(let date, let observed):
         logger.log(
           .info, "runtime state changed to \(observed.rawValue)", operationID: operationID,
@@ -367,6 +501,8 @@ final class DriverSessionV2 {
     operationID: DriverProtocolV2.OperationID?,
     occurredAt: Date,
     state: DriverProtocolV2.RuntimeState? = nil,
+    displayState: DriverProtocolV2.DisplayState? = nil,
+    console: DriverProtocolV2.ConsoleReady? = nil,
     clean: Bool? = nil,
     error: DriverProtocolV2.DriverEventError? = nil
   ) -> DriverProtocolV2.EventParameters {
@@ -378,8 +514,8 @@ final class DriverSessionV2 {
       runtimeState: state,
       cleanShutdown: clean,
       error: error,
-      displayState: nil,
-      console: nil,
+      displayState: displayState,
+      console: console,
       guest: nil,
       warning: nil)
   }
@@ -387,11 +523,21 @@ final class DriverSessionV2 {
   private func exitIfTerminalReady() {
     let exitCode = stateQueue.sync { terminalExit.readyExitCode }
     if let exitCode {
-      vmRuntime.flushSerialOutput()
-      socketWriter.close()
+      closeGuestBridge()
+      let serialFlushed = vmRuntime.flushSerialOutput()
+      if !serialFlushed {
+        logger.log(
+          .error, "serial cleanup failed or exceeded its deadline", eventType: .runtimeError)
+      }
       listener?.close()
       _ = logger.flush()
-      Foundation.exit(exitCode)
+      // Commit after terminal cleanup but before waking the control reader.
+      // Its local EOF/EBADF must not win a second exit with code 0 or 1.
+      let committed = stateQueue.sync {
+        terminalExit.commitControlClose(exitCode: serialFlushed ? exitCode : 1)
+      }
+      socketWriter.close()
+      Foundation.exit(committed)
     }
   }
 
@@ -425,6 +571,24 @@ final class DriverSessionV2 {
       return .init(
         vmId: value.vmId, driverGeneration: value.driverGeneration,
         operationId: value.operationId)
+    }
+  }
+
+  private func commandCapability(_ command: DriverProtocolV2.Command) -> DriverProtocolV2
+    .Capability?
+  {
+    switch command {
+    case .sessionPing: nil
+    case .runtimeConfigure: .runtimeConfigure
+    case .runtimeStart: .runtimeStart
+    case .runtimeStop: .runtimeStop
+    case .runtimeKill: .runtimeKill
+    case .runtimeStatus: .runtimeStatus
+    case .displayOpen: .displayOpen
+    case .displayClose: .displayClose
+    case .displayStatus: .displayStatus
+    case .consoleStatus: .consoleStatus
+    case .guestStatus: .guestStatus
     }
   }
 
@@ -558,6 +722,7 @@ final class DriverSessionV2 {
   }
 
   private func recordFatal(_ error: Error, operationID: DriverProtocolV2.OperationID? = nil) {
+    closeGuestBridge()
     let firstFailure = stateQueue.sync {
       guard fatalError == nil else { return false }
       fatalError = error
@@ -578,6 +743,7 @@ final class DriverSessionV2 {
   }
 
   private func terminate(reason: String, code: Int32) throws -> Never {
+    closeGuestBridge()
     logger.log(.warn, reason, eventType: .controlLost)
     let finished = DispatchGroup()
     finished.enter()
@@ -590,7 +756,7 @@ final class DriverSessionV2 {
   }
 }
 
-private func constantTimeEqual(_ left: String, _ right: String) -> Bool {
+func constantTimeEqual(_ left: String, _ right: String) -> Bool {
   let a = Array(left.utf8)
   let b = Array(right.utf8)
   guard !a.isEmpty, !b.isEmpty else { return false }

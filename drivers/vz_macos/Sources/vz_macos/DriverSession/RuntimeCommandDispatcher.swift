@@ -23,10 +23,30 @@ protocol RuntimeServicing: AnyObject {
     completion: @escaping RuntimeCompletion)
   func kill(completion: @escaping RuntimeCompletion)
   func status(completion: @escaping RuntimeCompletion)
+  func openDisplay(activate: Bool, operationID: String?, completion: @escaping RuntimeCompletion)
+  func closeDisplay(operationID: String?, completion: @escaping RuntimeCompletion)
+  func displayStatus(completion: @escaping RuntimeCompletion)
+  func consoleStatus(completion: @escaping RuntimeCompletion)
   func shutdown(completion: @escaping RuntimeCompletion)
 }
 
 extension RuntimeServicing {
+  func openDisplay(activate: Bool, operationID: String?, completion: @escaping RuntimeCompletion) {
+    completion(.failure(DriverError.invalidArgs("display is unavailable")))
+  }
+
+  func closeDisplay(operationID: String?, completion: @escaping RuntimeCompletion) {
+    completion(.failure(DriverError.invalidArgs("display is unavailable")))
+  }
+
+  func displayStatus(completion: @escaping RuntimeCompletion) {
+    completion(.failure(DriverError.invalidArgs("display is unavailable")))
+  }
+
+  func consoleStatus(completion: @escaping RuntimeCompletion) {
+    completion(.failure(DriverError.invalidArgs("console is unavailable")))
+  }
+
   func configure(with config: NormalizedVmConfig, completion: @escaping RuntimeCompletion) {
     completion(.failure(DriverError.invalidArgs("typed v2 configuration is unsupported")))
   }
@@ -147,6 +167,37 @@ final class RuntimeCommandDispatcher {
   func status(completion: @escaping RuntimeCompletion) {
     commandQueue.async {
       self.runtime.status { result in
+        self.responseQueue.async { completion(result) }
+      }
+    }
+  }
+
+  func openDisplay(
+    activate: Bool = true, operationID: String? = nil, completion: @escaping RuntimeCompletion
+  ) {
+    enqueue(
+      { [runtime] in
+        runtime.openDisplay(activate: activate, operationID: operationID, completion: $0)
+      }, completion: completion)
+  }
+
+  func closeDisplay(operationID: String? = nil, completion: @escaping RuntimeCompletion) {
+    enqueue(
+      { [runtime] in runtime.closeDisplay(operationID: operationID, completion: $0) },
+      completion: completion)
+  }
+
+  func displayStatus(completion: @escaping RuntimeCompletion) {
+    commandQueue.async {
+      self.runtime.displayStatus { result in
+        self.responseQueue.async { completion(result) }
+      }
+    }
+  }
+
+  func consoleStatus(completion: @escaping RuntimeCompletion) {
+    commandQueue.async {
+      self.runtime.consoleStatus { result in
         self.responseQueue.async { completion(result) }
       }
     }

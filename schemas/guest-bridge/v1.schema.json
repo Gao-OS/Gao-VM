@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gaovm.dev/schemas/guest-bridge/v1.schema.json",
+  "title": "GaoVM private guest driver bridge v1",
+  "description": "Independent opening headers, not driver JSON-RPC or guest control messages. The 4096-byte encoded limit, duplicate-key rejection, peer/token authentication, deadlines and native connection admission are runtime requirements.",
+  "oneOf": [
+    { "$ref": "#/$defs/open" },
+    { "$ref": "#/$defs/ready" },
+    { "$ref": "#/$defs/error" }
+  ],
+  "$defs": {
+    "vmId": { "type": "string", "pattern": "^vm_[0-7][0-9A-HJKMNP-TV-Z]{25}$" },
+    "requestId": { "type": "string", "pattern": "^req_[0-7][0-9A-HJKMNP-TV-Z]{25}$" },
+    "operationId": { "type": "string", "pattern": "^op_[0-7][0-9A-HJKMNP-TV-Z]{25}$" },
+    "operationIdOrNull": {
+      "oneOf": [{ "$ref": "#/$defs/operationId" }, { "type": "null" }]
+    },
+    "correlation": {
+      "type": "object",
+      "required": ["protocol_version", "kind", "vm_id", "driver_generation", "request_id", "operation_id", "stream_kind"],
+      "properties": {
+        "protocol_version": { "const": "gaovm.bridge.v1" },
+        "kind": { "enum": ["open", "ready", "error"] },
+        "vm_id": { "$ref": "#/$defs/vmId" },
+        "driver_generation": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "request_id": { "$ref": "#/$defs/requestId" },
+        "operation_id": { "$ref": "#/$defs/operationIdOrNull" },
+        "stream_kind": { "enum": ["control", "binary"] }
+      },
+      "allOf": [{
+        "if": { "properties": { "stream_kind": { "const": "binary" } } },
+        "then": { "properties": { "operation_id": { "$ref": "#/$defs/operationId" } } }
+      }]
+    },
+    "open": {
+      "allOf": [{ "$ref": "#/$defs/correlation" }],
+      "properties": {
+        "kind": { "const": "open" },
+        "auth_token": {
+          "type": "string", "minLength": 1, "maxLength": 512,
+          "writeOnly": true, "x-gaovm-max-utf8-bytes": 512
+        }
+      },
+      "required": ["auth_token"],
+      "unevaluatedProperties": false
+    },
+    "ready": {
+      "allOf": [{ "$ref": "#/$defs/correlation" }],
+      "properties": { "kind": { "const": "ready" } },
+      "unevaluatedProperties": false
+    },
+    "error": {
+      "allOf": [{ "$ref": "#/$defs/correlation" }],
+      "properties": {
+        "kind": { "const": "error" },
+        "code": { "enum": ["GUEST_CHANNEL_UNAVAILABLE", "CHANNEL_LIMIT_EXCEEDED"] }
+      },
+      "required": ["code"],
+      "unevaluatedProperties": false
+    }
+  },
+  "examples": [
+    {
+      "protocol_version": "gaovm.bridge.v1", "kind": "open",
+      "vm_id": "vm_01J00000000000000000000000", "driver_generation": 8,
+      "request_id": "req_01J00000000000000000000001", "operation_id": null,
+      "stream_kind": "control", "auth_token": "test-only-generation-token"
+    },
+    {
+      "protocol_version": "gaovm.bridge.v1", "kind": "ready",
+      "vm_id": "vm_01J00000000000000000000000", "driver_generation": 8,
+      "request_id": "req_01J00000000000000000000001", "operation_id": null,
+      "stream_kind": "control"
+    },
+    {
+      "protocol_version": "gaovm.bridge.v1", "kind": "open",
+      "vm_id": "vm_01J00000000000000000000000", "driver_generation": 8,
+      "request_id": "req_01J00000000000000000000001",
+      "operation_id": "op_01J00000000000000000000001", "stream_kind": "binary",
+      "auth_token": "test-only-generation-token"
+    },
+    {
+      "protocol_version": "gaovm.bridge.v1", "kind": "ready",
+      "vm_id": "vm_01J00000000000000000000000", "driver_generation": 8,
+      "request_id": "req_01J00000000000000000000001",
+      "operation_id": "op_01J00000000000000000000001", "stream_kind": "binary"
+    },
+    {
+      "protocol_version": "gaovm.bridge.v1", "kind": "error",
+      "vm_id": "vm_01J00000000000000000000000", "driver_generation": 8,
+      "request_id": "req_01J00000000000000000000001",
+      "operation_id": "op_01J00000000000000000000001", "stream_kind": "binary",
+      "code": "CHANNEL_LIMIT_EXCEEDED"
+    }
+  ]
+}

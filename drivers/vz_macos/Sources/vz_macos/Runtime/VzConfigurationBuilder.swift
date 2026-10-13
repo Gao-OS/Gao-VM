@@ -7,7 +7,9 @@ import Foundation
 extension VzRuntime {
   #if canImport(Virtualization)
     @available(macOS 14.0, *)
-    func buildConfiguration(_ spec: NormalizedVmConfig) throws -> VZVirtualMachineConfiguration {
+    func buildConfiguration(_ spec: NormalizedVmConfig, serialOutput: FileHandle?) throws
+      -> VZVirtualMachineConfiguration
+    {
       vzRuntimeQueue.preconditionIsCurrent()
       let cfg = VZVirtualMachineConfiguration()
       cfg.cpuCount = spec.cpu
@@ -62,14 +64,11 @@ extension VzRuntime {
         let port = VZVirtioConsoleDeviceSerialPortConfiguration()
         let output: FileHandle
         if serial.capture {
-          let controller = try SerialController(path: serial.logPath)
-          serialController?.close()
-          serialController = controller
-          controller.start()
-          output = controller.driverOutput
+          guard let serialOutput else {
+            throw DriverError.invalidArgs("serial capture must be prepared before VZ configuration")
+          }
+          output = serialOutput
         } else {
-          serialController?.close()
-          serialController = nil
           output = .nullDevice
         }
         port.attachment = VZFileHandleSerialPortAttachment(

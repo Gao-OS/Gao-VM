@@ -7,6 +7,288 @@ import XCTest
 final class DriverSessionLifetimeTests: XCTestCase {
   private let token = "test-only-driver-lifetime-authentication"
 
+  func testV2ConsoleStatusIsOptionalAndReportsNoCaptureWithoutStartingAVm() throws {
+    try withDriver { process, exited, control, _ in
+      let connection = try connect(to: control.path)
+      defer { connection.close() }
+      let codec = DriverProtocolV2Codec()
+      let hello = try authenticate(connection, codec)
+      XCTAssertTrue(hello.offeredCapabilities.contains(.consoleStatus))
+      XCTAssertFalse(hello.requiredCapabilities.contains(.consoleStatus))
+      let correlation = DriverProtocolV2.Correlation(
+        vmId: hello.vmId, driverGeneration: hello.driverGeneration, operationId: nil)
+      for index in 0..<2 {
+        let id = try DriverProtocolV2.JSONRPCID(string: "console-status-\(index)")
+        try write(.commandRequest(id, .consoleStatus(correlation)), connection, codec)
+        guard
+          case .commandSuccessResponse(let receivedID, let snapshot) = try read(connection, codec)
+        else { return XCTFail("negotiated console.status must return its capture snapshot") }
+        XCTAssertEqual(receivedID, id)
+        XCTAssertEqual(snapshot.vmId, hello.vmId)
+        XCTAssertEqual(snapshot.driverGeneration, hello.driverGeneration)
+        XCTAssertNil(snapshot.operationId)
+        XCTAssertEqual(snapshot.data?["ready"], .bool(false))
+        XCTAssertEqual(snapshot.data?["log_path"], .null)
+      }
+      let id = try DriverProtocolV2.JSONRPCID(string: "console-status-ping")
+      try write(.commandRequest(id, .sessionPing(correlation)), connection, codec)
+      guard case .commandSuccessResponse(let receivedID, _) = try read(connection, codec)
+      else { return XCTFail("console status must not stop the driver") }
+      XCTAssertEqual(receivedID, id)
+      connection.close()
+      XCTAssertEqual(exited.wait(timeout: .now() + 5), .success)
+      XCTAssertEqual(process.terminationStatus, 0)
+    }
+  }
+
+  func testV2DisplayCommandsReportHeadlessStateAndDoNotStopTheDriver() throws {
+    try withDriver { process, exited, control, _ in
+      let connection = try connect(to: control.path)
+      defer { connection.close() }
+      let codec = DriverProtocolV2Codec()
+      let hello = try authenticate(connection, codec)
+      for capability in [DriverProtocolV2.Capability.displayOpen, .displayClose, .displayStatus] {
+        XCTAssertTrue(hello.offeredCapabilities.contains(capability))
+        XCTAssertFalse(hello.requiredCapabilities.contains(capability))
+      }
+      let correlation = DriverProtocolV2.Correlation(
+        vmId: hello.vmId, driverGeneration: hello.driverGeneration, operationId: nil)
+      let statusID = try DriverProtocolV2.JSONRPCID(string: "display-snapshot")
+      try write(.commandRequest(statusID, .displayStatus(correlation)), connection, codec)
+      guard case .commandSuccessResponse(let receivedID, let snapshot) = try read(connection, codec)
+      else {
+        return XCTFail("authenticated display.status did not return a closed snapshot")
+      }
+      XCTAssertEqual(receivedID, statusID)
+      XCTAssertEqual(snapshot.data?["display_state"], .string("closed"))
+      XCTAssertNil(snapshot.operationId)
+
+      let operationID = try DriverProtocolV2.OperationID("op_01J00000000000000000000002")
+      for index in 0..<2 {
+        let closeID = try DriverProtocolV2.JSONRPCID(string: "display-close-\(index)")
+        try write(
+          .commandRequest(
+            closeID,
+            .displayClose(
+              .init(
+                vmId: hello.vmId, driverGeneration: hello.driverGeneration, operationId: operationID
+              ))),
+          connection, codec)
+        guard case .commandSuccessResponse(let receivedID, let result) = try read(connection, codec)
+        else {
+          return XCTFail("repeated display.close must succeed without stopping the VM or driver")
+        }
+        XCTAssertEqual(receivedID, closeID)
+        XCTAssertEqual(result.operationId, operationID)
+        XCTAssertEqual(result.data?["display_state"], .string("closed"))
+      }
+      let openID = try DriverProtocolV2.JSONRPCID(string: "display-open-without-vm")
+      try write(
+        .commandRequest(
+          openID,
+          .displayOpen(
+            .init(
+              vmId: hello.vmId, driverGeneration: hello.driverGeneration, operationId: operationID,
+              display: .init(activate: false)))), connection, codec)
+      guard case .errorResponse(let failedID, let error) = try read(connection, codec) else {
+        return XCTFail("display.open must not create an unconfigured VM")
+      }
+      XCTAssertEqual(failedID, openID)
+      XCTAssertEqual(error.data.code, .invalidRuntimeState)
+      XCTAssertEqual(error.data.operationId, operationID)
+      let pingID = try DriverProtocolV2.JSONRPCID(string: "after-display-ping")
+      try write(.commandRequest(pingID, .sessionPing(correlation)), connection, codec)
+      guard case .commandSuccessResponse(let pongID, _) = try read(connection, codec) else {
+        return XCTFail("closing display terminated or blocked the driver session")
+      }
+      XCTAssertEqual(pongID, pingID)
+      connection.close()
+      XCTAssertEqual(exited.wait(timeout: .now() + 5), .success)
+      XCTAssertEqual(process.terminationStatus, 0)
+    }
+  }
+
+  func testRuntimeOnlyPeerCanAuthenticateButCannotUseOptionalPeripheralCommands() throws {
+    try withDriver { process, exited, control, _ in
+      let connection = try connect(to: control.path)
+      defer { connection.close() }
+      let codec = DriverProtocolV2Codec()
+      let core: [DriverProtocolV2.Capability] = [
+        .runtimeConfigure, .runtimeStart, .runtimeStop, .runtimeKill, .runtimeStatus,
+      ]
+      let hello = try authenticate(connection, codec, offered: core)
+      let correlation = DriverProtocolV2.Correlation(
+        vmId: hello.vmId, driverGeneration: hello.driverGeneration, operationId: nil)
+      let peripheralCommands: [DriverProtocolV2.Command] = [
+        .displayStatus(correlation), .consoleStatus(correlation),
+      ]
+      for (index, command) in peripheralCommands.enumerated() {
+        let deniedID = try DriverProtocolV2.JSONRPCID(string: "unnegotiated-peripheral-\(index)")
+        try write(.commandRequest(deniedID, command), connection, codec)
+        guard case .errorResponse(let receivedID, let error) = try read(connection, codec) else {
+          return XCTFail("a runtime-only peer must not use an unnegotiated capability")
+        }
+        XCTAssertEqual(receivedID, deniedID)
+        XCTAssertEqual(error.data.code, .capabilityNotNegotiated)
+      }
+      let statusID = try DriverProtocolV2.JSONRPCID(string: "core-runtime-status")
+      try write(.commandRequest(statusID, .runtimeStatus(correlation)), connection, codec)
+      guard case .commandSuccessResponse(let receivedID, let status) = try read(connection, codec)
+      else {
+        return XCTFail("optional peripheral support broke runtime-core compatibility")
+      }
+      XCTAssertEqual(receivedID, statusID)
+      XCTAssertEqual(status.data?["state"], .string("not_created"))
+      connection.close()
+      XCTAssertEqual(exited.wait(timeout: .now() + 5), .success)
+      XCTAssertEqual(process.terminationStatus, 0)
+    }
+  }
+
+  func testInconsistentOptionalCapabilitiesBetweenHelloDirectionsFailClosed() throws {
+    for peerHelloFirst in [false, true] {
+      try withDriver(privateGeneration: true) { process, exited, control, _ in
+        let connection = try connect(to: control.path)
+        defer { connection.close() }
+        let codec = DriverProtocolV2Codec()
+        guard case .helloRequest(let id, let hello) = try read(connection, codec) else {
+          return XCTFail("expected driver hello")
+        }
+        let acknowledgement = DriverProtocolV2.Message.helloSuccessResponse(
+          id,
+          .init(
+            protocolVersion: DriverProtocolV2.version, vmId: hello.vmId,
+            driverGeneration: hello.driverGeneration, operationId: nil,
+            acceptedCapabilities: hello.offeredCapabilities))
+        let request = DriverProtocolV2.Message.helloRequest(
+          try .init(string: "inconsistent-daemon-hello"),
+          .init(
+            protocolVersion: DriverProtocolV2.version, peerRole: .daemon, vmId: hello.vmId,
+            driverGeneration: hello.driverGeneration, operationId: nil, authToken: token,
+            offeredCapabilities: hello.requiredCapabilities,
+            requiredCapabilities: hello.requiredCapabilities, implementation: nil))
+        if peerHelloFirst {
+          try write(request, connection, codec)
+          guard case .helloSuccessResponse = try read(connection, codec) else {
+            return XCTFail("expected one-sided core negotiation")
+          }
+          try write(acknowledgement, connection, codec)
+        } else {
+          try write(acknowledgement, connection, codec)
+          try write(request, connection, codec)
+        }
+        XCTAssertThrowsError(try read(connection, codec))
+        XCTAssertEqual(exited.wait(timeout: .now() + 5), .success)
+        XCTAssertEqual(process.terminationStatus, 1)
+        XCTAssertFalse(
+          FileManager.default.fileExists(
+            atPath: control.deletingLastPathComponent().appendingPathComponent("guest.sock").path))
+      }
+    }
+  }
+
+  func testGuestBridgeOpeningsCannotRefreshTheOriginalAuthenticationWatchdog() throws {
+    try withDriver(privateGeneration: true) { process, exited, control, log in
+      let connection = try connect(to: control.path)
+      defer { connection.close() }
+      let hello = try authenticate(connection, DriverProtocolV2Codec())
+      let guestPath = control.deletingLastPathComponent().appendingPathComponent("guest.sock").path
+      let correlation = try GuestBridgeProtocol.Correlation(
+        vmId: hello.vmId.rawValue, driverGeneration: hello.driverGeneration,
+        requestId: "req_01J00000000000000000000002", operationId: nil, streamKind: .control)
+      for _ in 0..<3 {
+        guard exited.wait(timeout: .now() + 4) == .timedOut else {
+          return XCTFail("driver exited before its original authenticated RPC budget")
+        }
+        let guest = try connect(to: guestPath)
+        defer { guest.close() }
+        try guest.writeAll(GuestBridgeFrameIO.encode(.open(correlation, authToken: token)))
+        XCTAssertEqual(
+          try GuestBridgeFrameIO.readResponse(
+            from: guest, expecting: correlation, deadline: .now() + 1),
+          .error(correlation, .unavailable))
+      }
+      try assertTimeoutExit(process, exited, control, log, timeout: 6)
+      XCTAssertFalse(FileManager.default.fileExists(atPath: guestPath))
+    }
+  }
+
+  func testGuestBridgeRequiresMutualHelloAndClosesWithOriginalControlSession() throws {
+    try withDriver(privateGeneration: true) { process, exited, control, _ in
+      let guestPath = control.deletingLastPathComponent().appendingPathComponent("guest.sock").path
+      XCTAssertFalse(FileManager.default.fileExists(atPath: guestPath))
+      let connection = try connect(to: control.path)
+      defer { connection.close() }
+      let codec = DriverProtocolV2Codec()
+      guard case .helloRequest(let id, let hello) = try read(connection, codec) else {
+        return XCTFail("expected driver hello")
+      }
+      XCTAssertFalse(hello.offeredCapabilities.contains(.guestStatus))
+      try write(
+        .helloSuccessResponse(
+          id,
+          .init(
+            protocolVersion: DriverProtocolV2.version, vmId: hello.vmId,
+            driverGeneration: hello.driverGeneration, operationId: nil,
+            acceptedCapabilities: hello.offeredCapabilities)), connection, codec)
+      let pingID = try DriverProtocolV2.JSONRPCID(string: "one-sided-ping")
+      let ping = DriverProtocolV2.Command.sessionPing(
+        .init(vmId: hello.vmId, driverGeneration: hello.driverGeneration, operationId: nil))
+      try write(.commandRequest(pingID, ping), connection, codec)
+      guard case .errorResponse(let deniedID, _) = try read(connection, codec) else {
+        return XCTFail("one-sided hello must not authenticate the original session")
+      }
+      XCTAssertEqual(deniedID, pingID)
+      XCTAssertFalse(FileManager.default.fileExists(atPath: guestPath))
+      let helloID = try DriverProtocolV2.JSONRPCID(string: "original-daemon-hello")
+      try write(
+        .helloRequest(
+          helloID,
+          .init(
+            protocolVersion: DriverProtocolV2.version, peerRole: .daemon, vmId: hello.vmId,
+            driverGeneration: hello.driverGeneration, operationId: nil, authToken: token,
+            offeredCapabilities: hello.offeredCapabilities,
+            requiredCapabilities: hello.requiredCapabilities, implementation: nil)), connection,
+        codec)
+      guard case .helloSuccessResponse(let acceptedID, _) = try read(connection, codec) else {
+        return XCTFail("expected authenticated daemon hello response")
+      }
+      XCTAssertEqual(acceptedID, helloID)
+      let published = XCTNSPredicateExpectation(
+        predicate: NSPredicate { _, _ in FileManager.default.fileExists(atPath: guestPath) },
+        object: nil)
+      guard XCTWaiter.wait(for: [published], timeout: 2) == .completed else {
+        return XCTFail("authenticated driver did not publish its owned guest bridge")
+      }
+      let guest = try connect(to: guestPath)
+      defer { guest.close() }
+      let correlation = try GuestBridgeProtocol.Correlation(
+        vmId: hello.vmId.rawValue, driverGeneration: hello.driverGeneration,
+        requestId: "req_01J00000000000000000000001", operationId: nil, streamKind: .control)
+      try guest.writeAll(GuestBridgeFrameIO.encode(.open(correlation, authToken: token)))
+      XCTAssertEqual(
+        try GuestBridgeFrameIO.readResponse(
+          from: guest, expecting: correlation, deadline: .now() + 2),
+        .error(correlation, .unavailable))
+      let partial = try connect(to: guestPath)
+      defer { partial.close() }
+      try partial.writeAll(Data([0]))
+      try write(.commandRequest(pingID, ping), connection, codec)
+      guard case .commandSuccessResponse(let receivedID, _) = try read(connection, codec) else {
+        return XCTFail("pending guest opening blocked the original heartbeat session")
+      }
+      XCTAssertEqual(receivedID, pingID)
+      connection.close()
+      guard exited.wait(timeout: .now() + 5) == .success else {
+        return XCTFail("original control EOF did not terminate the driver")
+      }
+      XCTAssertEqual(process.terminationStatus, 0)
+      XCTAssertFalse(FileManager.default.fileExists(atPath: guestPath))
+      XCTAssertFalse(FileManager.default.fileExists(atPath: control.path))
+      XCTAssertThrowsError(try partial.readExact(1, deadline: .now() + 1))
+    }
+  }
+
   func testDriverExitsWhenDaemonNeverConnects() throws {
     try withDriver { process, exited, control, log in
       try assertTimeoutExit(process, exited, control, log)
@@ -203,12 +485,26 @@ final class DriverSessionLifetimeTests: XCTestCase {
     }
   }
 
-  private func withDriver(_ body: (Process, DispatchGroup, URL, URL) throws -> Void) throws {
-    let root = URL(fileURLWithPath: "/private/tmp")
-      .appendingPathComponent("gaovm-life-\(UUID().uuidString)")
-    try FileManager.default.createDirectory(
-      at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
-    let control = root.appendingPathComponent("control.sock")
+  private func withDriver(
+    privateGeneration: Bool = false, _ body: (Process, DispatchGroup, URL, URL) throws -> Void
+  ) throws {
+    var template = Array("/private/tmp/gvl.XXXXXX".utf8CString)
+    guard let directory = Darwin.mkdtemp(&template) else {
+      throw DriverError.io("could not create private driver fixture")
+    }
+    let root = URL(fileURLWithPath: String(cString: directory))
+    let generation = root.appendingPathComponent("vm_01J00000000000000000000000/7")
+    if privateGeneration {
+      try FileManager.default.createDirectory(
+        at: generation, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+      guard Darwin.chmod(generation.deletingLastPathComponent().path, 0o700) == 0 else {
+        throw DriverError.io("could not protect private VM fixture")
+      }
+    }
+    let control =
+      privateGeneration
+      ? generation.appendingPathComponent("driver.sock")
+      : root.appendingPathComponent("control.sock")
     let log = root.appendingPathComponent("driver.log")
     let process = Process()
     let exited = DispatchGroup()
@@ -313,19 +609,23 @@ final class DriverSessionLifetimeTests: XCTestCase {
     try socket.writeAll(frame)
   }
 
-  private func authenticate(_ socket: UnixSocket, _ codec: DriverProtocolV2Codec) throws
+  private func authenticate(
+    _ socket: UnixSocket, _ codec: DriverProtocolV2Codec,
+    offered: [DriverProtocolV2.Capability]? = nil
+  ) throws
     -> DriverProtocolV2.Hello
   {
     guard case .helloRequest(let id, let hello) = try read(socket, codec) else {
       throw DriverError.protocolViolation("expected driver hello")
     }
+    let capabilities = offered ?? hello.offeredCapabilities
     try write(
       .helloSuccessResponse(
         id,
         .init(
           protocolVersion: DriverProtocolV2.version, vmId: hello.vmId,
           driverGeneration: hello.driverGeneration, operationId: nil,
-          acceptedCapabilities: hello.offeredCapabilities)), socket, codec)
+          acceptedCapabilities: capabilities)), socket, codec)
     let helloID = try DriverProtocolV2.JSONRPCID(string: "daemon-hello")
     try write(
       .helloRequest(
@@ -333,7 +633,7 @@ final class DriverSessionLifetimeTests: XCTestCase {
         .init(
           protocolVersion: DriverProtocolV2.version, peerRole: .daemon, vmId: hello.vmId,
           driverGeneration: hello.driverGeneration, operationId: nil, authToken: token,
-          offeredCapabilities: hello.offeredCapabilities,
+          offeredCapabilities: capabilities,
           requiredCapabilities: hello.requiredCapabilities, implementation: nil)), socket, codec)
     guard case .helloSuccessResponse(let acceptedID, _) = try read(socket, codec),
       acceptedID == helloID

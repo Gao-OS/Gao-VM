@@ -5,6 +5,112 @@ import XCTest
 @testable import vz_macos
 
 final class DriverLiveV2Tests: XCTestCase {
+  func testConsoleReadinessCapturesStartContextAndFencesRetiredObservations() {
+    let queue = VzRuntimeQueue(label: "test.v2.console-generation")
+    let delivered = expectation(description: "event delivery barrier")
+    let lock = NSLock()
+    var events: [RuntimeEventEnvelope] = []
+    let delivery = RuntimeEventDelivery(envelopeSink: { envelope in
+      XCTAssertFalse(queue.isCurrent)
+      lock.lock()
+      events.append(envelope)
+      lock.unlock()
+      if case .stateChanged = envelope.event { delivered.fulfill() }
+    })
+    let date = Date(timeIntervalSince1970: 1)
+    let first = "op_01J00000000000000000000001"
+    let second = "op_01J00000000000000000000002"
+    let generation = RuntimeEventGeneration(queue: queue, now: { date }, delivery: delivery)
+    queue.sync { generation.setOperationID(first) }
+    generation.observeConsoleReady(logPath: "/vm/applied.log")
+    queue.sync { generation.setOperationID(second) }
+    queue.sync {
+      generation.observeConsoleReady(logPath: "/vm/unapplied.log")
+      generation.close()
+    }
+    generation.observeConsoleReady(logPath: "/vm/retired.log")
+    let poisoned = RuntimeEventGeneration(queue: queue, now: { date }, delivery: delivery)
+    poisoned.poison()
+    poisoned.observeConsoleReady(logPath: "/vm/poisoned.log")
+    queue.sync {}
+    let barrier = RuntimeEvent.stateChanged(occurredAt: date, state: .configured)
+    delivery.deliver(barrier)
+    wait(for: [delivered], timeout: 1)
+    lock.lock()
+    let snapshot = events
+    lock.unlock()
+    XCTAssertEqual(snapshot.map(\.operationID), [first, nil])
+    XCTAssertEqual(
+      snapshot.map(\.event), [.consoleReady(occurredAt: date, logPath: "/vm/applied.log"), barrier])
+  }
+
+  func testRuntimeRetirementFencesDisplayObservationsStillWaitingOnItsQueue() {
+    let queue = VzRuntimeQueue(label: "test.v2.display-retirement")
+    let delivered = expectation(description: "delivery barrier only")
+    delivered.assertForOverFulfill = true
+    let lock = NSLock()
+    var events: [RuntimeEvent] = []
+    let delivery = RuntimeEventDelivery(envelopeSink: {
+      lock.lock()
+      events.append($0.event)
+      lock.unlock()
+      if case .stateChanged = $0.event { delivered.fulfill() }
+    })
+    let date = Date(timeIntervalSince1970: 1)
+    let generation = RuntimeEventGeneration(queue: queue, now: { date }, delivery: delivery)
+    queue.sync {
+      generation.observeDisplayState(.open, operationID: "old-display")
+      generation.close()
+    }
+    queue.sync {}
+    let barrier = RuntimeEvent.stateChanged(occurredAt: date, state: .configured)
+    delivery.deliver(barrier)
+    wait(for: [delivered], timeout: 1)
+    lock.lock()
+    let snapshot = events
+    lock.unlock()
+    XCTAssertEqual(
+      snapshot, [barrier], "a retired generation cannot publish queued UI observations")
+  }
+
+  func testDisplayEventsKeepExplicitCorrelationAndIgnoreReleasedGenerations() {
+    let queue = VzRuntimeQueue(label: "test.v2.display-event-context")
+    let delivered = expectation(description: "three active display observations")
+    delivered.expectedFulfillmentCount = 3
+    delivered.assertForOverFulfill = true
+    let lock = NSLock()
+    var envelopes: [RuntimeEventEnvelope] = []
+    let delivery = RuntimeEventDelivery(envelopeSink: {
+      XCTAssertFalse(queue.isCurrent)
+      lock.lock()
+      envelopes.append($0)
+      lock.unlock()
+      delivered.fulfill()
+    })
+    let date = Date(timeIntervalSince1970: 1)
+    let generation = RuntimeEventGeneration(queue: queue, now: { date }, delivery: delivery)
+    queue.sync { generation.setOperationID("vm-start") }
+    generation.observeDisplayState(.opening, operationID: "display-open")
+    queue.sync { generation.setOperationID("vm-stop") }
+    generation.observeDisplayState(.open, operationID: "display-open")
+    generation.observeDisplayState(.closing, operationID: nil)
+    generation.close()
+    generation.observeDisplayState(.closed, operationID: nil)
+    wait(for: [delivered], timeout: 1)
+    queue.sync {}
+    lock.lock()
+    let snapshot = envelopes
+    lock.unlock()
+    XCTAssertEqual(snapshot.map(\.operationID), ["display-open", "display-open", nil])
+    XCTAssertEqual(
+      snapshot.map(\.event),
+      [
+        .displayStateChanged(occurredAt: date, state: .opening),
+        .displayStateChanged(occurredAt: date, state: .open),
+        .displayStateChanged(occurredAt: date, state: .closing),
+      ])
+  }
+
   func testLaunchIdentityIsBoundToTheLoggerWithoutIncludingAuthentication() throws {
     let root = FileManager.default.temporaryDirectory
       .appendingPathComponent("gaovm-launch-log-\(UUID().uuidString)")
@@ -116,5 +222,17 @@ final class DriverLiveV2Tests: XCTestCase {
     failed.observeRuntimeTerminal()
     failed.completeCommand(succeeded: false)
     XCTAssertEqual(failed.readyExitCode, 0)
+  }
+
+  func testCommittedKillExitCannotBeOverwrittenByControlSocketShutdown() {
+    var gate = DriverTerminalExitGate()
+    gate.beginCommand(exitCode: 137)
+    gate.observeRuntimeTerminal()
+    gate.completeCommand(succeeded: true)
+    XCTAssertEqual(gate.commitControlClose(exitCode: 137), 137)
+    XCTAssertEqual(gate.committedExitCode, 137)
+    XCTAssertEqual(gate.commitControlClose(exitCode: 0), 137)
+    gate.beginCommand(exitCode: 0)
+    XCTAssertEqual(gate.readyExitCode, 137)
   }
 }

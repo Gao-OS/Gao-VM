@@ -108,6 +108,8 @@ struct RuntimeEventError: Equatable {
 /// operation context captured by `RuntimeEventEnvelope` before writing driver v2.
 enum RuntimeEvent: Equatable {
   case stateChanged(occurredAt: Date, state: RuntimeObservedState)
+  case displayStateChanged(occurredAt: Date, state: DriverProtocolV2.DisplayState)
+  case consoleReady(occurredAt: Date, logPath: String)
   case cleanShutdown(occurredAt: Date, state: RuntimeObservedState)
   case runtimeError(occurredAt: Date, state: RuntimeObservedState, error: RuntimeEventError)
 }
@@ -221,6 +223,25 @@ final class RuntimeEventGeneration {
     observeState(currentRuntimeState ?? .configured)
   }
 
+  func observeDisplayState(_ state: DriverProtocolV2.DisplayState, operationID: String?) {
+    let occurredAt = now()
+    queue.async {
+      guard self.lifecycle == .active else { return }
+      self.delivery.deliver(
+        .displayStateChanged(occurredAt: occurredAt, state: state), operationID: operationID)
+    }
+  }
+
+  func observeConsoleReady(logPath: String) {
+    let occurredAt = now()
+    let capturedOperationID = queue.sync { operationID }
+    queue.async {
+      guard self.lifecycle == .active, !self.terminalEventWasObserved else { return }
+      self.delivery.deliver(
+        .consoleReady(occurredAt: occurredAt, logPath: logPath), operationID: capturedOperationID)
+    }
+  }
+
   func observeCommandError(
     _ error: Error,
     classification: RuntimeErrorClassification,
@@ -283,7 +304,9 @@ final class RuntimeEventGeneration {
   }
 
   func close() {
-    queue.async {
+    // Retirement on the owning queue fences already-enqueued observations
+    // before that queue can process them for a replacement runtime.
+    queue.sync {
       guard self.lifecycle == .active else { return }
       self.lifecycle = .closed
     }

@@ -578,7 +578,8 @@ extension RuntimeEvent {
   fileprivate var occurredAt: Date {
     switch self {
     case .stateChanged(let occurredAt, _), .cleanShutdown(let occurredAt, _),
-      .runtimeError(let occurredAt, _, _):
+      .runtimeError(let occurredAt, _, _), .displayStateChanged(let occurredAt, _),
+      .consoleReady(let occurredAt, _):
       return occurredAt
     }
   }
@@ -589,6 +590,10 @@ extension RuntimeEvent {
       return "state:\(state.rawValue):\(occurredAt.timeIntervalSince1970)"
     case .cleanShutdown(let occurredAt, let state):
       return "clean:\(state.rawValue):\(occurredAt.timeIntervalSince1970)"
+    case .displayStateChanged(let occurredAt, let state):
+      return "display:\(state.rawValue):\(occurredAt.timeIntervalSince1970)"
+    case .consoleReady(let occurredAt, let logPath):
+      return "console:\(logPath):\(occurredAt.timeIntervalSince1970)"
     case .runtimeError(let occurredAt, let state, let error):
       return
         "error:\(error.classification.rawValue):\(state.rawValue):\(occurredAt.timeIntervalSince1970)"

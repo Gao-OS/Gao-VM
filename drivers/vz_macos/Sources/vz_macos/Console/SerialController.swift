@@ -33,9 +33,15 @@ final class RotatingByteSink {
   }
 
   func close() {
-    try? handle?.synchronize()
-    try? handle?.close()
-    handle = nil
+    try? finish()
+  }
+
+  func finish() throws {
+    guard let handle else { return }
+    self.handle = nil
+    defer { try? handle.close() }
+    try handle.synchronize()
+    try handle.close()
   }
 
   private func open() throws {
@@ -56,7 +62,7 @@ final class RotatingByteSink {
   }
 
   private func rotate() throws {
-    close()
+    try finish()
     let files = FileManager.default
     if rotations == 0 {
       try? files.removeItem(atPath: path)
@@ -78,47 +84,121 @@ final class RotatingByteSink {
   }
 }
 
+struct SerialCaptureSnapshot: Equatable {
+  let ready: Bool
+  let logPath: String?
+}
+
+private final class SerialCaptureObservation {
+  private let lock = NSLock()
+  private let path: String
+  private var ready = false
+
+  init(path: String) { self.path = path }
+
+  var snapshot: SerialCaptureSnapshot {
+    lock.lock()
+    defer { lock.unlock() }
+    return SerialCaptureSnapshot(ready: ready, logPath: ready ? path : nil)
+  }
+
+  func setReady(_ value: Bool) {
+    lock.lock()
+    ready = value
+    lock.unlock()
+  }
+}
+
 final class SerialController {
-  private let pipe = Pipe()
   private let queue = DispatchQueue(label: "gaovm.driver.serial-log", qos: .utility)
-  private let sink: RotatingByteSink
+  private let pump: SerialLogPump
+  private let observation: SerialCaptureObservation
+  private let lock = NSLock()
   private var started = false
   private var closed = false
 
   init(path: String) throws {
-    sink = try RotatingByteSink(path: path)
+    let observation = SerialCaptureObservation(path: path)
+    self.observation = observation
+    pump = try SerialLogPump(path: path, observation: observation)
   }
 
-  var driverOutput: FileHandle { pipe.fileHandleForWriting }
+  static func prepare(path: String, completion: @escaping (Result<SerialController, Error>) -> Void)
+  {
+    DispatchQueue.global(qos: .utility).async {
+      completion(Result { try SerialController(path: path) })
+    }
+  }
+
+  var driverOutput: FileHandle { pump.pipe.fileHandleForWriting }
+
+  var snapshot: SerialCaptureSnapshot { observation.snapshot }
 
   func start() {
+    lock.lock()
+    defer { lock.unlock() }
     guard !started, !closed else { return }
-    started = true
-    pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-      let data = handle.availableData
-      guard !data.isEmpty else {
-        handle.readabilityHandler = nil
-        return
-      }
-      self?.queue.async {
-        guard let self else { return }
-        try? self.sink.write(data)
-      }
-    }
+    startLocked()
   }
 
-  func close() {
-    guard !closed else { return }
-    closed = true
-    pipe.fileHandleForReading.readabilityHandler = nil
-    try? pipe.fileHandleForWriting.close()
-    let remaining = try? pipe.fileHandleForReading.readToEnd()
-    queue.sync {
-      if let remaining { try? sink.write(remaining) }
-      sink.close()
+  private func startLocked() {
+    started = true
+    observation.setReady(true)
+    queue.async { [pump] in pump.run() }
+  }
+
+  func close(completion: @escaping (Result<Void, Error>) -> Void = { _ in }) {
+    lock.lock()
+    defer { lock.unlock() }
+    if !started { startLocked() }
+    if !closed {
+      closed = true
+      observation.setReady(false)
+      try? pump.pipe.fileHandleForWriting.close()
     }
-    try? pipe.fileHandleForReading.close()
+    // The pump owns the pipe and sink independently of this controller. Even
+    // deinit must retain queued bytes until actual EOF, flush and descriptor close.
+    queue.async { [pump] in completion(pump.result) }
   }
 
   deinit { close() }
+}
+
+private final class SerialLogPump {
+  let pipe = Pipe()
+  private let sink: RotatingByteSink
+  private let observation: SerialCaptureObservation
+  private(set) var result: Result<Void, Error> = .success(())
+
+  init(path: String, observation: SerialCaptureObservation) throws {
+    sink = try RotatingByteSink(path: path)
+    self.observation = observation
+  }
+
+  func run() {
+    let descriptor = pipe.fileHandleForReading.fileDescriptor
+    // Read and write on the same private I/O queue: no unbounded queue of Data
+    // jobs if rotation stalls. Kernel pipe buffering supplies backpressure.
+    while true {
+      var data = Data(count: 64 * 1024)
+      let count = data.withUnsafeMutableBytes { Darwin.read(descriptor, $0.baseAddress, $0.count) }
+      if count == 0 { break }
+      if count < 0 {
+        if errno == EINTR { continue }
+        result = .failure(DriverError.io("serial pipe read failed: \(errno)"))
+        observation.setReady(false)
+        break
+      }
+      data.count = count
+      if case .success = result {
+        do { try sink.write(data) } catch {
+          result = .failure(error)
+          observation.setReady(false)
+        }
+      }
+    }
+    observation.setReady(false)
+    do { try sink.finish() } catch { result = .failure(error) }
+    do { try pipe.fileHandleForReading.close() } catch { result = .failure(error) }
+  }
 }

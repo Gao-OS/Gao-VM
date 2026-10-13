@@ -4,6 +4,43 @@ import XCTest
 @testable import vz_macos
 
 final class RuntimeCommandDispatcherTests: XCTestCase {
+  func testDisplayActionsShareLifecycleOrderWithoutBlockingHeartbeatOrSnapshots() {
+    let runtime = ControllableRuntime()
+    let dispatcher = RuntimeCommandDispatcher(runtime: runtime)
+    let ping = expectation(description: "ping while opening display")
+    let status = expectation(description: "display snapshot while opening display")
+
+    dispatcher.start { _ in }
+    dispatcher.openDisplay(activate: false, operationID: "open") { _ in }
+    dispatcher.closeDisplay(operationID: "close") { _ in }
+    dispatcher.stop { _ in }
+    XCTAssertEqual(runtime.waitForCalls(count: 1), ["start"])
+
+    runtime.completeNext()
+    XCTAssertEqual(runtime.waitForCalls(count: 2), ["start", "open_display:false"])
+    dispatcher.ping { result in
+      XCTAssertEqual((try? result.get())?["ok"] as? Bool, true)
+      ping.fulfill()
+    }
+    dispatcher.displayStatus { result in
+      XCTAssertEqual((try? result.get())?["display_state"] as? String, "opening")
+      status.fulfill()
+    }
+    wait(for: [ping, status], timeout: 1)
+    XCTAssertEqual(
+      runtime.waitForCalls(count: 3), ["start", "open_display:false", "display_status"])
+
+    runtime.completeNext()
+    XCTAssertEqual(
+      runtime.waitForCalls(count: 4),
+      ["start", "open_display:false", "display_status", "close_display"])
+    runtime.completeNext()
+    XCTAssertEqual(
+      runtime.waitForCalls(count: 5),
+      ["start", "open_display:false", "display_status", "close_display", "stop"])
+    runtime.completeNext()
+  }
+
   func testLifecycleCommandsRunInSubmissionOrder() {
     let runtime = ControllableRuntime()
     let dispatcher = RuntimeCommandDispatcher(runtime: runtime)
@@ -243,6 +280,22 @@ private final class ControllableRuntime: RuntimeServicing {
 
   func kill(completion: @escaping RuntimeCompletion) {
     record("kill", completion: completion)
+  }
+
+  func openDisplay(activate: Bool, operationID: String?, completion: @escaping RuntimeCompletion) {
+    record("open_display:\(activate)", completion: completion)
+  }
+
+  func closeDisplay(operationID: String?, completion: @escaping RuntimeCompletion) {
+    record("close_display", completion: completion)
+  }
+
+  func displayStatus(completion: @escaping RuntimeCompletion) {
+    condition.lock()
+    calls.append("display_status")
+    condition.broadcast()
+    condition.unlock()
+    completion(.success(["display_state": "opening"]))
   }
 
   func status(completion: @escaping RuntimeCompletion) {
