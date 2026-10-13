@@ -21,17 +21,23 @@ Background workers currently implement:
    advancing to `waiting_ready`; start aborts have durable stop checkpoints.
 3. Bounded readiness observation with a persisted deadline, runtime-only success,
    cancellation, timeout, and lifecycle/spec/generation conflict handling.
-4. Host artifact collection for runs in `collecting`.
-5. Terminal completion for collected failures/cancellations which never allocated
+4. Ordered guest execution through durable child Operations and the original
+   authenticated Guest Session, including cancellation and interruption recovery.
+   See [TEST_RUN_STEPS.md](TEST_RUN_STEPS.md).
+5. Host and guest artifact collection for runs in `collecting`, composed through
+   [TEST_RUN_ARTIFACTS.md](TEST_RUN_ARTIFACTS.md).
+6. Terminal completion for collected failures/cancellations which never allocated
    a VM, including cancellation or an overall deadline before provisioning.
-6. Terminal completion of collected failures with `retain` or `delete_on_success`,
+7. Terminal completion of collected failures with `retain` or `delete_on_success`,
    preserving the allocated VM's current runtime state for manual debugging.
-7. Allocated-VM cleanup through durable stop/delete child operations. The parent
+8. Allocated-VM cleanup through durable stop/delete child operations. The parent
    remains active until the selected lifecycle operation has finished and its
    generation, intent, resource, and lease checks prove cleanup completed.
 
-Authenticated guest readiness and ordered guest execution are still unfinished.
-Neither `waiting_ready` nor `running_steps` is evidence of a successful guest test.
+Authenticated guest readiness and ordered execution have host implementations
+and socket-fixture coverage. Native guest capability advertisement remains disabled
+pending real acceptance; neither `waiting_ready` nor `running_steps` proves a
+successful guest test or GaoOS/native transport acceptance.
 
 ## Readiness observation
 
@@ -65,10 +71,11 @@ retain their current runtime under the policies described below; cancellation
 stops/deletes only through the existing owned lifecycle cleanup.
 
 VZ `running` never implies guest readiness. The agent condition reads the stored
-guest state, but its authenticated host Guest Session producer is not implemented
-yet (PR024). Service readiness has no persisted service proof yet and cannot
-advance a run. Positive guest-agent/service readiness and guest exec are remaining
-integration work; this observer does not invent either proof or guest output.
+guest state; the authenticated [host Guest Session](GUEST_EXEC_DURABILITY.md)
+producer and its independent reconcile loop are composed with the daemon.
+Native guest-agent readiness still needs real-image acceptance. Service readiness
+has no persisted service proof and cannot advance a run; service conveniences
+are P1/Beta. This observer never invents either proof or guest output.
 
 ## Host artifact collection
 
@@ -94,12 +101,17 @@ and their associations before committing `completed_at` and
 
 Collection does not stop/delete VMs or complete a parent operation. Its snapshot
 records the execution outcome at collection reservation, not a claim about later
-cleanup. Host artifacts currently receive a conservative 30-day retention deadline
-because cleanup may still fail. Successful-run 7-day retention and retention-aware
-garbage collection remain unfinished.
+cleanup. Publication initially assigns a conservative 30-day deadline. Terminal
+completion then updates SQLite policy atomically with the run/Operation/events:
+7 days after `completed_at` for success with temporary-VM deletion; 30 days for
+failure, cancellation or a retained environment. Sealed manifests remain unchanged.
+Referenced artifacts remain pinned beyond expiry; automatic collection considers
+only expired, unreferenced managed payloads with verified ownership. See
+[ARTIFACTS.md](ARTIFACTS.md) for startup/periodic collection and recovery boundaries.
 
-Guest stdout/stderr, guest system information, and native binary-stream collection
-are not implemented by this host-log worker. It never invents guest output.
+Guest stdout/stderr and system information use the separate authenticated
+[step/diagnostic collector](TEST_RUN_ARTIFACTS.md), not host-log inference. Native
+vsock/GaoOS collection remains unverified. Missing output is never invented.
 
 ## Completion when no VM was allocated
 
@@ -197,7 +209,8 @@ with the temporary VM bundle.
 
 ## Daemon lifecycle
 
-The daemon starts provisioning, VM-start, readiness, collection, and cleanup loops
+The daemon starts provisioning, VM-start, readiness, guest execution/steps,
+collection, cleanup, and retention loops
 only after native previous-owner recovery, store reconciliation, scheduler recovery,
 and ownership verification. Each loop has bounded, non-overlapping passes, per-run
 failure reporting with available correlation IDs, and a fenced/drained close.
@@ -210,10 +223,11 @@ These workers are not activated by status requests or client polling.
 | Requirement | Current component evidence | Still required |
 | --- | --- | --- |
 | TST-001/002/010 | Durable acceptance, isolated provisioning and start checkpoint tests | Full parallel guest-test transactions |
-| TST-003, AC-05 | Runtime-only readiness, persistent/capped deadlines, legacy restoration, cancellation, generation/spec/delete fencing, atomic rollback and background dispatch tests | Authenticated guest-agent/service readiness through PR024 and real GaoOS readiness |
-| TST-006 | Real host log/result bytes, stable-ID replay, crash and corruption tests | Guest stdout/stderr/system info and real GaoOS collection |
-| TST-009, OP-002/004/006 | Pre-allocation abort completion, cancellation actions, retained-VM stop before cancellation completion, rollback/reopen and background dispatch tests | Active-step cancellation and full guest-to-cleanup transactions |
-| TST-007/008, UC-03 | Failed-runtime retention, deletion/stop child completion, independent artifact survival, schema upgrade and checkpoint replay tests | Complete policy/fault matrix, accepted failure-override precedence, successful-artifact retention, and real guest failure retention |
+| TST-003, AC-05 | Persistent readiness deadlines/fences, authenticated Guest Session fixtures and background dispatch | Real GaoOS guest-agent readiness; service conveniences remain P1/Beta |
+| TST-004/005 | Durable ordered child acceptance/results, deadline/cancel and original-generation recovery tests | Real GaoOS ordered guest execution |
+| TST-006 | Host log/result bytes, authenticated guest output/system-info publication, stable replay and corruption tests | Real native vsock/GaoOS collection |
+| TST-009, OP-002/004/006 | Pre-allocation completion, active-step cancellation, retained-VM stop, rollback/reopen and background dispatch tests | Full native guest-to-cleanup transactions |
+| TST-007/008, UC-03 | Retention/cleanup children, independent artifact survival, 7/30-day completion policy, reference-protected expiry and recovery tests | Accepted failure-override precedence, full native policy/fault matrix and GaoOS failure retention |
 
 Focused validation:
 
@@ -240,7 +254,9 @@ in `daemon_application_test.dart` waits for durable completion before checking
 TestRun/operation state and downloading the result through HTTP over UDS.
 
 Cleanup-focused allocated fixtures supply upstream success/failure/cancellation
-through the durable repository because guest execution is not yet implemented.
+through the durable repository to isolate the cleanup boundary. Separate
+[guest-step](TEST_RUN_STEPS.md) and [artifact](TEST_RUN_ARTIFACTS.md) tests exercise
+authenticated execution/publication through the composed host workers.
 Readiness fixtures use the actual provisioning/start pipeline and verify timeout,
 conflict, runtime-only advancement, and cancellation through collection/stop.
 Their provisioning, image store, artifacts, lifecycle dispatcher/controller, scheduler,

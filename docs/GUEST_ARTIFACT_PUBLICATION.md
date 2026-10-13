@@ -101,7 +101,9 @@ changed metadata, and verifies the complete transfer again from byte zero. It
 reuses the host artifact and emits no duplicate resource/event. It verifies the
 original publication retention receipt but returns the current SQLite retention
 deadline without rewriting the sealed manifest or restoring an obsolete policy.
-Default retention anchors and GC remain a separate policy decision.
+TestRun completion applies the accepted 7/30-day catalog policy, and expiry
+collection preserves references and sealed payload identity, as described in
+[ARTIFACTS.md](ARTIFACTS.md). Neither belongs to the binary wire identity.
 
 Closing a service aborts its sockets and joins actual publication/cleanup work
 before returning transfer admission. Unconfirmed stage cleanup retains the byte
