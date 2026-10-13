@@ -46,6 +46,7 @@ void main() {
 
     Future<ProcessResult> package({
       File? daemon,
+      File? service,
       String version = '0.1.0',
       String identifier = 'org.gaovm.tests.Package',
       String identity = '-',
@@ -61,6 +62,8 @@ void main() {
       armExecutable.path,
       '--driver',
       armExecutable.path,
+      '--service',
+      (service ?? armExecutable).path,
       '--schemas',
       (schemaDirectory ?? Directory('../../schemas')).path,
       '--driver-entitlements',
@@ -76,6 +79,117 @@ void main() {
       '--sign',
       identity,
     ]);
+
+    test('signs the service helper with its own ID and no exception', () async {
+      final result = await package();
+      expect(result.exitCode, 0, reason: '${result.stderr}');
+      final bundle = (result.stdout as String).trim();
+      final helper = '$bundle/Contents/MacOS/gaovm-service';
+      expect(await File(helper).exists(), isTrue);
+      final verification = await Process.run('/usr/bin/codesign', [
+        '--verify',
+        '--strict',
+        helper,
+      ]);
+      expect(verification.exitCode, 0, reason: '${verification.stderr}');
+      final signature = await Process.run('/usr/bin/codesign', [
+        '--display',
+        '--verbose=4',
+        helper,
+      ]);
+      expect(signature.exitCode, 0, reason: '${signature.stderr}');
+      expect(
+        signature.stderr,
+        contains('Identifier=org.gaovm.tests.Package.service'),
+      );
+      expect(
+        signature.stderr,
+        matches(RegExp(r'flags=0x[0-9a-f]+\([^)]*\bruntime\b')),
+      );
+      final entitlements = await Process.run('/usr/bin/codesign', [
+        '--display',
+        '--entitlements',
+        ':-',
+        helper,
+      ]);
+      expect(entitlements.exitCode, 0, reason: '${entitlements.stderr}');
+      expect((entitlements.stdout as String).trim(), isEmpty);
+    });
+
+    test('assembles the real cross-built Swift service helper', () async {
+      final service = File(
+        '../../services/macos_service/.build/arm64-apple-macosx/release/gaovm-service',
+      );
+      if (!await service.exists()) {
+        markTestSkipped('cross-build the ARM64 release service helper first');
+        return;
+      }
+      final original = sha256.convert(await service.readAsBytes());
+      final result = await package(service: service);
+      expect(result.exitCode, 0, reason: '${result.stderr}');
+      expect(sha256.convert(await service.readAsBytes()), original);
+      final packaged =
+          '${(result.stdout as String).trim()}/Contents/MacOS/gaovm-service';
+      final verified = await Process.run('/usr/bin/codesign', [
+        '--verify',
+        '--strict',
+        '--test-requirement',
+        '=identifier "org.gaovm.tests.Package.service"',
+        packaged,
+      ]);
+      expect(verified.exitCode, 0, reason: '${verified.stderr}');
+      final entitlements = await Process.run('/usr/bin/codesign', [
+        '--display',
+        '--entitlements',
+        ':-',
+        packaged,
+      ]);
+      expect(entitlements.exitCode, 0, reason: '${entitlements.stderr}');
+      expect((entitlements.stdout as String).trim(), isEmpty);
+    });
+
+    test('requires a thin ARM64 service without modifying its input', () async {
+      final rejected = await package(service: intelExecutable);
+      expect(rejected.exitCode, 2, reason: '${rejected.stderr}');
+      expect(
+        rejected.stderr,
+        contains('service helper must be an arm64 Mach-O executable'),
+      );
+      expect(await Directory('${output.path}/GaoVM.app').exists(), isFalse);
+      final service = await armExecutable.copy('${inputs.path}/service-source');
+      final original = sha256.convert(await service.readAsBytes());
+      final accepted = await package(service: service);
+      expect(accepted.exitCode, 0, reason: '${accepted.stderr}');
+      expect(sha256.convert(await service.readAsBytes()), original);
+    });
+
+    test('omitting the required service never creates staging', () async {
+      final result = await Process.run(Platform.resolvedExecutable, [
+        '--packages=${Directory.current.path}/.dart_tool/package_config.json',
+        'tool/package_macos.dart',
+        '--daemon',
+        armExecutable.path,
+        '--cli',
+        armExecutable.path,
+        '--driver',
+        armExecutable.path,
+        '--schemas',
+        '../../schemas',
+        '--driver-entitlements',
+        '../../drivers/vz_macos/Resources/entitlements.plist',
+        '--output-dir',
+        output.path,
+        '--bundle-id',
+        'org.gaovm.tests.Package',
+        '--version',
+        '0.1.0',
+        '--sign',
+        '-',
+      ]);
+      expect(result.exitCode, 2);
+      expect(result.stderr, contains('all package inputs are required'));
+      expect(await output.list().toList(), isEmpty);
+    });
 
     test('rejects Intel inputs without publishing a target app', () async {
       final result = await package(daemon: intelExecutable);
@@ -116,6 +230,7 @@ void main() {
         for (final path in [
           'MacOS/gaovmd',
           'MacOS/gaovm',
+          'MacOS/gaovm-service',
           'Helpers/gaovm-driver-vz',
         ]) {
           final verification = await Process.run('/usr/bin/codesign', [
@@ -147,6 +262,28 @@ void main() {
             ),
           ),
         );
+        expect(
+          await _signedEntitlements(
+            '${bundle.path}/Contents/Helpers/gaovm-driver-vz',
+          ),
+          {'com.apple.security.virtualization': true},
+        );
+        for (final name in ['gaovmd', 'gaovm']) {
+          final path = '${bundle.path}/Contents/MacOS/$name';
+          expect(await _signedEntitlements(path), {
+            'com.apple.security.cs.allow-unsigned-executable-memory': true,
+          });
+          final signature = await Process.run('/usr/bin/codesign', [
+            '--display',
+            '--verbose=4',
+            path,
+          ]);
+          expect(signature.exitCode, 0, reason: '${signature.stderr}');
+          expect(
+            signature.stderr,
+            matches(RegExp(r'flags=0x[0-9a-f]+\([^)]*\bruntime\b')),
+          );
+        }
         final document = await loadPublicOpenApiDocument(
           File(
             '${bundle.path}/Contents/Resources/schemas/openapi/gaovm-v1.yaml',
@@ -345,4 +482,28 @@ void main() {
       },
     );
   }, skip: !Platform.isMacOS);
+}
+
+Future<Map<String, dynamic>> _signedEntitlements(String path) async {
+  final signed = await Process.run('/usr/bin/codesign', [
+    '--display',
+    '--entitlements',
+    ':-',
+    path,
+  ]);
+  expect(signed.exitCode, 0, reason: '${signed.stderr}');
+  expect(signed.stdout, isNotEmpty, reason: 'missing entitlements for $path');
+  final converter = await Process.start('/usr/bin/plutil', [
+    '-convert',
+    'json',
+    '-o',
+    '-',
+    '-',
+  ]);
+  final output = converter.stdout.transform(utf8.decoder).join();
+  final errors = converter.stderr.transform(utf8.decoder).join();
+  converter.stdin.write(signed.stdout);
+  await converter.stdin.close();
+  expect(await converter.exitCode, 0, reason: await errors);
+  return jsonDecode(await output) as Map<String, dynamic>;
 }

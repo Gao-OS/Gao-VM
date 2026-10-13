@@ -3,7 +3,7 @@ import 'dart:io';
 import 'package:gaovmd/src/macos_app_package.dart';
 
 const _usage =
-    'Usage: package_macos.dart --daemon PATH --cli PATH --driver PATH '
+    'Usage: package_macos.dart --daemon PATH --cli PATH --driver PATH --service PATH '
     '--schemas PATH --driver-entitlements PATH --output-dir PATH '
     '--bundle-id ID --version X.Y.Z --sign IDENTITY\n'
     'Use --sign - only for an explicitly development/ad-hoc signed package.';
@@ -18,6 +18,7 @@ Future<void> main(List<String> args) async {
       '--daemon',
       '--cli',
       '--driver',
+      '--service',
       '--schemas',
       '--driver-entitlements',
       '--output-dir',
@@ -43,6 +44,7 @@ Future<void> main(List<String> args) async {
       daemon: File(values['--daemon']!),
       cli: File(values['--cli']!),
       driver: File(values['--driver']!),
+      service: File(values['--service']!),
       schemas: Directory(values['--schemas']!),
       driverEntitlements: File(values['--driver-entitlements']!),
       outputDirectory: Directory(values['--output-dir']!),

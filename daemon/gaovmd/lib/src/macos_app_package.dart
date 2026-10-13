@@ -4,6 +4,7 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import 'image_filesystem.dart';
+import 'macos_dart_signing_policy.dart';
 import 'public_openapi_document.dart';
 
 /// Build-time packaging only; not imported by the installed daemon.
@@ -12,6 +13,7 @@ final class MacOsAppPackageBuilder {
     required this.daemon,
     required this.cli,
     required this.driver,
+    required this.service,
     required this.schemas,
     required this.driverEntitlements,
     required this.outputDirectory,
@@ -23,6 +25,7 @@ final class MacOsAppPackageBuilder {
   final File daemon;
   final File cli;
   final File driver;
+  final File service;
   final Directory schemas;
   final File driverEntitlements;
   final Directory outputDirectory;
@@ -60,6 +63,7 @@ final class MacOsAppPackageBuilder {
     await _checkExecutable(daemon, 'daemon');
     await _checkExecutable(cli, 'CLI');
     await _checkExecutable(driver, 'driver');
+    await _checkExecutable(service, 'service helper');
     final root = await OwnedImageDirectory.open(outputDirectory);
     OwnedImageLock? lock;
     OwnedImageDirectory? staging;
@@ -91,6 +95,12 @@ final class MacOsAppPackageBuilder {
         try {
           await _copyFile(daemon, executables, 'gaovmd', executable: true);
           await _copyFile(cli, executables, 'gaovm', executable: true);
+          await _copyFile(
+            service,
+            executables,
+            'gaovm-service',
+            executable: true,
+          );
           await _copyFile(driver, helpers, 'gaovm-driver-vz', executable: true);
           final schemaTarget = resources.createDirectory('schemas');
           try {
@@ -122,6 +132,13 @@ final class MacOsAppPackageBuilder {
               'driver entitlement must enable com.apple.security.virtualization',
             );
           }
+          await _writeFile(
+            resources,
+            'dart-runtime-entitlements.plist',
+            utf8.encode(macOsDartRuntimeEntitlements),
+          );
+          final dartEntitlementPath =
+              '${resources.path}/dart-runtime-entitlements.plist';
           await _writeFile(
             contents,
             'Info.plist',
@@ -155,6 +172,13 @@ final class MacOsAppPackageBuilder {
             signingIdentity == '-' ? '--timestamp=none' : '--timestamp',
           ];
           final packagedDriver = '${helpers.path}/gaovm-driver-vz';
+          final packagedService = '${executables.path}/gaovm-service';
+          await _command('/usr/bin/codesign', [
+            ...signing,
+            '--identifier',
+            '$bundleIdentifier.service',
+            packagedService,
+          ]);
           await _command('/usr/bin/codesign', [
             ...signing,
             '--identifier',
@@ -180,16 +204,42 @@ final class MacOsAppPackageBuilder {
             ...signing,
             '--identifier',
             '$bundleIdentifier.cli',
+            '--entitlements',
+            dartEntitlementPath,
             '${executables.path}/gaovm',
           ]);
-          await _command('/usr/bin/codesign', [...signing, staging.path]);
+          await _command('/usr/bin/codesign', [
+            ...signing,
+            '--entitlements',
+            dartEntitlementPath,
+            staging.path,
+          ]);
           for (final path in [
             '${executables.path}/gaovmd',
             '${executables.path}/gaovm',
+            packagedService,
             packagedDriver,
           ]) {
             await _checkExecutable(File(path), 'packaged binary');
             await _command('/usr/bin/codesign', ['--verify', '--strict', path]);
+          }
+          await _command('/usr/bin/codesign', [
+            '--verify',
+            '--strict',
+            '--test-requirement',
+            '=identifier "$bundleIdentifier.service"',
+            packagedService,
+          ]);
+          final serviceEntitlements = await _command('/usr/bin/codesign', [
+            '--display',
+            '--entitlements',
+            ':-',
+            packagedService,
+          ]);
+          if (RegExp(r'<key>').hasMatch(serviceEntitlements)) {
+            throw const FormatException(
+              'signed service helper must have no entitlements',
+            );
           }
           await _command('/usr/bin/codesign', [
             '--verify',
