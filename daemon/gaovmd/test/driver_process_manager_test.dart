@@ -15,6 +15,7 @@ import 'package:gaovmd/src/host_guest_session.dart';
 import 'package:gaovmd/src/macos_driver_inventory.dart';
 import 'package:gaovmd/src/runtime_driver.dart';
 import 'package:gaovmd/src/runtime_driver_effect_adapter.dart';
+import 'package:gaovmd/src/vm_controller.dart';
 import 'package:gaovmd/src/vm_controller_reducer.dart';
 import 'package:test/test.dart';
 
@@ -159,11 +160,13 @@ void main() {
   test(
     'guest health traffic cannot keep the original driver heartbeat alive',
     () async {
+      final heartbeatScheduler = _HeldHeartbeatScheduler();
       final bridgeManager = _manager(
         temporaryDirectory,
         scenario: 'guest-bridge-session-heartbeat-hang',
         heartbeatInterval: const Duration(milliseconds: 400),
         heartbeatTimeout: const Duration(milliseconds: 100),
+        heartbeatScheduler: heartbeatScheduler,
       );
       addTearDown(bridgeManager.close);
       final session =
@@ -178,6 +181,14 @@ void main() {
       final connection = await guest.connect(
         deadline: GuestBridgeDeadline.after(const Duration(seconds: 2)),
       );
+      final missed = Completer<RuntimeHeartbeatMissed>();
+      final events = session.events.listen((event) {
+        if (event is RuntimeHeartbeatMissed && !missed.isCompleted) {
+          missed.complete(event);
+        }
+      });
+      addTearDown(events.cancel);
+      // Establish healthy Guest traffic before releasing the original probe.
       for (var index = 0; index < 3; index++) {
         expect(
           (await connection.health(
@@ -187,7 +198,43 @@ void main() {
         );
         await Future<void>.delayed(const Duration(milliseconds: 50));
       }
-      await connection.closed.timeout(const Duration(seconds: 2));
+      var guestClosed = false;
+      unawaited(
+        connection.closed.then((_) {
+          guestClosed = true;
+        }),
+      );
+      var repliesDuringProbe = 0;
+      Future<void> healthTraffic() async {
+        while (!guestClosed) {
+          try {
+            expect(
+              (await connection.health(
+                deadline: GuestBridgeDeadline.after(const Duration(seconds: 1)),
+              )).status,
+              'ok',
+            );
+            repliesDuringProbe++;
+          } on GuestSessionException catch (error) {
+            if (error.code != GuestSessionFailure.closed) rethrow;
+            // Closure is expected only with the original heartbeat receipt.
+            await missed.future.timeout(const Duration(seconds: 2));
+            break;
+          }
+        }
+      }
+
+      heartbeatScheduler.fireNext();
+      await Future.wait([
+        healthTraffic(),
+        missed.future.timeout(const Duration(seconds: 2)),
+        connection.closed.timeout(const Duration(seconds: 2)),
+      ], eagerError: true);
+      expect(repliesDuringProbe, greaterThan(0));
+      final event = await missed.future;
+      expect(event.correlation.vmId, _vm1);
+      expect(event.correlation.driverGeneration, 1);
+      expect(event.correlation.operationId, _operation1);
       expect(guest.isReady, isFalse);
       await expectLater(
         guest.connect(
@@ -1372,6 +1419,7 @@ DriverProcessManager _manager(
   String scenario = 'normal',
   Duration heartbeatInterval = const Duration(seconds: 30),
   Duration heartbeatTimeout = const Duration(seconds: 5),
+  VmTimerScheduler heartbeatScheduler = const DartVmTimerScheduler(),
 }) => DriverProcessManager(
   layout: DriverRuntimeLayout(
     '${root.path}/run',
@@ -1395,7 +1443,39 @@ DriverProcessManager _manager(
   handshakeTimeout: const Duration(seconds: 2),
   heartbeatInterval: heartbeatInterval,
   heartbeatTimeout: heartbeatTimeout,
+  heartbeatScheduler: heartbeatScheduler,
 );
+
+final class _HeldHeartbeatScheduler implements VmTimerScheduler {
+  final handles = <_HeldHeartbeatTimer>[];
+
+  @override
+  VmTimerHandle schedule(Duration delay, void Function() callback) {
+    final handle = _HeldHeartbeatTimer(callback);
+    handles.add(handle);
+    return handle;
+  }
+
+  void fireNext() => handles.firstWhere((handle) => handle.isActive).fire();
+}
+
+final class _HeldHeartbeatTimer implements VmTimerHandle {
+  _HeldHeartbeatTimer(this.callback);
+  final void Function() callback;
+  bool _active = true;
+
+  @override
+  bool get isActive => _active;
+
+  @override
+  void cancel() => _active = false;
+
+  void fire() {
+    if (!_active) return;
+    _active = false;
+    callback();
+  }
+}
 
 DriverCorrelation _correlation(
   VmId vmId,

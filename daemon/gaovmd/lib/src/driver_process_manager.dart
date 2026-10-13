@@ -13,6 +13,8 @@ import 'host_guest_session.dart';
 import 'driver_runtime_layout.dart';
 import 'macos_driver_inventory.dart';
 import 'runtime_driver.dart';
+import 'vm_controller.dart'
+    show DartVmTimerScheduler, VmTimerHandle, VmTimerScheduler;
 
 final class DriverExecutable {
   DriverExecutable({
@@ -47,6 +49,7 @@ final class DriverProcessManager implements RuntimeDriverFactory {
     Duration handshakeTimeout = const Duration(seconds: 5),
     Duration heartbeatInterval = const Duration(seconds: 5),
     Duration heartbeatTimeout = const Duration(seconds: 5),
+    VmTimerScheduler heartbeatScheduler = const DartVmTimerScheduler(),
     Duration shutdownTimeout = const Duration(seconds: 10),
     DateTime Function()? now,
     Random? secureRandom,
@@ -57,6 +60,7 @@ final class DriverProcessManager implements RuntimeDriverFactory {
        _handshakeTimeout = handshakeTimeout,
        _heartbeatInterval = heartbeatInterval,
        _heartbeatTimeout = heartbeatTimeout,
+       _heartbeatScheduler = heartbeatScheduler,
        _shutdownTimeout = shutdownTimeout,
        _now = now ?? DateTime.now,
        _random = secureRandom ?? Random.secure() {
@@ -76,6 +80,7 @@ final class DriverProcessManager implements RuntimeDriverFactory {
   final Duration _handshakeTimeout;
   final Duration _heartbeatInterval;
   final Duration _heartbeatTimeout;
+  final VmTimerScheduler _heartbeatScheduler;
   final Duration _shutdownTimeout;
   final DateTime Function() _now;
   final Random _random;
@@ -175,6 +180,7 @@ final class DriverProcessManager implements RuntimeDriverFactory {
         handshakeTimeout: _handshakeTimeout,
         heartbeatInterval: _heartbeatInterval,
         heartbeatTimeout: _heartbeatTimeout,
+        heartbeatScheduler: _heartbeatScheduler,
         now: _now,
       );
       attempt.session = session;
@@ -364,6 +370,7 @@ final class ProcessRuntimeDriverSession
     required Duration handshakeTimeout,
     required Duration heartbeatInterval,
     required Duration heartbeatTimeout,
+    required VmTimerScheduler heartbeatScheduler,
     required DateTime Function() now,
   }) : _process = process,
        _authToken = authToken,
@@ -371,6 +378,7 @@ final class ProcessRuntimeDriverSession
        _handshakeTimeout = handshakeTimeout,
        _heartbeatInterval = heartbeatInterval,
        _heartbeatTimeout = heartbeatTimeout,
+       _heartbeatScheduler = heartbeatScheduler,
        _now = now {
     _logs = StreamController<RuntimeDriverLogChunk>(
       sync: true,
@@ -390,6 +398,7 @@ final class ProcessRuntimeDriverSession
   final Duration _handshakeTimeout;
   final Duration _heartbeatInterval;
   final Duration _heartbeatTimeout;
+  final VmTimerScheduler _heartbeatScheduler;
   final DateTime Function() _now;
   final StreamController<RuntimeEvent> _events =
       StreamController<RuntimeEvent>.broadcast(sync: true);
@@ -406,7 +415,7 @@ final class ProcessRuntimeDriverSession
   Future<DriverCapabilities>? _connectFuture;
   OperationId? _latestOperationId;
   OperationId? _activeLifecycleOperation;
-  Timer? _heartbeatTimer;
+  VmTimerHandle? _heartbeatTimer;
   Timer? _stopEscalationTimer;
   Timer? _killEscalationTimer;
   bool _pingInFlight = false;
@@ -871,7 +880,10 @@ final class ProcessRuntimeDriverSession
 
   void _scheduleHeartbeat() {
     _heartbeatTimer?.cancel();
-    _heartbeatTimer = Timer(_heartbeatInterval, _heartbeat);
+    _heartbeatTimer = _heartbeatScheduler.schedule(
+      _heartbeatInterval,
+      _heartbeat,
+    );
   }
 
   void _heartbeat() {
