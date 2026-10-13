@@ -237,8 +237,17 @@ void main() {
       database.close();
       database = await GaoVmDatabase.open('${temporary.path}/catalog.db');
       expect((await cleanup().dispatchOnce()).single.completed, isTrue);
-      expect((await service().get(id)).state, TestRunState.cancelled);
-      expect((await artifacts().listForTestRun(id)).items, retained);
+      final completed = await service().get(id);
+      expect(completed.state, TestRunState.cancelled);
+      expect((await artifacts().listForTestRun(id)).items, [
+        for (final artifact in retained)
+          Artifact.fromJson({
+            ...artifact.toJson(),
+            'retention_until': completed.completedAt!
+                .add(const Duration(days: 30))
+                .toIso8601String(),
+          }),
+      ]);
       expect(
         (await SqliteOperationRepository(
           database,

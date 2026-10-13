@@ -178,9 +178,18 @@ void main() {
         nextState: TestRunState.cleaningUp,
         cleanupDecision: 'retain',
       );
-      await runs.finish(run.id, outcome: TestRunState.cancelled);
+      final completed = await runs.finish(
+        run.id,
+        outcome: TestRunState.cancelled,
+      );
+      final current = Artifact.fromJson({
+        ...artifact.toJson(),
+        'retention_until': completed.completedAt!
+            .add(const Duration(days: 30))
+            .toIso8601String(),
+      });
       final events = await SqliteEventRepository(database).list();
-      expect(await repository().publish(artifact), artifact);
+      expect(await repository().publish(artifact), current);
       await expectLater(
         repository().publish(
           Artifact.fromJson({
@@ -190,7 +199,7 @@ void main() {
         ),
         throwsA(isA<ArtifactPublicationConflict>()),
       );
-      expect(await repository().get(artifact.id), artifact);
+      expect(await repository().get(artifact.id), current);
       expect((await runs.get(run.id))!.artifactIds, [artifact.id]);
       expect(await SqliteEventRepository(database).list(), events);
     },
@@ -230,6 +239,26 @@ void main() {
       final artifact = await repository().publish(_artifact(run));
       database.close();
       final legacy = sqlite3.open('${temporary.path}/catalog.db');
+      legacy.execute('DROP TRIGGER test_run_system_info_immutable');
+      legacy.execute(
+        'ALTER TABLE test_run_collection DROP COLUMN system_info_json',
+      );
+      legacy.execute('DROP TABLE test_run_step_artifacts');
+      legacy.execute('DROP TABLE guest_diagnostic_attempts');
+      legacy.execute('DROP INDEX guest_collection_receipt_operation_idx');
+      legacy.execute('ALTER TABLE vm_runtime DROP COLUMN display_observed_at');
+      legacy.execute('ALTER TABLE vm_runtime DROP COLUMN display_state');
+      legacy.execute('ALTER TABLE vm_runtime DROP COLUMN driver_operation_id');
+      legacy.execute('DELETE FROM schema_migrations WHERE version = 21');
+      legacy.execute('DELETE FROM schema_migrations WHERE version = 20');
+      legacy.execute('DROP TABLE test_run_step_execs');
+      legacy.execute('DELETE FROM schema_migrations WHERE version = 19');
+      legacy.execute('DROP TABLE guest_artifact_mappings');
+      legacy.execute('DROP TABLE guest_artifact_receipts');
+      legacy.execute('DELETE FROM schema_migrations WHERE version = 18');
+      legacy.execute('DROP TABLE guest_exec_cancellations');
+      legacy.execute('DROP TABLE guest_exec_jobs');
+      legacy.execute('DELETE FROM schema_migrations WHERE version = 17');
       legacy.execute('DROP TRIGGER test_run_readiness_window_immutable');
       legacy.execute('DROP INDEX test_runs_waiting_ready_idx');
       legacy.execute('ALTER TABLE test_runs DROP COLUMN readiness_deadline_at');
@@ -250,7 +279,7 @@ void main() {
       legacy.userVersion = 9;
       legacy.dispose();
       database = await GaoVmDatabase.open('${temporary.path}/catalog.db');
-      expect(database.schemaVersion, 16);
+      expect(database.schemaVersion, 21);
       expect(await repository().get(artifact.id), artifact);
       expect(
         (await SqliteTestRunRepository(database).get(run.id))!.artifactIds,
@@ -287,6 +316,26 @@ void main() {
       await repository().publish(artifact, managedPayload: true);
       database.close();
       final legacy = sqlite3.open('${temporary.path}/catalog.db');
+      legacy.execute('DROP TRIGGER test_run_system_info_immutable');
+      legacy.execute(
+        'ALTER TABLE test_run_collection DROP COLUMN system_info_json',
+      );
+      legacy.execute('DROP TABLE test_run_step_artifacts');
+      legacy.execute('DROP TABLE guest_diagnostic_attempts');
+      legacy.execute('DROP INDEX guest_collection_receipt_operation_idx');
+      legacy.execute('ALTER TABLE vm_runtime DROP COLUMN display_observed_at');
+      legacy.execute('ALTER TABLE vm_runtime DROP COLUMN display_state');
+      legacy.execute('ALTER TABLE vm_runtime DROP COLUMN driver_operation_id');
+      legacy.execute('DELETE FROM schema_migrations WHERE version = 21');
+      legacy.execute('DELETE FROM schema_migrations WHERE version = 20');
+      legacy.execute('DROP TABLE test_run_step_execs');
+      legacy.execute('DELETE FROM schema_migrations WHERE version = 19');
+      legacy.execute('DROP TABLE guest_artifact_mappings');
+      legacy.execute('DROP TABLE guest_artifact_receipts');
+      legacy.execute('DELETE FROM schema_migrations WHERE version = 18');
+      legacy.execute('DROP TABLE guest_exec_cancellations');
+      legacy.execute('DROP TABLE guest_exec_jobs');
+      legacy.execute('DELETE FROM schema_migrations WHERE version = 17');
       legacy.execute('DROP TRIGGER test_run_readiness_window_immutable');
       legacy.execute('DROP INDEX test_runs_waiting_ready_idx');
       legacy.execute('ALTER TABLE test_runs DROP COLUMN readiness_deadline_at');
@@ -306,7 +355,7 @@ void main() {
       legacy.userVersion = 10;
       legacy.dispose();
       database = await GaoVmDatabase.open('${temporary.path}/catalog.db');
-      expect(database.schemaVersion, 16);
+      expect(database.schemaVersion, 21);
       expect(await repository().get(id), artifact);
       expect(await repository().hasManagedPayload(id), isTrue);
       expect(

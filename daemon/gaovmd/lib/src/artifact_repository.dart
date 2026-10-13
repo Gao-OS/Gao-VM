@@ -57,7 +57,12 @@ final class ArtifactRepository {
   }) => database.transaction((db) async {
     final existing = await get(artifact.id);
     if (existing != null) {
-      if (existing != artifact ||
+      if (JsonObjectValue.fromJson(
+                existing.toJson()..remove('retention_until'),
+              ) !=
+              JsonObjectValue.fromJson(
+                artifact.toJson()..remove('retention_until'),
+              ) ||
           managedPayload && !await hasManagedPayload(artifact.id)) {
         throw ArtifactPublicationConflict(
           artifact.id,
@@ -225,6 +230,57 @@ final class ArtifactRepository {
     ).isNotEmpty,
   );
 
+  Future<List<Artifact>> expiredUnreferenced(DateTime now, {int limit = 100}) {
+    if (limit < 1 || limit > 200)
+      throw RangeError.range(limit, 1, 200, 'limit');
+    return database.read(
+      (db) => [
+        for (final row in db.select(
+          '''
+        SELECT a.* FROM artifacts a JOIN artifact_payloads p ON p.artifact_id = a.id
+        WHERE p.storage_version = 1 AND a.retention_until <= ?
+          AND NOT ($_retentionPins)
+        ORDER BY a.id LIMIT ?
+      ''',
+          [formatPersistenceTimestamp(now), limit],
+        ))
+          _decode(row),
+      ],
+    );
+  }
+
+  /// The managed store holds both its artifact lock and publication lock.
+  /// Recheck references at the deletion commit, not merely at the scan.
+  Future<bool> expireUnreferenced(ArtifactId id, DateTime now) =>
+      database.transaction((db) async {
+        final rows = db.select(
+          '''
+      SELECT a.* FROM artifacts a JOIN artifact_payloads p ON p.artifact_id = a.id
+      WHERE a.id = ? AND p.storage_version = 1 AND a.retention_until <= ?
+        AND NOT ($_retentionPins)
+    ''',
+          [id.value, formatPersistenceTimestamp(now)],
+        );
+        if (rows.isEmpty) return false;
+        final artifact = _decode(rows.single);
+        db.execute('DELETE FROM artifacts WHERE id = ?', [id.value]);
+        await SqliteEventRepository(database).append(
+          type: 'artifact.deleted',
+          resourceType: ResourceType.artifact,
+          resourceId: artifact.id,
+          vmId: artifact.vmId,
+          operationId: artifact.operationId,
+          testRunId: artifact.testRunId,
+          occurredAt: now,
+          payload: JsonObjectValue.fromJson({
+            'reason': 'retention_expired',
+            'retention_until': artifact.toJson()['retention_until'],
+            'content_cleanup': 'pending',
+          }),
+        );
+        return true;
+      });
+
   Future<List<Artifact>> listManaged({ArtifactId? afterId, int limit = 100}) {
     if (limit < 1 || limit > 200) throw ArgumentError.value(limit, 'limit');
     return database.read(
@@ -242,6 +298,31 @@ final class ArtifactRepository {
     );
   }
 }
+
+// Catalog ownership and structured domain references are pins, including
+// terminal TestRun lists/results and immutable execution/collection journals.
+// Durable events are history rather than live references. Never dereference
+// a resource as a side effect of reclaiming its bytes.
+const _retentionPins = '''
+  EXISTS (SELECT 1 FROM vms v WHERE v.id = a.vm_id AND v.deleted_at IS NULL)
+  OR EXISTS (SELECT 1 FROM operations o WHERE o.id = a.operation_id
+    AND o.state IN ('pending', 'running'))
+  OR EXISTS (SELECT 1 FROM resource_leases l WHERE l.resource_id = a.id)
+  OR EXISTS (SELECT 1 FROM guest_artifact_mappings m WHERE m.host_artifact_id = a.id)
+  OR EXISTS (SELECT 1 FROM test_run_collection_items c WHERE c.artifact_id = a.id)
+  OR EXISTS (SELECT 1 FROM test_run_step_artifacts s
+    WHERE s.artifact_id = a.id OR s.host_artifact_id = a.id)
+  OR EXISTS (SELECT 1 FROM test_runs t, json_tree(json_array(
+    json(t.artifact_ids_json), json(t.spec_json), json(t.result_json), json(t.error_json))) j
+    WHERE j.atom = a.id)
+  OR EXISTS (SELECT 1 FROM test_steps s, json_tree(json_array(
+    json(s.request_json), json(s.result_json), json(s.error_json))) j WHERE j.atom = a.id)
+  OR EXISTS (SELECT 1 FROM operations o, json_tree(json_array(
+    json(o.request_json), json(o.result_json), json(o.error_json))) j
+    WHERE j.atom = a.id OR o.resource_id = a.id)
+  OR EXISTS (SELECT 1 FROM vm_specs v, json_tree(v.spec_json) j WHERE j.atom = a.id)
+  OR EXISTS (SELECT 1 FROM guest_artifact_receipts r, json_tree(r.result_json) j WHERE j.atom = a.id)
+''';
 
 Artifact _decode(Row row) {
   try {

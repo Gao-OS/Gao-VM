@@ -8,6 +8,8 @@ import 'package:gaovm_models/gaovm_models.dart';
 
 import 'driver_protocol_v2.dart';
 import 'driver_rpc_channel.dart';
+import 'guest_bridge_client.dart';
+import 'host_guest_session.dart';
 import 'driver_runtime_layout.dart';
 import 'macos_driver_inventory.dart';
 import 'runtime_driver.dart';
@@ -351,7 +353,8 @@ final class DriverProcessManager implements RuntimeDriverFactory {
   }
 }
 
-final class ProcessRuntimeDriverSession implements RuntimeDriverSession {
+final class ProcessRuntimeDriverSession
+    implements RuntimeDriverSession, GuestBridgeProvider, GuestSessionProvider {
   ProcessRuntimeDriverSession._({
     required this.correlation,
     required Process process,
@@ -394,6 +397,8 @@ final class ProcessRuntimeDriverSession implements RuntimeDriverSession {
   final Completer<RuntimeDriverExit> _exit = Completer<RuntimeDriverExit>();
   final Set<OperationId> _cancelledOperations = {};
   DriverRpcChannel? _channel;
+  GuestBridgeClient? _guestBridge;
+  HostGuestSession? _guestSession;
   StreamSubscription<List<int>>? _stdoutSubscription;
   StreamSubscription<List<int>>? _stderrSubscription;
   Future<void> _lifecycleTail = Future<void>.value();
@@ -431,6 +436,102 @@ final class ProcessRuntimeDriverSession implements RuntimeDriverSession {
   Stream<RuntimeDriverLogChunk> get logs => _logs.stream;
   @override
   Future<RuntimeDriverExit> get exited => _exit.future;
+
+  @override
+  HostGuestSession get guestSession => _guestSession ??= HostGuestSession(
+    bridge: this,
+    correlation: correlation.withOperation(null),
+    frameTimeout: _handshakeTimeout,
+  );
+
+  /// Private transport admission; this is not a driver passthrough/public API.
+  @override
+  Future<GuestBridgeChannel> openGuestChannel({
+    required GuestBridgeStreamKind streamKind,
+    required RequestId requestId,
+    required OperationId? operationId,
+    required GuestBridgeDeadline deadline,
+  }) {
+    final channel = _channel;
+    if (channel == null || !_guestSessionActive(channel)) {
+      return Future.error(
+        const GuestBridgeException(GuestBridgeFailure.closed),
+      );
+    }
+    if (!_capabilities.contains(DriverCapability.guestStatus)) {
+      return Future.error(
+        const GuestBridgeException(GuestBridgeFailure.unsupported),
+      );
+    }
+    final bridge = _guestBridge ??= GuestBridgeClient(
+      paths: paths,
+      correlation: correlation,
+      authToken: _authToken,
+      expectedPeerUID: _processIdentity?.uid,
+      isSessionActive: () => _guestSessionActive(channel),
+      sessionClosed: channel.done,
+      prepareOpening: (operationId) =>
+          _prepareGuestOpening(channel, operationId),
+    );
+    return bridge.openAndJoin(
+      streamKind: streamKind,
+      requestId: requestId,
+      operationId: operationId,
+      deadline: deadline,
+    );
+  }
+
+  bool _guestSessionActive(DriverRpcChannel channel) =>
+      identical(channel, _channel) &&
+      _connected &&
+      !_released &&
+      !_terminalRequested &&
+      !_heartbeatFailed &&
+      !_processExited &&
+      !_exit.isCompleted;
+
+  Future<void> _fenceGuestChannels() async {
+    // Fence the higher-level epoch before starting descriptor/bridge teardown.
+    final sessionClosed = _guestSession?.close() ?? Future<void>.value();
+    final bridgeClosed = _guestBridge?.close() ?? Future<void>.value();
+    await Future.wait([sessionClosed, bridgeClosed]);
+  }
+
+  Future<void> _prepareGuestOpening(
+    DriverRpcChannel channel,
+    OperationId? operationId,
+  ) async {
+    if (!_guestSessionActive(channel)) {
+      throw const GuestBridgeException(GuestBridgeFailure.closed);
+    }
+    final result = await execute(
+      GuestStatusCommand(correlation: correlation.withOperation(operationId)),
+    );
+    if (!_guestSessionActive(channel)) {
+      throw const GuestBridgeException(GuestBridgeFailure.closed);
+    }
+    final data = result.data?.toJson();
+    if (result.status != RuntimeCommandStatus.succeeded ||
+        data == null ||
+        data.length != 3 ||
+        !data.keys.every(
+          const {'bridge_protocol_version', 'available', 'vsock_port'}.contains,
+        ) ||
+        data['available'] is! bool) {
+      throw const GuestBridgeException(GuestBridgeFailure.invalidResponse);
+    }
+    if (data['bridge_protocol_version'] != 'gaovm.bridge.v1') {
+      throw const GuestBridgeException(GuestBridgeFailure.unsupported);
+    }
+    final port = data['vsock_port'];
+    if (port != null && (port is! int || port < 1 || port > 4294967295) ||
+        data['available'] == true && port == null) {
+      throw const GuestBridgeException(GuestBridgeFailure.invalidResponse);
+    }
+    if (data['available'] != true) {
+      throw const GuestBridgeException(GuestBridgeFailure.unavailable);
+    }
+  }
 
   @override
   Future<DriverCapabilities> connect(DriverCapabilities required) async {
@@ -596,17 +697,27 @@ final class ProcessRuntimeDriverSession implements RuntimeDriverSession {
           if (operationId != null && _cancelledOperations.remove(operationId)) {
             throw _cancelled('driver operation was cancelled before dispatch');
           }
-          if (operationId != null) _latestOperationId = operationId;
-          _activeLifecycleOperation = operationId;
+          // Display mutations are ordered with lifecycle work, but never own
+          // VM exit correlation or process termination on cancellation.
+          final ownsRuntime =
+              command is RuntimeConfigureCommand ||
+              command is RuntimeStartCommand ||
+              command is RuntimeStopCommand ||
+              command is RuntimeKillCommand;
+          if (ownsRuntime) {
+            if (operationId != null) _latestOperationId = operationId;
+            _activeLifecycleOperation = operationId;
+          }
           if (command is RuntimeKillCommand) {
             // Even a failed or hung kill RPC must terminate the owned process.
             _terminalRequested = true;
+            unawaited(_fenceGuestChannels());
             _armStopEscalation(Duration.zero);
           }
           try {
             return await _executeNow(command);
           } finally {
-            if (_activeLifecycleOperation == operationId) {
+            if (ownsRuntime && _activeLifecycleOperation == operationId) {
               _activeLifecycleOperation = null;
             }
           }
@@ -626,9 +737,11 @@ final class ProcessRuntimeDriverSession implements RuntimeDriverSession {
     );
     if (command is RuntimeStopCommand) {
       _terminalRequested = true;
+      unawaited(_fenceGuestChannels());
       _armStopEscalation(command.gracePeriod);
     } else if (command is RuntimeKillCommand) {
       _terminalRequested = true;
+      unawaited(_fenceGuestChannels());
       _armStopEscalation(Duration.zero);
     }
     return result;
@@ -648,6 +761,7 @@ final class ProcessRuntimeDriverSession implements RuntimeDriverSession {
   Future<void> cancel(OperationId operationId) async {
     if (_activeLifecycleOperation == operationId && !_processExited) {
       _terminalRequested = true;
+      unawaited(_fenceGuestChannels());
       _process.kill(ProcessSignal.sigterm);
       _killEscalationTimer?.cancel();
       _killEscalationTimer = Timer(const Duration(seconds: 2), () {
@@ -661,7 +775,12 @@ final class ProcessRuntimeDriverSession implements RuntimeDriverSession {
   @override
   Future<void> close() async {
     _cancelTimers();
+    _connected = false;
+    final guestClosed = _fenceGuestChannels();
+    // Closing the original channel settles any in-flight guest.status RPC.
+    // Join its counted opening/owned raw descriptors before layout release.
     await _channel?.close();
+    await guestClosed;
     _channel = null;
   }
 
@@ -682,6 +801,7 @@ final class ProcessRuntimeDriverSession implements RuntimeDriverSession {
   Future<void> _releaseOnce() async {
     if (_released && _processExited) return;
     _released = true;
+    unawaited(_fenceGuestChannels());
     if (!_processExited) {
       if (_connected && correlation.operationId != null) {
         try {
@@ -768,6 +888,7 @@ final class ProcessRuntimeDriverSession implements RuntimeDriverSession {
           onError: (Object error, StackTrace stackTrace) {
             _pingInFlight = false;
             _heartbeatFailed = true;
+            unawaited(_fenceGuestChannels());
             final operationId = _latestOperationId ?? correlation.operationId;
             if (operationId != null && !_events.isClosed) {
               _events.add(
@@ -795,6 +916,7 @@ final class ProcessRuntimeDriverSession implements RuntimeDriverSession {
 
   void _onProcessExit(int exitCode) {
     _processExited = true;
+    unawaited(_fenceGuestChannels());
     _cancelTimers();
     if (!_exit.isCompleted) {
       _exit.complete(
@@ -819,6 +941,7 @@ final class ProcessRuntimeDriverSession implements RuntimeDriverSession {
 
   void _onExitError(Object error, StackTrace stackTrace) {
     if (!_exit.isCompleted) _exit.completeError(error, stackTrace);
+    unawaited(_fenceGuestChannels());
   }
 
   void _emitLog(RuntimeDriverLogStream stream, List<int> bytes) {

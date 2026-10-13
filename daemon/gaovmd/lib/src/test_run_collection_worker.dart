@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -5,11 +6,15 @@ import 'package:gaovm_models/gaovm_models.dart';
 
 import 'artifact_application_service.dart';
 import 'event_repository.dart';
+import 'guest_bridge_client.dart';
+import 'host_guest_artifacts.dart';
+import 'host_guest_session.dart';
 import 'image_filesystem.dart';
 import 'operation_repository.dart';
 import 'persistence_timestamp.dart';
 import 'sqlite_database.dart';
 import 'test_run_repository.dart';
+import 'test_run_step_artifact_collector.dart';
 import 'vm_bundle_manifest.dart';
 import 'vm_provisioning_repository.dart';
 import 'vm_repository.dart';
@@ -42,19 +47,45 @@ final class TestRunCollectionWorker {
     required this.database,
     required this.bundles,
     required this.artifacts,
+    this.guestBudget,
+    this.resolveGuestConnection,
     DateTime Function()? now,
-  }) : _now = now ?? DateTime.now;
+  }) : _now = now ?? DateTime.now {
+    if (!identical(database, artifacts.database))
+      throw ArgumentError('collection catalog differs');
+    if (resolveGuestConnection != null && guestBudget == null)
+      throw ArgumentError('guest collection requires the shared budget');
+  }
   final GaoVmDatabase database;
   final OwnedImageDirectory bundles;
   final ArtifactApplicationService artifacts;
+  final GuestArtifactBudget? guestBudget;
+  final GuestControlConnection? Function(VmId, int)? resolveGuestConnection;
   final DateTime Function() _now;
   TestRunId? _cursor;
+  final Set<HostGuestArtifactService> _guestOwners = {};
+  Future<List<TestRunCollectionOutcome>>? _dispatchFuture;
+  bool _closed = false;
+  Future<void>? _closeFuture;
+  Future<void>? _recovery;
+  bool _recovered = false;
+  bool _hasRun = false;
 
-  Future<List<TestRunCollectionOutcome>> dispatchOnce({int limit = 100}) async {
+  Future<List<TestRunCollectionOutcome>> dispatchOnce({int limit = 100}) {
     if (limit < 1 || limit > 200)
       throw RangeError.range(limit, 1, 200, 'limit');
     if (database.hasActiveCallerTransaction)
       throw StateError('TestRun collection must own its commit boundary');
+    if (_closed) return Future.value(const []);
+    return _dispatchFuture ??= _dispatch(
+      limit,
+    ).whenComplete(() => _dispatchFuture = null);
+  }
+
+  Future<List<TestRunCollectionOutcome>> _dispatch(int limit) async {
+    if (_recovery != null && !_recovered)
+      throw StateError('TestRun diagnostic recovery has not succeeded');
+    _hasRun = true;
     final items = await database.read((db) {
       const query = '''
         SELECT t.id, t.operation_id, t.vm_id, o.request_id, r.driver_generation
@@ -91,6 +122,17 @@ final class TestRunCollectionWorker {
               '.lock-' + (item.vm?.value ?? item.id.value),
             );
             try {
+              if (_closed)
+                return TestRunCollectionOutcome(
+                  testRunId: item.id,
+                  operationId: item.operation,
+                  requestId: item.request,
+                  vmId: item.vm,
+                  collected: false,
+                  driverGeneration: item.generation > 0
+                      ? item.generation
+                      : null,
+                );
               collected = await _collect(item.id);
             } finally {
               lock.close();
@@ -140,7 +182,16 @@ final class TestRunCollectionWorker {
           : await SqliteVmRepository(
               database,
             ).get(run.vmId!, includeDeleted: true);
-      final generation = vm?.status.driverGeneration ?? 0;
+      final originalStart = db.select(
+        'SELECT driver_generation FROM test_run_vm_start WHERE test_run_id = ?',
+        [id.value],
+      ).singleOrNull;
+      // The report describes original execution, not a replacement generation
+      // observed later during collection/recovery. Log records keep their tags.
+      final generation =
+          originalStart?['driver_generation'] as int? ??
+          vm?.status.driverGeneration ??
+          0;
       final snapshot = JsonObjectValue.fromJson({
         'format': 'gaovm.test-result.v1',
         'test_run_id': id.value,
@@ -205,7 +256,19 @@ final class TestRunCollectionWorker {
   Future<bool> _collect(TestRunId id) async {
     final plan = await _reserve(id);
     if (plan == null) return false;
+    final systemInfo = await _systemInfo(plan);
+    final stepCollector = TestRunStepArtifactCollector(
+      database: database,
+      artifacts: artifacts,
+    );
+    final stepArtifacts = await stepCollector.collect(
+      run: plan.run,
+      snapshot: plan.snapshot,
+      retentionUntil: plan.retention,
+      isActive: () => !_closed,
+    );
     for (final slot in await _slots(id)) {
+      if (_closed) return false;
       if (slot.state != 'pending') continue;
       if (slot.kind != ArtifactKind.result) {
         await _collectLog(plan, slot);
@@ -213,6 +276,8 @@ final class TestRunCollectionWorker {
       }
       final report = {
         ...plan.snapshot.toJson(),
+        ...stepArtifacts.toJson(),
+        'system_info': systemInfo.toJson(),
         'collection': [
           for (final item in await _slots(id))
             if (item.kind != ArtifactKind.result)
@@ -246,6 +311,7 @@ final class TestRunCollectionWorker {
           verified.kind != slot.kind)
         throw StateError('TestRun artifact ownership differs');
     }
+    await stepCollector.verify(plan.run, isActive: () => !_closed);
     await database.transaction((db) async {
       final run = await SqliteTestRunRepository(database).get(id);
       if (run == null || run.state != TestRunState.collecting)
@@ -279,6 +345,200 @@ final class TestRunCollectionWorker {
       );
     });
     return true;
+  }
+
+  Future<JsonObjectValue> _systemInfo(
+    _CollectionPlan plan, {
+    bool allowGuestIO = true,
+  }) async {
+    final stored = await database.read(
+      (db) => db.select(
+        'SELECT system_info_json FROM test_run_collection WHERE test_run_id = ?',
+        [plan.run.id.value],
+      ).single['system_info_json'],
+    );
+    if (stored != null)
+      return JsonObjectValue.fromJson(jsonDecode(stored as String));
+    final previous = await database.read(
+      (db) => db.select(
+        "SELECT * FROM guest_diagnostic_attempts WHERE operation_id = ? AND method = 'system.info'",
+        [plan.run.operationId.value],
+      ).singleOrNull,
+    );
+    JsonObjectValue outcome;
+    if (previous != null) {
+      if (previous['completed_at'] == null)
+        throw StateError('original system info owner has not retired');
+      outcome = previous['result_json'] == null
+          ? _unavailableSystemInfo('original_attempt_unavailable')
+          : JsonObjectValue.fromJson({
+              'state': 'collected',
+              'vm_id': previous['vm_id'],
+              'driver_generation': previous['driver_generation'],
+              'result': jsonDecode(previous['result_json'] as String),
+            });
+    } else if (!allowGuestIO) {
+      outcome = _unavailableSystemInfo('daemon_restarted_before_diagnostics');
+    } else {
+      final start = await database.read(
+        (db) => db.select(
+          'SELECT vm_id, driver_generation FROM test_run_vm_start WHERE test_run_id = ?',
+          [plan.run.id.value],
+        ).singleOrNull,
+      );
+      HostGuestArtifactService? owner;
+      try {
+        if (_closed) throw StateError('collection is closed');
+        final vm = plan.run.vmId;
+        final generation = start?['driver_generation'] as int?;
+        final connection = vm == null || generation == null || generation < 1
+            ? null
+            : resolveGuestConnection?.call(vm, generation);
+        if (connection == null) {
+          outcome = _unavailableSystemInfo('original_guest_unavailable');
+        } else {
+          owner = HostGuestArtifactService(
+            database: database,
+            artifacts: artifacts,
+            budget: guestBudget!,
+          );
+          _guestOwners.add(owner);
+          final info = await owner.captureSystemInfo(
+            connection: connection,
+            operationId: plan.run.operationId,
+            deadline: GuestBridgeDeadline.after(const Duration(seconds: 5)),
+          );
+          outcome = JsonObjectValue.fromJson({
+            'state': 'collected',
+            'vm_id': vm!.value,
+            'driver_generation': generation,
+            'result': info.toJson(),
+          });
+        }
+      } catch (error) {
+        outcome = _unavailableSystemInfo('${error.runtimeType}');
+      } finally {
+        if (owner != null) {
+          await owner.close();
+          _guestOwners.remove(owner);
+        }
+      }
+    }
+    if (_closed) throw StateError('collection is closed');
+    return database.transaction((db) {
+      final rows = db.select(
+        '''
+        SELECT c.system_info_json FROM test_run_collection c JOIN test_runs t ON t.id = c.test_run_id
+        WHERE c.test_run_id = ? AND t.state = 'collecting' AND c.completed_at IS NULL
+      ''',
+        [plan.run.id.value],
+      );
+      if (rows.isEmpty) throw StateError('TestRun left system info collection');
+      if (rows.single['system_info_json'] != null)
+        return JsonObjectValue.fromJson(
+          jsonDecode(rows.single['system_info_json'] as String),
+        );
+      // Another owner may win the claim after the initial lookup. The final
+      // checkpoint must prove its retirement atomically, not turn that failed
+      // local claim into permission for cleanup while foreign RPC is live.
+      final latest = db.select(
+        "SELECT * FROM guest_diagnostic_attempts WHERE operation_id = ? AND method = 'system.info'",
+        [plan.run.operationId.value],
+      ).singleOrNull;
+      if (latest != null) {
+        if (latest['completed_at'] == null)
+          throw StateError('original system info owner has not retired');
+        outcome = latest['result_json'] == null
+            ? _unavailableSystemInfo('original_attempt_unavailable')
+            : JsonObjectValue.fromJson({
+                'state': 'collected',
+                'vm_id': latest['vm_id'],
+                'driver_generation': latest['driver_generation'],
+                'result': jsonDecode(latest['result_json'] as String),
+              });
+      }
+      db.execute(
+        'UPDATE test_run_collection SET system_info_json = ? WHERE test_run_id = ?',
+        [jsonEncode(outcome.toJson()), plan.run.id.value],
+      );
+      return outcome;
+    });
+  }
+
+  JsonObjectValue _unavailableSystemInfo(String reason) =>
+      JsonObjectValue.fromJson({'state': 'unavailable', 'reason': reason});
+
+  /// Startup-only: all old guest/driver owners must actually retire before a
+  /// missing reply can be declared unknown. No resolver or fresh RPC is used.
+  Future<void> recoverInterrupted({
+    required Future<void> Function() retireOriginalOwners,
+  }) {
+    if (_closed || _hasRun)
+      throw StateError(
+        'diagnostic recovery must precede collection activation',
+      );
+    return _recovery ??= _recoverInterrupted(
+      retireOriginalOwners,
+    ).then((_) => _recovered = true);
+  }
+
+  Future<void> _recoverInterrupted(
+    Future<void> Function() retireOriginalOwners,
+  ) async {
+    await retireOriginalOwners();
+    if (_closed) throw StateError('diagnostic recovery is closed');
+    await database.transaction((db) {
+      db.execute(
+        '''
+        UPDATE guest_diagnostic_attempts SET error_json = ?, completed_at = ? WHERE completed_at IS NULL
+      ''',
+        [
+          jsonEncode({
+            'outcome': 'unknown',
+            'reason': 'daemon_restarted_after_authorization',
+          }),
+          formatPersistenceTimestamp(_now().toUtc()),
+        ],
+      );
+    });
+    var cursor = '';
+    while (!_closed) {
+      final ids = await database.read(
+        (db) => [
+          for (final row in db.select(
+            '''
+        SELECT t.id FROM test_runs t LEFT JOIN test_run_collection c ON c.test_run_id = t.id
+        WHERE t.state = 'collecting' AND c.completed_at IS NULL AND t.id > ? ORDER BY t.id LIMIT 100
+      ''',
+            [cursor],
+          ))
+            TestRunId(row['id'] as String),
+        ],
+      );
+      if (ids.isEmpty) return;
+      for (final id in ids) {
+        if (_closed) throw StateError('diagnostic recovery is closed');
+        cursor = id.value;
+        final plan = await _reserve(id);
+        if (plan != null) await _systemInfo(plan, allowGuestIO: false);
+      }
+    }
+    throw StateError('diagnostic recovery is closed');
+  }
+
+  Future<void> close() => _closeFuture ??= _close();
+  Future<void> _close() async {
+    _closed = true;
+    try {
+      await Future.wait(_guestOwners.toList().map((owner) => owner.close()));
+    } finally {
+      // The recovery caller observes its failure. Shutdown still joins it.
+      await _recovery?.then<void>(
+        (_) {},
+        onError: (Object _, StackTrace __) {},
+      );
+      await _dispatchFuture;
+    }
   }
 
   Future<void> _collectLog(_CollectionPlan plan, _CollectionSlot slot) async {

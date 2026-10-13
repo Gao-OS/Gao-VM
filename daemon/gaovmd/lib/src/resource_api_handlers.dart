@@ -3,29 +3,37 @@ import 'dart:io';
 
 import 'package:gaovm_models/gaovm_models.dart';
 
+import 'guest_exec_application_service.dart';
+import 'guest_exec_request.dart';
 import 'idempotency_repository.dart';
 import 'operation_application_service.dart';
 import 'operation_repository.dart';
 import 'public_api_server.dart';
 import 'vm_application_service.dart';
+import 'vm_controller.dart';
 import 'vm_provisioning_plan.dart';
+import 'vm_registry.dart';
 import 'vm_repository.dart';
 
 final class ResourceApiHandlers {
   const ResourceApiHandlers({
     required VmApplicationService vms,
     required OperationApplicationService operations,
+    GuestExecApplicationService? guestExec,
   }) : _vms = vms,
-       _operations = operations;
+       _operations = operations,
+       _guestExec = guestExec;
 
   final VmApplicationService _vms;
   final OperationApplicationService _operations;
+  final GuestExecApplicationService? _guestExec;
 
   void register(PublicApiRouter router) {
     router
       ..add('GET', '/v1/vms', _guard(_listVms))
       ..add('POST', '/v1/vms', _guard(_createVm))
       ..add('GET', '/v1/vms/{vm_id}', _guard(_getVm))
+      ..add('GET', '/v1/vms/{vm_id}/display', _guard(_displayStatus))
       ..add('PATCH', '/v1/vms/{vm_id}', _guard(_patchVm))
       ..add('DELETE', '/v1/vms/{vm_id}', _guard(_deleteVm))
       ..add(
@@ -50,6 +58,18 @@ final class ResourceApiHandlers {
       )
       ..add(
         'POST',
+        '/v1/vms/{vm_id}/actions/open-display',
+        _guard((request) => _lifecycle(request, VmLifecycleAction.openDisplay)),
+      )
+      ..add(
+        'POST',
+        '/v1/vms/{vm_id}/actions/close-display',
+        _guard(
+          (request) => _lifecycle(request, VmLifecycleAction.closeDisplay),
+        ),
+      )
+      ..add(
+        'POST',
         '/v1/vms/{vm_id}/wait',
         _guard(_waitForVm),
         allowsExtendedWait: true,
@@ -67,7 +87,23 @@ final class ResourceApiHandlers {
         _guard(_waitForOperation),
         allowsExtendedWait: true,
       );
+    if (_guestExec != null) {
+      router.add('POST', '/v1/vms/{vm_id}/guest/exec', _guard(_executeGuest));
+    }
   }
+
+  Future<PublicApiResponse> _executeGuest(PublicApiRequest request) async =>
+      _accepted(
+        await _guestExec!.execute(
+          GuestExecCommand(
+            vmId: _vmId(request),
+            requestId: request.requestId,
+            idempotencyKey: _idempotencyKey(request),
+            requestBody: request.bodyBytes,
+            request: GuestExecRequest.fromJson(_body(request, required: true)),
+          ),
+        ),
+      );
 
   Future<PublicApiResponse> _listVms(PublicApiRequest request) async {
     final query = request.uri.queryParameters;
@@ -132,6 +168,18 @@ final class ResourceApiHandlers {
       logCorrelation: PublicApiLogCorrelation(
         vmId: virtualMachine.metadata.id,
         driverGeneration: virtualMachine.status.driverGeneration,
+      ),
+    );
+  }
+
+  Future<PublicApiResponse> _displayStatus(PublicApiRequest request) async {
+    final display = await _vms.displayStatus(_vmId(request));
+    return PublicApiResponse.json(
+      status: HttpStatus.ok,
+      body: display.toJson(),
+      logCorrelation: PublicApiLogCorrelation(
+        vmId: display.vmId,
+        driverGeneration: display.driverGeneration,
       ),
     );
   }
@@ -323,6 +371,35 @@ PublicApiHandler _guard(
     return await handler(request);
   } on PublicApiException {
     rethrow;
+  } on GuestExecAdmissionException catch (error) {
+    final unavailable = error.code == ErrorCode.guestAgentUnavailable;
+    throw _problem(
+      status: unavailable ? HttpStatus.serviceUnavailable : HttpStatus.conflict,
+      code: error.code,
+      type: unavailable ? 'guest-agent-unavailable' : 'guest-exec-conflict',
+      title: unavailable
+          ? 'Guest agent unavailable'
+          : 'Guest execution conflict',
+      detail: unavailable
+          ? 'The original VM guest agent is not ready.'
+          : 'The VM is not currently able to accept guest execution.',
+      retryable: unavailable,
+      details: JsonObjectValue.fromJson({'vm_id': error.vmId.value}),
+    );
+  } on VmControllerClosedException {
+    throw _unavailableController();
+  } on VmRegistryClosedException {
+    throw _unavailableController();
+  } on VmCatalogLimitExceeded {
+    throw _problem(
+      status: HttpStatus.conflict,
+      code: ErrorCode.hostResourceExhausted,
+      type: 'vm-catalog-full',
+      title: 'VM catalog full',
+      detail: 'The catalog already contains $maxDefinedVms VM definitions.',
+      retryable: false,
+      details: JsonObjectValue.fromJson({'max_defined_vms': maxDefinedVms}),
+    );
   } on VmProvisioningImageNotFoundException catch (error) {
     throw _problem(
       status: HttpStatus.unprocessableEntity,
@@ -426,6 +503,15 @@ PublicApiHandler _guard(
     throw _invalidRequest(error.message?.toString() ?? 'Invalid request.');
   }
 };
+
+PublicApiException _unavailableController() => _problem(
+  status: HttpStatus.serviceUnavailable,
+  code: ErrorCode.vmOperationConflict,
+  type: 'vm-controller-unavailable',
+  title: 'VM controller unavailable',
+  detail: 'The VM controller is shutting down.',
+  retryable: true,
+);
 
 PublicApiResponse _accepted(OperationAcceptance operation) {
   final resourceId = operation.resourceId;

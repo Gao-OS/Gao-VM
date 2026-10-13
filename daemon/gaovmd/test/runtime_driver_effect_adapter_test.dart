@@ -10,6 +10,65 @@ import 'package:gaovmd/src/vm_controller_reducer.dart';
 import 'package:test/test.dart';
 
 void main() {
+  test(
+    'display commands preserve runtime correlation and route manual close observations',
+    () async {
+      final scheduler = ManualRuntimeScheduler();
+      final factory = FakeRuntimeDriverFactory(scheduler: scheduler);
+      final commands = <VmCommand>[];
+      final adapter = RuntimeDriverEffectAdapter(
+        factory: factory,
+        resolveConfiguration: (_) async => _configuration,
+        requiredCapabilities: DriverCapabilities.all,
+        dispatch: (_, command) async => commands.add(command),
+      );
+      addTearDown(adapter.close);
+      final state = _state(_vm1);
+      await adapter.spawn(state, _operation1, 1);
+      await adapter.connect(state, _operation1, 1);
+      await adapter.configure(state, _operation1, 1);
+      await adapter.start(state, _operation1, 1);
+      scheduler.advanceBy(const Duration(seconds: 1));
+      final correlation = DriverCorrelation(
+        vmId: _vm1,
+        driverGeneration: 1,
+        operationId: _operation1,
+      );
+      final control = factory.controlFor(correlation);
+      expect(
+        await adapter.setDisplay(state, _operation2, 1, open: true),
+        VmDisplayState.open,
+      );
+      expect(
+        await adapter.setDisplay(state, _operation2, 1, open: false),
+        VmDisplayState.closed,
+      );
+      control.emitEventForTest(
+        RuntimeStateChanged(
+          correlation: correlation.withOperation(null),
+          occurredAt: scheduler.now,
+          state: RuntimeDriverState.running,
+        ),
+      );
+      control.emitEventForTest(
+        DisplayStateChanged(
+          correlation: correlation.withOperation(null),
+          occurredAt: scheduler.now,
+          state: RuntimeDisplayState.closed,
+        ),
+      );
+      await adapter.waitUntilEventsDispatched();
+      expect(
+        commands.whereType<VmStateChanged>().last.operationId,
+        _operation1,
+      );
+      expect(commands.whereType<DisplayObserved>().last.operationId, isNull);
+      expect(control.commandHistory.whereType<RuntimeStopCommand>(), isEmpty);
+      expect(control.commandHistory.whereType<RuntimeKillCommand>(), isEmpty);
+      expect(control.state, RuntimeDriverState.running);
+    },
+  );
+
   test('failed adapter close retains ownership and can be retried', () async {
     final factory = _DelayedReleaseFactory()..failRelease = true;
     factory.allowRelease.complete();

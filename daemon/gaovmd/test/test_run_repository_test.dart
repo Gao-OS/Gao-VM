@@ -21,6 +21,138 @@ void main() {
   });
 
   test(
+    'successful ephemeral artifacts expire seven days after completion',
+    () async {
+      final database = await GaoVmDatabase.open(databasePath);
+      addTearDown(database.close);
+      var now = DateTime.utc(2026, 10, 13);
+      final repository = SqliteTestRunRepository(database, now: () => now);
+      final run = await _running(repository, database);
+      for (var index = 0; index < run.steps.length; index++) {
+        await repository.startStep(run.id, index: index);
+        await repository.finishStep(
+          run.id,
+          index: index,
+          state: TestStepState.succeeded,
+          result: JsonObjectValue.fromJson({'exit_code': 0}),
+        );
+      }
+      await repository.transition(
+        run.id,
+        expectedState: TestRunState.runningSteps,
+        nextState: TestRunState.collecting,
+        outcome: TestRunState.succeeded,
+      );
+      final artifactId = ArtifactId.generate();
+      final artifact = Artifact(
+        id: artifactId,
+        vmId: run.vmId,
+        operationId: run.operationId,
+        testRunId: run.id,
+        kind: ArtifactKind.stdout,
+        contentType: 'text/plain',
+        sizeBytes: 0,
+        digest: 'sha256:${List.filled(64, '0').join()}',
+        downloadUrl: '/v1/artifacts/${artifactId.value}',
+        retentionUntil: now.add(const Duration(days: 30)),
+        createdAt: now,
+      );
+      await ArtifactRepository(database).publish(artifact);
+      await repository.transition(
+        run.id,
+        expectedState: TestRunState.collecting,
+        nextState: TestRunState.cleaningUp,
+        cleanupDecision: 'delete',
+      );
+      now = now.add(const Duration(minutes: 2));
+      final before = await SqliteEventRepository(database).list();
+      await database.transaction(
+        (db) => db.execute('''
+        CREATE TRIGGER deny_retention BEFORE UPDATE OF retention_until ON artifacts
+        BEGIN SELECT RAISE(ABORT, 'injected retention failure'); END
+      '''),
+      );
+      await expectLater(
+        repository.finish(run.id, outcome: TestRunState.succeeded),
+        throwsA(isA<SqliteException>()),
+      );
+      expect((await repository.get(run.id))!.state, TestRunState.cleaningUp);
+      expect(
+        (await ArtifactRepository(database).get(artifact.id))!.retentionUntil,
+        artifact.retentionUntil,
+      );
+      expect(await SqliteEventRepository(database).list(), before);
+      await database.transaction(
+        (db) => db.execute('DROP TRIGGER deny_retention'),
+      );
+      final completed = await repository.finish(
+        run.id,
+        outcome: TestRunState.succeeded,
+      );
+      final retained = (await ArtifactRepository(database).get(artifact.id))!;
+      expect(
+        retained.retentionUntil,
+        completed.completedAt!.add(const Duration(days: 7)),
+      );
+      expect(retained.createdAt, artifact.createdAt);
+      expect(
+        (await SqliteEventRepository(
+          database,
+        ).list(resourceId: artifact.id)).map((event) => event.type),
+        contains('artifact.retention_updated'),
+      );
+    },
+  );
+
+  for (final outcome in [TestRunState.failed, TestRunState.cancelled]) {
+    test('$outcome artifacts receive thirty days from completion', () async {
+      final database = await GaoVmDatabase.open(databasePath);
+      addTearDown(database.close);
+      var now = DateTime.utc(2026, 10, 13);
+      final repository = SqliteTestRunRepository(database, now: () => now);
+      final run = await _running(repository, database);
+      if (outcome == TestRunState.cancelled) {
+        await repository.requestCancel(run.id);
+      }
+      await repository.transition(
+        run.id,
+        expectedState: TestRunState.runningSteps,
+        nextState: TestRunState.collecting,
+        outcome: outcome,
+        error: outcome == TestRunState.failed ? _failure() : null,
+      );
+      final id = ArtifactId.generate();
+      await ArtifactRepository(database).publish(
+        Artifact(
+          id: id,
+          testRunId: run.id,
+          vmId: run.vmId,
+          operationId: run.operationId,
+          kind: ArtifactKind.result,
+          contentType: 'application/json',
+          sizeBytes: 0,
+          digest: 'sha256:${List.filled(64, '0').join()}',
+          downloadUrl: '/v1/artifacts/${id.value}',
+          retentionUntil: now.add(const Duration(days: 7)),
+          createdAt: now,
+        ),
+      );
+      await repository.transition(
+        run.id,
+        expectedState: TestRunState.collecting,
+        nextState: TestRunState.cleaningUp,
+        cleanupDecision: 'retain',
+      );
+      now = now.add(const Duration(minutes: 2));
+      final completed = await repository.finish(run.id, outcome: outcome);
+      expect(
+        (await ArtifactRepository(database).get(id))!.retentionUntil,
+        completed.completedAt!.add(const Duration(days: 30)),
+      );
+    });
+  }
+
+  test(
     'creation persists the full spec, ordered steps and operation',
     () async {
       final database = await GaoVmDatabase.open(databasePath);

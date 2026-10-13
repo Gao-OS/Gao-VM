@@ -30,6 +30,31 @@ void main() {
     artifacts: artifactService(),
   );
 
+  // Keep exact equality of immutable metadata when completion changes only
+  // live retention policy. Unfinished/rolled-back runs retain the original DTO.
+  Future<List<Artifact>> withCompletionRetention(
+    List<Artifact> original,
+  ) async {
+    if (original.isEmpty) return original;
+    final run = await TestRunApplicationService(
+      database: database,
+    ).get(original.first.testRunId!);
+    if (run.completedAt == null) return original;
+    final days =
+        run.state == TestRunState.succeeded && run.cleanupDecision == 'delete'
+        ? 7
+        : 30;
+    return [
+      for (final artifact in original)
+        Artifact.fromJson({
+          ...artifact.toJson(),
+          'retention_until': run.completedAt!
+              .add(Duration(days: days))
+              .toIso8601String(),
+        }),
+    ];
+  }
+
   setUp(() async {
     temporary = await Directory.systemTemp.createTemp('tr-collection-');
     imageFileMode(temporary.path, 0x1c0);
@@ -327,7 +352,7 @@ void main() {
       expect(completedParent.error, run.error);
       expect(
         (await artifactService().listForTestRun(run.id)).items,
-        contains(result),
+        contains((await withCompletionRetention([result])).single),
       );
       final retained = (await SqliteVmRepository(database).get(run.vmId!))!;
       expect(retained, running);
@@ -391,7 +416,10 @@ void main() {
         ).get(deletion.operationId))!.state,
         OperationState.pending,
       );
-      expect((await artifactService().listForTestRun(run.id)).items, artifacts);
+      expect(
+        (await artifactService().listForTestRun(run.id)).items,
+        await withCompletionRetention(artifacts),
+      );
       expect(
         await TestRunCleanupWorker(database: database).dispatchOnce(),
         isEmpty,
@@ -476,7 +504,10 @@ void main() {
       expect(completed.cleanupDecision, 'retain');
       expect(completed.error, run.error);
       expect(await SqliteVmRepository(database).get(run.vmId!), vm);
-      expect((await artifactService().listForTestRun(run.id)).items, artifacts);
+      expect(
+        (await artifactService().listForTestRun(run.id)).items,
+        await withCompletionRetention(artifacts),
+      );
       final action = (await SqliteOperationRepository(
         database,
       ).get(cancellation.operationId))!;
@@ -598,7 +629,10 @@ void main() {
         ).get(run.id)).cleanupDecision,
         'retain',
       );
-      expect((await artifactService().listForTestRun(run.id)).items, artifacts);
+      expect(
+        (await artifactService().listForTestRun(run.id)).items,
+        await withCompletionRetention(artifacts),
+      );
       for (final id in [run.id, other.id]) {
         expect(
           (await SqliteEventRepository(database).list(
@@ -753,7 +787,10 @@ void main() {
         await Directory('${bundles.path}/${run.vmId!.value}.gaovm').exists(),
         isFalse,
       );
-      expect((await artifactService().listForTestRun(run.id)).items, artifacts);
+      expect(
+        (await artifactService().listForTestRun(run.id)).items,
+        await withCompletionRetention(artifacts),
+      );
       final body =
           jsonDecode(
                 await utf8.decoder
@@ -803,6 +840,26 @@ void main() {
       final artifacts = (await artifactService().listForTestRun(run.id)).items;
       database.close();
       final legacy = sqlite3.open('${temporary.path}/catalog.db');
+      legacy.execute('DROP TRIGGER test_run_system_info_immutable');
+      legacy.execute(
+        'ALTER TABLE test_run_collection DROP COLUMN system_info_json',
+      );
+      legacy.execute('DROP TABLE test_run_step_artifacts');
+      legacy.execute('DROP TABLE guest_diagnostic_attempts');
+      legacy.execute('DROP INDEX guest_collection_receipt_operation_idx');
+      legacy.execute('ALTER TABLE vm_runtime DROP COLUMN display_observed_at');
+      legacy.execute('ALTER TABLE vm_runtime DROP COLUMN display_state');
+      legacy.execute('ALTER TABLE vm_runtime DROP COLUMN driver_operation_id');
+      legacy.execute('DELETE FROM schema_migrations WHERE version = 21');
+      legacy.execute('DELETE FROM schema_migrations WHERE version = 20');
+      legacy.execute('DROP TABLE test_run_step_execs');
+      legacy.execute('DELETE FROM schema_migrations WHERE version = 19');
+      legacy.execute('DROP TABLE guest_artifact_mappings');
+      legacy.execute('DROP TABLE guest_artifact_receipts');
+      legacy.execute('DELETE FROM schema_migrations WHERE version = 18');
+      legacy.execute('DROP TABLE guest_exec_cancellations');
+      legacy.execute('DROP TABLE guest_exec_jobs');
+      legacy.execute('DELETE FROM schema_migrations WHERE version = 17');
       legacy.execute('DROP TRIGGER test_run_readiness_window_immutable');
       legacy.execute('DROP INDEX test_runs_waiting_ready_idx');
       legacy.execute('ALTER TABLE test_runs DROP COLUMN readiness_deadline_at');
@@ -814,13 +871,16 @@ void main() {
       legacy.userVersion = 14;
       legacy.dispose();
       database = await GaoVmDatabase.open('${temporary.path}/catalog.db');
-      expect(database.schemaVersion, 16);
+      expect(database.schemaVersion, 21);
       expect(
         await TestRunApplicationService(database: database).get(run.id),
         before,
       );
       expect(await SqliteVmRepository(database).get(run.vmId!), vm);
-      expect((await artifactService().listForTestRun(run.id)).items, artifacts);
+      expect(
+        (await artifactService().listForTestRun(run.id)).items,
+        await withCompletionRetention(artifacts),
+      );
 
       final runtime = await openRuntime();
       final worker = TestRunCleanupWorker(
@@ -911,7 +971,10 @@ void main() {
       expect(completed.error, run.error);
       expect(completed.cleanupDecision, 'delete');
       expect(await SqliteVmRepository(database).get(run.vmId!), isNull);
-      expect((await artifactService().listForTestRun(run.id)).items, artifacts);
+      expect(
+        (await artifactService().listForTestRun(run.id)).items,
+        await withCompletionRetention(artifacts),
+      );
       expect(
         (await SqliteOperationRepository(database).list(
           resourceType: ResourceType.virtualMachine,
@@ -1004,7 +1067,10 @@ void main() {
       expect(completed.error, run.error);
       expect(await SqliteVmRepository(database).get(run.vmId!), running);
       expect(runtime.drivers.activeSessionCount, 1);
-      expect((await artifactService().listForTestRun(run.id)).items, artifacts);
+      expect(
+        (await artifactService().listForTestRun(run.id)).items,
+        await withCompletionRetention(artifacts),
+      );
       final failure = (await SqliteEventRepository(database).list(
         testRunId: run.id,
       )).singleWhere((event) => event.type == 'test_run.failure_recorded');
@@ -1094,7 +1160,10 @@ void main() {
         ).exists(),
         isTrue,
       );
-      expect((await artifactService().listForTestRun(run.id)).items, artifacts);
+      expect(
+        (await artifactService().listForTestRun(run.id)).items,
+        await withCompletionRetention(artifacts),
+      );
       expect(await worker.dispatchOnce(), isEmpty);
     },
   );
@@ -1200,7 +1269,10 @@ void main() {
         OperationState.succeeded,
       );
       expect(await SqliteVmRepository(database).get(run.vmId!), isNull);
-      expect((await artifactService().listForTestRun(run.id)).items, artifacts);
+      expect(
+        (await artifactService().listForTestRun(run.id)).items,
+        await withCompletionRetention(artifacts),
+      );
       expect(runtime.drivers.activeSessionCount, 0);
       expect(await SqliteHostLeaseRepository(database).list(), isEmpty);
       expect(await worker.dispatchOnce(), isEmpty);

@@ -80,6 +80,8 @@ final class SqliteVmIntentAdoption implements VmIntentAdoptionAction {
           (terminal ||
               record.action == VmCommandAction.start ||
               record.action == VmCommandAction.restart ||
+              record.action == VmCommandAction.openDisplay ||
+              record.action == VmCommandAction.closeDisplay ||
               record.action == VmCommandAction.patch)) {
         return _unchanged(executionState, VmIntentAdoptionDisposition.deferred);
       }
@@ -248,7 +250,9 @@ _readDurableIntent(
   final source = _sourceCommand(record);
   final desired = switch (record.action) {
     VmCommandAction.start || VmCommandAction.restart => 'running',
-    VmCommandAction.patch => payload['desired_state'],
+    VmCommandAction.patch ||
+    VmCommandAction.openDisplay ||
+    VmCommandAction.closeDisplay => payload['desired_state'],
     _ => 'stopped',
   };
   if (payload['desired_state'] != desired ||
@@ -273,7 +277,7 @@ _readDurableIntent(
   if (operation == null ||
       operation.resourceType != ResourceType.virtualMachine ||
       operation.resourceId != record.vmId ||
-      operation.type != 'vm.${record.action.name}' ||
+      operation.type != record.action.operationType ||
       operation.request.toJson()['intent_revision'] != revision ||
       operation.request.toJson()['spec_generation'] != generation) {
     throw StateError('durable command operation correlation is invalid');
@@ -328,6 +332,14 @@ VmCommand _sourceCommand(VmCommandRecord record) => switch (record.action) {
   VmCommandAction.restart => RestartRequested(record.operationId),
   VmCommandAction.kill => KillRequested(record.operationId),
   VmCommandAction.delete => DeleteRequested(record.operationId),
+  VmCommandAction.openDisplay => DisplayRequested(
+    record.operationId,
+    open: true,
+  ),
+  VmCommandAction.closeDisplay => DisplayRequested(
+    record.operationId,
+    open: false,
+  ),
   VmCommandAction.patch => SpecUpdated(
     specGeneration: _positiveInt(record.payload.toJson()['spec_generation']),
     restartPolicy: RestartPolicy.values.byName(

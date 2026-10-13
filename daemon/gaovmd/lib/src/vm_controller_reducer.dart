@@ -4,7 +4,16 @@ enum VmLeaseState { none, acquiring, held, releasing }
 
 enum VmDeletionState { active, deleting, removingFiles, deleted }
 
-enum VmOperationKind { start, stop, kill, restart, recovery, delete }
+enum VmOperationKind {
+  start,
+  stop,
+  kill,
+  restart,
+  recovery,
+  delete,
+  openDisplay,
+  closeDisplay,
+}
 
 final class VmControllerOperation {
   const VmControllerOperation({
@@ -69,7 +78,10 @@ final class VmControllerState {
     required this.pendingRecoveryGeneration,
     required this.pendingRecoveryError,
     this.appliedIntentRevision = 0,
+    this.guestObservationRevision = 0,
     this.lastError,
+    this.displayState = VmDisplayState.unknown,
+    this.displayObservedAt,
   });
 
   factory VmControllerState.initial({
@@ -117,10 +129,15 @@ final class VmControllerState {
   final int? pendingRecoveryGeneration;
   final OperationError? pendingRecoveryError;
   final OperationError? lastError;
+  final VmDisplayState displayState;
+  final DateTime? displayObservedAt;
 
   /// Revision of the accepted intent being executed, which may precede a newer
   /// desired/spec intent already accepted into the durable command queue.
   final int appliedIntentRevision;
+
+  /// Local observation order within this driver generation, not a public ID.
+  final int guestObservationRevision;
 
   VmControllerState copyWith({
     DesiredState? desiredState,
@@ -148,6 +165,10 @@ final class VmControllerState {
     OperationError? lastError,
     bool clearLastError = false,
     int? appliedIntentRevision,
+    int? guestObservationRevision,
+    VmDisplayState? displayState,
+    DateTime? displayObservedAt,
+    bool clearDisplayObservation = false,
   }) => VmControllerState(
     vmId: vmId,
     desiredState: desiredState ?? this.desiredState,
@@ -179,7 +200,24 @@ final class VmControllerState {
         ? null
         : pendingRecoveryError ?? this.pendingRecoveryError,
     lastError: clearLastError ? null : lastError ?? this.lastError,
+    displayState:
+        clearActiveDriverGeneration ||
+            driverGeneration != null &&
+                driverGeneration != this.driverGeneration
+        ? VmDisplayState.unknown
+        : displayState ?? this.displayState,
+    displayObservedAt:
+        clearDisplayObservation ||
+            clearActiveDriverGeneration ||
+            driverGeneration != null &&
+                driverGeneration != this.driverGeneration
+        ? null
+        : displayObservedAt ?? this.displayObservedAt,
     appliedIntentRevision: appliedIntentRevision ?? this.appliedIntentRevision,
+    guestObservationRevision:
+        driverGeneration != null && driverGeneration != this.driverGeneration
+        ? 0
+        : guestObservationRevision ?? this.guestObservationRevision,
   );
 }
 
@@ -215,6 +253,58 @@ final class DeleteRequested extends VmCommand {
   const DeleteRequested(this.operationId);
 
   final OperationId operationId;
+}
+
+final class DisplayRequested extends VmCommand {
+  const DisplayRequested(this.operationId, {required this.open});
+  final OperationId operationId;
+  final bool open;
+}
+
+final class DisplayCommandSucceeded extends VmCommand {
+  const DisplayCommandSucceeded({
+    required this.operationId,
+    required this.driverGeneration,
+    required this.state,
+    required this.occurredAt,
+  });
+  final OperationId operationId;
+  final int driverGeneration;
+  final VmDisplayState state;
+  final DateTime occurredAt;
+}
+
+final class DisplayCommandFailed extends VmCommand {
+  const DisplayCommandFailed({
+    required this.operationId,
+    required this.driverGeneration,
+    required this.error,
+  });
+  final OperationId operationId;
+  final int driverGeneration;
+  final OperationError error;
+}
+
+final class DisplayObservationCommitFailed extends VmCommand {
+  const DisplayObservationCommitFailed({
+    required this.driverGeneration,
+    required this.error,
+  });
+  final int driverGeneration;
+  final OperationError error;
+}
+
+final class DisplayObserved extends VmCommand {
+  const DisplayObserved({
+    required this.driverGeneration,
+    required this.state,
+    required this.occurredAt,
+    this.operationId,
+  });
+  final int driverGeneration;
+  final VmDisplayState state;
+  final DateTime occurredAt;
+  final OperationId? operationId;
 }
 
 final class SpecUpdated extends VmCommand {
@@ -482,6 +572,22 @@ final class VmStateChanged extends VmCommand {
   final VmPhase phase;
 }
 
+/// Produced by the authenticated host guest owner, never driver channel_ready.
+final class GuestReadinessObserved extends VmCommand {
+  const GuestReadinessObserved({
+    required this.vmId,
+    required this.driverGeneration,
+    required this.revision,
+    required this.ready,
+    this.stillCurrent,
+  });
+  final VmId vmId;
+  final int driverGeneration;
+  final int revision;
+  final bool ready;
+  final bool Function()? stillCurrent;
+}
+
 final class DriverExited extends VmCommand {
   const DriverExited({
     required this.operationId,
@@ -566,6 +672,17 @@ final class PersistRuntime extends VmEffect {
   });
 }
 
+final class PersistGuestReadiness extends VmEffect {
+  const PersistGuestReadiness({
+    required super.vmId,
+    required super.driverGeneration,
+    required this.ready,
+    this.stillCurrent,
+  }) : super(operationId: null);
+  final bool ready;
+  final bool Function()? stillCurrent;
+}
+
 final class SpawnDriver extends VmEffect {
   const SpawnDriver({
     required super.vmId,
@@ -596,6 +713,16 @@ final class StartRuntime extends VmEffect {
     required super.operationId,
     required super.driverGeneration,
   });
+}
+
+final class ChangeDisplay extends VmEffect {
+  const ChangeDisplay({
+    required super.vmId,
+    required OperationId super.operationId,
+    required int super.driverGeneration,
+    required this.open,
+  });
+  final bool open;
 }
 
 final class KillDriver extends VmEffect {
@@ -694,9 +821,11 @@ final class CompleteOperation extends VmEffect {
     required super.vmId,
     required OperationId super.operationId,
     this.cancelled = false,
+    this.result,
   });
 
   final bool cancelled;
+  final JsonObjectValue? result;
 }
 
 final class EmitEvent extends VmEffect {
@@ -722,11 +851,33 @@ final class VmTransition {
 
 VmTransition reduce(VmControllerState state, VmCommand command) {
   return switch (command) {
+    GuestReadinessObserved() => _guestReadinessObserved(state, command),
     StartRequested(:final operationId) => _start(state, operationId),
     StopRequested(:final operationId) => _stop(state, operationId),
     KillRequested(:final operationId) => _stop(state, operationId, force: true),
     RestartRequested(:final operationId) => _restart(state, operationId),
     DeleteRequested(:final operationId) => _delete(state, operationId),
+    DisplayRequested(:final operationId, :final open) => _display(
+      state,
+      operationId,
+      open,
+    ),
+    DisplayCommandSucceeded() => _displaySucceeded(state, command),
+    DisplayCommandFailed() => _displayFailed(
+      state,
+      command.operationId,
+      command.driverGeneration,
+      command.error,
+    ),
+    DisplayObserved() => _displayObserved(state, command),
+    DisplayObservationCommitFailed(:final driverGeneration) => VmTransition(
+      state: state.activeDriverGeneration == driverGeneration
+          ? state.copyWith(
+              displayState: VmDisplayState.unknown,
+              clearDisplayObservation: true,
+            )
+          : state,
+    ),
     SpecUpdated(
       :final specGeneration,
       :final restartPolicy,
@@ -908,6 +1059,271 @@ VmTransition reduce(VmControllerState state, VmCommand command) {
       operationId,
     ),
   };
+}
+
+VmTransition _guestReadinessObserved(
+  VmControllerState state,
+  GuestReadinessObserved observation,
+) {
+  if (observation.vmId != state.vmId ||
+      observation.driverGeneration != state.activeDriverGeneration ||
+      observation.revision <= state.guestObservationRevision ||
+      state.phase != VmPhase.running ||
+      state.desiredState != DesiredState.running ||
+      state.deletionState != VmDeletionState.active) {
+    return VmTransition(state: state);
+  }
+  return VmTransition(
+    state: state.copyWith(guestObservationRevision: observation.revision),
+    effects: [
+      PersistGuestReadiness(
+        vmId: state.vmId,
+        driverGeneration: observation.driverGeneration,
+        ready: observation.ready,
+        stillCurrent: observation.stillCurrent,
+      ),
+    ],
+  );
+}
+
+VmTransition _display(
+  VmControllerState state,
+  OperationId operationId,
+  bool open,
+) {
+  if (state.deletionState != VmDeletionState.active) {
+    return VmTransition(
+      state: state,
+      effects: [
+        FailOperation(
+          vmId: state.vmId,
+          operationId: operationId,
+          error: _deletedVmError,
+        ),
+      ],
+    );
+  }
+  if (state.currentOperation case final current? when !current.isTerminal) {
+    return VmTransition(
+      state: state,
+      effects: [
+        FailOperation(
+          vmId: state.vmId,
+          operationId: operationId,
+          error: _operationConflictError,
+        ),
+      ],
+    );
+  }
+  if (!open && state.activeDriverGeneration == null) {
+    return VmTransition(
+      state: state.copyWith(
+        displayState: VmDisplayState.closed,
+        clearDisplayObservation: true,
+      ),
+      effects: [
+        CompleteOperation(
+          vmId: state.vmId,
+          operationId: operationId,
+          result: JsonObjectValue.fromJson({
+            'vm_id': state.vmId.value,
+            'driver_generation': null,
+            'state': 'closed',
+            'observed_at': null,
+          }),
+        ),
+      ],
+    );
+  }
+  final generation = state.activeDriverGeneration;
+  if (generation != null && state.phase == VmPhase.running) {
+    return VmTransition(
+      state: state.copyWith(
+        currentOperation: VmControllerOperation(
+          id: operationId,
+          kind: open
+              ? VmOperationKind.openDisplay
+              : VmOperationKind.closeDisplay,
+          state: OperationState.running,
+        ),
+      ),
+      effects: [
+        PersistRuntime(
+          vmId: state.vmId,
+          operationId: operationId,
+          driverGeneration: generation,
+        ),
+        ChangeDisplay(
+          vmId: state.vmId,
+          operationId: operationId,
+          driverGeneration: generation,
+          open: open,
+        ),
+      ],
+    );
+  }
+  return VmTransition(
+    state: state,
+    effects: [
+      FailOperation(
+        vmId: state.vmId,
+        operationId: operationId,
+        error: OperationError(
+          code: ErrorCode.vmNotRunning,
+          message: 'display requires an active running VM',
+          retryable: false,
+          details: JsonObjectValue.empty,
+        ),
+      ),
+    ],
+  );
+}
+
+bool _isDisplayOperation(VmControllerOperation? operation) =>
+    operation?.kind == VmOperationKind.openDisplay ||
+    operation?.kind == VmOperationKind.closeDisplay;
+
+VmTransition _displaySucceeded(
+  VmControllerState state,
+  DisplayCommandSucceeded command,
+) {
+  final operation = state.currentOperation;
+  if (!_isDisplayOperation(operation) ||
+      operation!.id != command.operationId ||
+      operation.isTerminal ||
+      state.activeDriverGeneration != command.driverGeneration)
+    return VmTransition(state: state);
+  final target = operation.kind == VmOperationKind.openDisplay
+      ? VmDisplayState.open
+      : VmDisplayState.closed;
+  if (command.state != target)
+    return _displayFailed(
+      state,
+      command.operationId,
+      command.driverGeneration,
+      OperationError(
+        code: ErrorCode.vmOperationConflict,
+        message: 'display action outcome is unconfirmed',
+        retryable: true,
+        details: JsonObjectValue.fromJson({'state': command.state.name}),
+      ),
+    );
+  final next = state.copyWith(
+    currentOperation: operation.copyWith(state: OperationState.succeeded),
+    displayState: command.state,
+    displayObservedAt: command.occurredAt,
+  );
+  final result = JsonObjectValue.fromJson(
+    VmDisplayStatus(
+      vmId: state.vmId,
+      state: command.state,
+      driverGeneration: command.driverGeneration,
+      observedAt: command.occurredAt,
+    ).toJson(),
+  );
+  return VmTransition(
+    state: next,
+    effects: [
+      PersistRuntime(
+        vmId: state.vmId,
+        operationId: command.operationId,
+        driverGeneration: command.driverGeneration,
+      ),
+      CompleteOperation(
+        vmId: state.vmId,
+        operationId: command.operationId,
+        result: result,
+      ),
+      EmitEvent(
+        vmId: state.vmId,
+        operationId: command.operationId,
+        driverGeneration: command.driverGeneration,
+        type: 'vm.display_state_changed',
+        payload: result,
+      ),
+    ],
+  );
+}
+
+VmTransition _displayFailed(
+  VmControllerState state,
+  OperationId operationId,
+  int? driverGeneration,
+  OperationError error, {
+  bool rolledBack = false,
+}) {
+  final operation = state.currentOperation;
+  if (!_isDisplayOperation(operation) ||
+      operation!.id != operationId ||
+      operation.isTerminal && !rolledBack ||
+      state.activeDriverGeneration != driverGeneration)
+    return VmTransition(state: state);
+  return VmTransition(
+    state: state.copyWith(
+      currentOperation: operation.copyWith(state: OperationState.failed),
+      displayState: VmDisplayState.unknown,
+      clearDisplayObservation: true,
+    ),
+    effects: [
+      PersistRuntime(
+        vmId: state.vmId,
+        operationId: operationId,
+        driverGeneration: driverGeneration,
+      ),
+      FailOperation(vmId: state.vmId, operationId: operationId, error: error),
+      EmitEvent(
+        vmId: state.vmId,
+        operationId: operationId,
+        driverGeneration: driverGeneration,
+        type: 'vm.display_failed',
+        payload: JsonObjectValue.fromJson({
+          'driver_generation': driverGeneration,
+          'error': error.toJson(),
+        }),
+      ),
+    ],
+  );
+}
+
+VmTransition _displayObserved(
+  VmControllerState state,
+  DisplayObserved command,
+) {
+  if (state.activeDriverGeneration != command.driverGeneration ||
+      command.operationId != null &&
+          command.operationId != state.currentOperation?.id &&
+          command.operationId != state.driverOperationId ||
+      state.displayObservedAt != null &&
+          command.occurredAt.isBefore(state.displayObservedAt!))
+    return VmTransition(state: state);
+  final next = state.copyWith(
+    displayState: command.state,
+    displayObservedAt: command.occurredAt,
+  );
+  return VmTransition(
+    state: next,
+    effects: [
+      PersistRuntime(
+        vmId: state.vmId,
+        operationId: command.operationId,
+        driverGeneration: command.driverGeneration,
+      ),
+      EmitEvent(
+        vmId: state.vmId,
+        operationId: command.operationId,
+        driverGeneration: command.driverGeneration,
+        type: 'vm.display_state_changed',
+        payload: JsonObjectValue.fromJson(
+          VmDisplayStatus(
+            vmId: state.vmId,
+            state: command.state,
+            driverGeneration: command.driverGeneration,
+            observedAt: command.occurredAt,
+          ).toJson(),
+        ),
+      ),
+    ],
+  );
 }
 
 VmTransition _start(VmControllerState state, OperationId operationId) {
@@ -1240,6 +1656,26 @@ VmTransition _reconcile(VmControllerState state) {
     );
   }
   final currentOperation = state.currentOperation;
+  if (_isDisplayOperation(currentOperation) &&
+      !currentOperation!.isTerminal &&
+      state.activeDriverGeneration == null) {
+    // The interrupted SDK result cannot be confirmed. Fail only the display;
+    // the next reconciliation creates a separate runtime recovery operation.
+    return _displayFailed(
+      state,
+      currentOperation.id,
+      null,
+      OperationError(
+        code: ErrorCode.vmOperationConflict,
+        message:
+            'display action was interrupted before its outcome was committed',
+        retryable: true,
+        details: JsonObjectValue.fromJson({
+          'last_driver_generation': state.driverGeneration,
+        }),
+      ),
+    );
+  }
   final operationId = currentOperation != null && !currentOperation.isTerminal
       ? currentOperation.id
       : null;
@@ -2372,6 +2808,28 @@ VmTransition _driverExited(
     return VmTransition(state: state);
   }
   final operation = state.currentOperation;
+  if (_isDisplayOperation(operation) && !operation!.isTerminal) {
+    // A display never owns the runtime retry cycle, even when its driver dies
+    // while the window command is in flight. Preserve runtime correlation.
+    final display = _displayFailed(
+      state,
+      operation.id,
+      driverGeneration,
+      error ?? _driverExitedError,
+    );
+    final runtime = _driverExited(
+      display.state,
+      operationId,
+      driverGeneration,
+      cleanShutdown: cleanShutdown,
+      error: error,
+      occurredAt: occurredAt,
+    );
+    return VmTransition(
+      state: runtime.state,
+      effects: [...display.effects, ...runtime.effects],
+    );
+  }
   final explicitLifecycle =
       operation?.id == operationId &&
       !operation!.isTerminal &&
@@ -2672,6 +3130,15 @@ VmTransition _effectExecutionFailed(
   final rolledBackCompletion =
       rolledBackCompletionOperationId != null &&
       operation?.id == rolledBackCompletionOperationId;
+  if (_isDisplayOperation(operation) && operationId == operation!.id) {
+    return _displayFailed(
+      state,
+      operation.id,
+      driverGeneration ?? state.activeDriverGeneration,
+      error,
+      rolledBack: rolledBackCompletion,
+    );
+  }
   final rolledBackDelete =
       rolledBackCompletion &&
       operation?.kind == VmOperationKind.delete &&
@@ -2880,6 +3347,32 @@ VmTransition _operationCancelled(
     return VmTransition(state: state);
   }
   final cancelled = operation.copyWith(state: OperationState.cancelled);
+  if (_isDisplayOperation(operation)) {
+    return VmTransition(
+      state: state.copyWith(currentOperation: cancelled),
+      effects: [
+        PersistRuntime(
+          vmId: state.vmId,
+          operationId: operationId,
+          driverGeneration: state.activeDriverGeneration,
+        ),
+        CompleteOperation(
+          vmId: state.vmId,
+          operationId: operationId,
+          cancelled: true,
+        ),
+        EmitEvent(
+          vmId: state.vmId,
+          operationId: operationId,
+          driverGeneration: state.activeDriverGeneration,
+          type: 'vm.display_cancelled',
+          payload: JsonObjectValue.fromJson({
+            'driver_generation': state.activeDriverGeneration,
+          }),
+        ),
+      ],
+    );
+  }
   final activeGeneration = state.activeDriverGeneration;
   final hasLease = state.leaseState != VmLeaseState.none;
   final next = state.copyWith(

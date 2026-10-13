@@ -12,6 +12,20 @@ abstract interface class VmStateEffectAdapter {
   Future<void> persistRuntime(VmControllerState state);
 }
 
+abstract interface class VmGuestReadinessEffectAdapter {
+  /// Commits only a current observation, with its event/outbox in the same txn.
+  Future<void> persistGuestReadiness(
+    VmControllerState state,
+    bool ready, {
+    bool Function()? stillCurrent,
+  });
+}
+
+/// A fenced observation is a normal no-op, not a VM effect/storage failure.
+final class GuestObservationSuperseded implements Exception {
+  const GuestObservationSuperseded();
+}
+
 abstract interface class VmEffectCancellationAdapter {
   Future<void> cancel(VmEffect effect, VmControllerState state);
 }
@@ -62,6 +76,15 @@ abstract interface class VmDriverEffectAdapter {
   );
 }
 
+abstract interface class VmDisplayEffectAdapter {
+  Future<VmDisplayState> setDisplay(
+    VmControllerState state,
+    OperationId operationId,
+    int driverGeneration, {
+    required bool open,
+  });
+}
+
 abstract interface class VmManagedFileEffectAdapter {
   Future<void> remove(VmControllerState state, OperationId operationId);
 }
@@ -107,6 +130,7 @@ final class RepositoryVmEffectRunner
   bool isDurable(VmEffect effect) =>
       effect is PersistVm ||
       effect is PersistRuntime ||
+      effect is PersistGuestReadiness ||
       effect is CreateRecoveryOperation ||
       effect is FailOperation ||
       effect is CompleteOperation ||
@@ -116,20 +140,31 @@ final class RepositoryVmEffectRunner
   Future<List<VmCommand?>> runDurableBatch(
     List<VmEffect> effects,
     VmControllerState state,
-  ) => _database.transaction((_) async {
-    final commands = <VmCommand?>[];
-    for (final effect in effects) {
-      if (!isDurable(effect)) {
-        throw ArgumentError('non-durable effect in durable batch: $effect');
-      }
-      try {
-        commands.add(await _runOne(effect, state));
-      } catch (error, stackTrace) {
-        throw VmEffectBatchException(effect, error, stackTrace);
-      }
+  ) async {
+    try {
+      return await _database.transaction((_) async {
+        final commands = <VmCommand?>[];
+        for (final effect in effects) {
+          if (!isDurable(effect)) {
+            throw ArgumentError('non-durable effect in durable batch: $effect');
+          }
+          try {
+            commands.add(await _runOne(effect, state));
+          } catch (error, stackTrace) {
+            if (error is GuestObservationSuperseded) rethrow;
+            throw VmEffectBatchException(effect, error, stackTrace);
+          }
+        }
+        for (final effect in effects.whereType<PersistGuestReadiness>()) {
+          if (effect.stillCurrent?.call() == false)
+            throw const GuestObservationSuperseded();
+        }
+        return commands;
+      });
+    } on GuestObservationSuperseded {
+      return List<VmCommand?>.filled(effects.length, null);
     }
-    return commands;
-  });
+  }
 
   Future<VmCommand?> _runOne(VmEffect effect, VmControllerState state) async {
     final operationId = effect.operationId;
@@ -139,6 +174,13 @@ final class RepositoryVmEffectRunner
         await _persistence.persistVm(state);
       case PersistRuntime():
         await _persistence.persistRuntime(state);
+      case PersistGuestReadiness(:final ready, :final stillCurrent):
+        final persistence = _persistence;
+        if (persistence is! VmGuestReadinessEffectAdapter) {
+          throw StateError('guest readiness persistence is unavailable');
+        }
+        await (persistence as VmGuestReadinessEffectAdapter)
+            .persistGuestReadiness(state, ready, stillCurrent: stillCurrent);
       case AcquireHostLease():
         await _leases.acquire(state, operationId!);
         return HostLeaseAcquired(operationId);
@@ -172,6 +214,22 @@ final class RepositoryVmEffectRunner
           operationId: operationId,
           driverGeneration: driverGeneration,
           command: RuntimeCommandKind.start,
+        );
+      case ChangeDisplay(:final open):
+        final driver = _drivers;
+        if (driver is! VmDisplayEffectAdapter)
+          throw StateError('display runtime boundary is unavailable');
+        final display = await (driver as VmDisplayEffectAdapter).setDisplay(
+          state,
+          operationId!,
+          driverGeneration!,
+          open: open,
+        );
+        return DisplayCommandSucceeded(
+          operationId: operationId,
+          driverGeneration: driverGeneration,
+          state: display,
+          occurredAt: DateTime.now().toUtc(),
         );
       case StopRuntime():
         await _drivers.stop(state, operationId!, driverGeneration!);
@@ -215,8 +273,12 @@ final class RepositoryVmEffectRunner
       case FailOperation(:final error):
         await _ensureRunning(operationId!);
         await _operations.fail(operationId, error: error);
-      case CompleteOperation(:final cancelled):
-        await _completeOperation(operationId!, cancelled: cancelled);
+      case CompleteOperation(:final cancelled, :final result):
+        await _completeOperation(
+          operationId!,
+          cancelled: cancelled,
+          result: result,
+        );
       case EmitEvent(:final type, :final payload):
         await _events.append(
           type: type,
@@ -235,7 +297,9 @@ final class RepositoryVmEffectRunner
   @override
   Future<void> cancel(VmEffect effect, VmControllerState state) async {
     final adapter = switch (effect) {
-      PersistVm() || PersistRuntime() => _persistence,
+      PersistVm() ||
+      PersistRuntime() ||
+      PersistGuestReadiness() => _persistence,
       AcquireHostLease() ||
       MarkHostLeaseRunning() ||
       ReleaseHostLease() ||
@@ -244,6 +308,7 @@ final class RepositoryVmEffectRunner
       ConnectDriver() ||
       ConfigureRuntime() ||
       StartRuntime() ||
+      ChangeDisplay() ||
       StopRuntime() ||
       KillDriver() ||
       ShutdownDriver() => _drivers,
@@ -266,6 +331,7 @@ final class RepositoryVmEffectRunner
   Future<void> _completeOperation(
     OperationId operationId, {
     required bool cancelled,
+    JsonObjectValue? result,
   }) async {
     final operation = await _operations.get(operationId);
     if (operation == null) throw OperationNotFoundException(operationId);
@@ -278,6 +344,6 @@ final class RepositoryVmEffectRunner
       return;
     }
     await _ensureRunning(operationId);
-    await _operations.succeed(operationId);
+    await _operations.succeed(operationId, result: result);
   }
 }

@@ -26,6 +26,9 @@ final class DriverRuntimePaths {
   final String metadataPath;
   final String? cleanupToken;
   final String? vmCleanupToken;
+
+  /// A private sibling endpoint, never supplied by the public API or guest.
+  String get guestSocketPath => '$directory/guest.sock';
 }
 
 final class DriverRuntimeLayout {
@@ -298,7 +301,7 @@ final class DriverRuntimeLayout {
           final file = await directory.file(name);
           file.close();
           files.add(name);
-        } else if (name == 'driver.sock' &&
+        } else if ((name == 'driver.sock' || name == 'guest.sock') &&
             type == FileSystemEntityType.unixDomainSock) {
           files.add(name);
         } else {

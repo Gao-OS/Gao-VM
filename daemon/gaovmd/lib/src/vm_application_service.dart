@@ -5,6 +5,7 @@ import 'package:crypto/crypto.dart';
 import 'package:gaovm_models/gaovm_models.dart';
 
 import 'vm_repository.dart';
+import 'vm_display_repository.dart';
 import 'operation_application_service.dart';
 
 enum VmSort {
@@ -67,7 +68,28 @@ final class VmPage {
   final String? nextCursor;
 }
 
-enum VmLifecycleAction { start, stop, restart, kill, delete }
+// Display shares the durable VM action lane, but never changes desired state.
+enum VmLifecycleAction {
+  start,
+  stop,
+  restart,
+  kill,
+  delete,
+  openDisplay,
+  closeDisplay;
+
+  bool get isDisplay => this == openDisplay || this == closeDisplay;
+  String get operationType => switch (this) {
+    openDisplay => 'vm.open_display',
+    closeDisplay => 'vm.close_display',
+    _ => 'vm.$name',
+  };
+  String get endpoint => switch (this) {
+    openDisplay => 'open-display',
+    closeDisplay => 'close-display',
+    _ => name,
+  };
+}
 
 final class VmAcceptanceConflict implements Exception {
   const VmAcceptanceConflict(this.vmId);
@@ -250,11 +272,13 @@ final class VmApplicationService {
     required VmRepository repository,
     required VmMutationAcceptor mutations,
     required VmConditionWaiter waiter,
+    VmDisplayReader? display,
   }) : _repository = repository,
        _creates = mutations,
        _patches = mutations,
        _lifecycle = mutations,
-       _waiter = waiter;
+       _waiter = waiter,
+       _display = display;
 
   /// Compose independently durable acceptance paths without requiring one
   /// adapter to own provisioning, spec changes, and controller commands.
@@ -264,17 +288,26 @@ final class VmApplicationService {
     required VmPatchAcceptor patches,
     required VmLifecycleAcceptor lifecycle,
     required VmConditionWaiter waiter,
+    VmDisplayReader? display,
   }) : _repository = repository,
        _creates = creates,
        _patches = patches,
        _lifecycle = lifecycle,
-       _waiter = waiter;
+       _waiter = waiter,
+       _display = display;
 
   final VmRepository _repository;
   final VmCreateAcceptor _creates;
   final VmPatchAcceptor _patches;
   final VmLifecycleAcceptor _lifecycle;
   final VmConditionWaiter _waiter;
+  final VmDisplayReader? _display;
+
+  Future<VmDisplayStatus> displayStatus(VmId vmId) {
+    final display = _display;
+    if (display == null) throw StateError('display observation is unavailable');
+    return display.get(vmId);
+  }
 
   Future<VmPage> list([VmListQuery? query]) async {
     final effective = query ?? VmListQuery();

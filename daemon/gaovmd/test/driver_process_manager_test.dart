@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:gaovm_models/gaovm_models.dart';
 import 'package:gaovmd/src/driver_process_manager.dart';
@@ -9,6 +10,8 @@ import 'package:gaovmd/src/driver_runtime_layout.dart';
 import 'package:gaovmd/src/driver_runtime_metadata.dart';
 import 'package:gaovmd/src/driver_runtime_discovery.dart';
 import 'package:gaovmd/src/image_filesystem.dart';
+import 'package:gaovmd/src/guest_bridge_client.dart';
+import 'package:gaovmd/src/host_guest_session.dart';
 import 'package:gaovmd/src/macos_driver_inventory.dart';
 import 'package:gaovmd/src/runtime_driver.dart';
 import 'package:gaovmd/src/runtime_driver_effect_adapter.dart';
@@ -33,6 +36,494 @@ void main() {
       await temporaryDirectory.delete(recursive: true);
     }
   });
+
+  test(
+    'process-owned guest sessions stay isolated and closing guest alone preserves lifecycle',
+    () async {
+      final bridgeManager = _manager(
+        temporaryDirectory,
+        scenario: 'guest-bridge-session',
+      );
+      addTearDown(bridgeManager.close);
+      final first =
+          await bridgeManager.spawn(
+                RuntimeDriverLaunch(
+                  correlation: _correlation(_vm1, 1, _operation1),
+                ),
+              )
+              as ProcessRuntimeDriverSession;
+      final second =
+          await bridgeManager.spawn(
+                RuntimeDriverLaunch(
+                  correlation: _correlation(_vm2, 1, _operation2),
+                ),
+              )
+              as ProcessRuntimeDriverSession;
+      await Future.wait([
+        first.connect(DriverCapabilities.runtimeCore),
+        second.connect(DriverCapabilities.runtimeCore),
+      ]);
+      final firstGuest = first.guestSession;
+      final secondGuest = second.guestSession;
+      final connections = await Future.wait([
+        firstGuest.connect(
+          deadline: GuestBridgeDeadline.after(const Duration(seconds: 2)),
+        ),
+        secondGuest.connect(
+          deadline: GuestBridgeDeadline.after(const Duration(seconds: 2)),
+        ),
+      ]);
+      expect(firstGuest.isReady, isTrue);
+      expect(secondGuest.isReady, isTrue);
+      expect(first.guestSession, same(firstGuest));
+      await firstGuest.close();
+      expect(firstGuest.isReady, isFalse);
+      expect(secondGuest.isReady, isTrue);
+      expect((await first.ping()).status, RuntimeCommandStatus.succeeded);
+      await second.close();
+      await connections[1].closed;
+      expect(secondGuest.isReady, isFalse);
+      await expectLater(
+        secondGuest.connect(
+          deadline: GuestBridgeDeadline.after(const Duration(seconds: 1)),
+        ),
+        throwsA(
+          isA<GuestSessionException>().having(
+            (error) => error.code,
+            'fenced owner',
+            GuestSessionFailure.closed,
+          ),
+        ),
+      );
+    },
+  );
+
+  test(
+    'guest bridge fails closed before original hello and without negotiated capability',
+    () async {
+      final correlation = _correlation(_vm1, 1, _operation1);
+      final session =
+          await manager.spawn(RuntimeDriverLaunch(correlation: correlation))
+              as ProcessRuntimeDriverSession;
+      Future<GuestBridgeChannel> open() => session.openGuestChannel(
+        streamKind: GuestBridgeStreamKind.control,
+        requestId: RequestId('req_01J00000000000000000000001'),
+        operationId: null,
+        deadline: GuestBridgeDeadline.after(const Duration(seconds: 1)),
+      );
+      await expectLater(
+        open(),
+        throwsA(
+          isA<GuestBridgeException>().having(
+            (error) => error.code,
+            'failure',
+            GuestBridgeFailure.closed,
+          ),
+        ),
+      );
+      await session.connect(DriverCapabilities.runtimeCore);
+      await expectLater(
+        session.guestSession.connect(
+          deadline: GuestBridgeDeadline.after(const Duration(seconds: 1)),
+        ),
+        throwsA(
+          isA<GuestSessionException>().having(
+            (error) => error.code,
+            'optional guest unavailable',
+            GuestSessionFailure.unavailable,
+          ),
+        ),
+      );
+      await expectLater(
+        open(),
+        throwsA(
+          isA<GuestBridgeException>().having(
+            (error) => error.code,
+            'failure',
+            GuestBridgeFailure.unsupported,
+          ),
+        ),
+      );
+      expect(
+        await FileSystemEntity.type(
+          session.paths.guestSocketPath,
+          followLinks: false,
+        ),
+        FileSystemEntityType.notFound,
+      );
+      expect((await session.ping()).status, RuntimeCommandStatus.succeeded);
+      await manager.release(correlation);
+    },
+  );
+
+  test(
+    'guest health traffic cannot keep the original driver heartbeat alive',
+    () async {
+      final bridgeManager = _manager(
+        temporaryDirectory,
+        scenario: 'guest-bridge-session-heartbeat-hang',
+        heartbeatInterval: const Duration(milliseconds: 400),
+        heartbeatTimeout: const Duration(milliseconds: 100),
+      );
+      addTearDown(bridgeManager.close);
+      final session =
+          await bridgeManager.spawn(
+                RuntimeDriverLaunch(
+                  correlation: _correlation(_vm1, 1, _operation1),
+                ),
+              )
+              as ProcessRuntimeDriverSession;
+      await session.connect(DriverCapabilities.runtimeCore);
+      final guest = session.guestSession;
+      final connection = await guest.connect(
+        deadline: GuestBridgeDeadline.after(const Duration(seconds: 2)),
+      );
+      for (var index = 0; index < 3; index++) {
+        expect(
+          (await connection.health(
+            deadline: GuestBridgeDeadline.after(const Duration(seconds: 1)),
+          )).status,
+          'ok',
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      }
+      await connection.closed.timeout(const Duration(seconds: 2));
+      expect(guest.isReady, isFalse);
+      await expectLater(
+        guest.connect(
+          deadline: GuestBridgeDeadline.after(const Duration(seconds: 1)),
+        ),
+        throwsA(
+          isA<GuestSessionException>().having(
+            (error) => error.code,
+            'original control fence',
+            GuestSessionFailure.closed,
+          ),
+        ),
+      );
+      // The production controller responds to the missed-heartbeat event.
+      // This transport-only fixture must explicitly release its owned child.
+      await bridgeManager.release(session.correlation);
+      await session.exited.timeout(const Duration(seconds: 2));
+    },
+  );
+
+  test(
+    'authenticated process session opens a private bridge without exposing its token',
+    () async {
+      final bridgeManager = _manager(
+        temporaryDirectory,
+        scenario: 'guest-bridge',
+      );
+      addTearDown(bridgeManager.close);
+      final correlation = _correlation(_vm1, 1, _operation1);
+      final session =
+          await bridgeManager.spawn(
+                RuntimeDriverLaunch(correlation: correlation),
+              )
+              as ProcessRuntimeDriverSession;
+      await session.connect(DriverCapabilities.runtimeCore);
+      final channel = await session.openGuestChannel(
+        streamKind: GuestBridgeStreamKind.control,
+        requestId: RequestId('req_01J00000000000000000000001'),
+        operationId: null,
+        deadline: GuestBridgeDeadline.after(const Duration(seconds: 2)),
+      );
+      expect(
+        await channel.readExact(
+          5,
+          deadline: GuestBridgeDeadline.after(const Duration(seconds: 1)),
+        ),
+        utf8.encode('HELLO'),
+      );
+      await channel.write(
+        Uint8List.fromList(utf8.encode('RAW')),
+        deadline: GuestBridgeDeadline.after(const Duration(seconds: 1)),
+      );
+      expect(
+        await channel.readExact(
+          3,
+          deadline: GuestBridgeDeadline.after(const Duration(seconds: 1)),
+        ),
+        utf8.encode('RAW'),
+      );
+      await channel.close();
+      expect((await session.ping()).status, RuntimeCommandStatus.succeeded);
+      await bridgeManager.release(correlation);
+    },
+  );
+
+  test(
+    'process session close joins established guest descriptors before returning',
+    () async {
+      final bridgeManager = _manager(
+        temporaryDirectory,
+        scenario: 'guest-bridge',
+      );
+      addTearDown(bridgeManager.close);
+      final correlation = _correlation(_vm1, 1, _operation1);
+      final session =
+          await bridgeManager.spawn(
+                RuntimeDriverLaunch(correlation: correlation),
+              )
+              as ProcessRuntimeDriverSession;
+      await session.connect(DriverCapabilities.runtimeCore);
+      final channel = await session.openGuestChannel(
+        streamKind: GuestBridgeStreamKind.control,
+        requestId: RequestId('req_01J00000000000000000000001'),
+        operationId: null,
+        deadline: GuestBridgeDeadline.after(const Duration(seconds: 2)),
+      );
+      var closed = false;
+      channel.closed.then((_) => closed = true);
+      await session.close();
+      expect(
+        closed,
+        isTrue,
+        reason: 'original control EOF alone is not a joined guest close',
+      );
+      await bridgeManager.release(correlation);
+    },
+  );
+
+  test(
+    'unknown negotiated bridge version never sends private credentials',
+    () async {
+      final bridgeManager = _manager(
+        temporaryDirectory,
+        scenario: 'guest-bridge-bad-version',
+      );
+      addTearDown(bridgeManager.close);
+      final correlation = _correlation(_vm1, 1, _operation1);
+      final session =
+          await bridgeManager.spawn(
+                RuntimeDriverLaunch(correlation: correlation),
+              )
+              as ProcessRuntimeDriverSession;
+      await session.connect(DriverCapabilities.runtimeCore);
+      await expectLater(
+        _openProcessBridge(session),
+        throwsA(
+          isA<GuestBridgeException>().having(
+            (error) => error.code,
+            'failure',
+            GuestBridgeFailure.unsupported,
+          ),
+        ),
+      );
+      expect((await session.ping()).data!.toJson()['bridge_connections'], 0);
+      await bridgeManager.release(correlation);
+    },
+  );
+
+  test(
+    'expired status RPCs retain permits and joined completion until original channel cleanup',
+    () async {
+      final bridgeManager = _manager(
+        temporaryDirectory,
+        scenario: 'guest-bridge-status-hang',
+      );
+      addTearDown(bridgeManager.close);
+      final correlation = _correlation(_vm1, 1, _operation1);
+      final session =
+          await bridgeManager.spawn(
+                RuntimeDriverLaunch(correlation: correlation),
+              )
+              as ProcessRuntimeDriverSession;
+      await session.connect(DriverCapabilities.runtimeCore);
+      var settled = 0;
+      final joined = [
+        for (var i = 0; i < 8; i++)
+          expectLater(
+            _openProcessBridge(
+              session,
+              budget: const Duration(milliseconds: 150),
+            ).whenComplete(() => settled++),
+            throwsA(
+              isA<GuestBridgeException>().having(
+                (error) => error.code,
+                'failure',
+                GuestBridgeFailure.deadlineExpired,
+              ),
+            ),
+          ),
+      ];
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+      expect(
+        settled,
+        0,
+        reason: 'caller expiry is not actual status-worker retirement',
+      );
+      await expectLater(
+        _openProcessBridge(session),
+        throwsA(
+          isA<GuestBridgeException>().having(
+            (error) => error.code,
+            'failure',
+            GuestBridgeFailure.limitExceeded,
+          ),
+        ),
+      );
+      expect((await session.ping()).status, RuntimeCommandStatus.succeeded);
+      await session.close().timeout(const Duration(seconds: 1));
+      await Future.wait(joined);
+      expect(settled, 8);
+      await bridgeManager.release(correlation);
+    },
+  );
+
+  test(
+    'closing one VM driver session does not close another VM guest channel',
+    () async {
+      final bridgeManager = _manager(
+        temporaryDirectory,
+        scenario: 'guest-bridge',
+      );
+      addTearDown(bridgeManager.close);
+      final firstCorrelation = _correlation(_vm1, 1, _operation1);
+      final secondCorrelation = _correlation(_vm2, 1, _operation2);
+      final first =
+          await bridgeManager.spawn(
+                RuntimeDriverLaunch(correlation: firstCorrelation),
+              )
+              as ProcessRuntimeDriverSession;
+      final second =
+          await bridgeManager.spawn(
+                RuntimeDriverLaunch(correlation: secondCorrelation),
+              )
+              as ProcessRuntimeDriverSession;
+      await Future.wait([
+        first.connect(DriverCapabilities.runtimeCore),
+        second.connect(DriverCapabilities.runtimeCore),
+      ]);
+      final firstChannel = await _openProcessBridge(first);
+      final secondChannel = await _openProcessBridge(
+        second,
+        streamKind: GuestBridgeStreamKind.binary,
+        operationId: _operation2,
+      );
+      expect(
+        await firstChannel.readExact(
+          5,
+          deadline: GuestBridgeDeadline.after(const Duration(seconds: 1)),
+        ),
+        utf8.encode('HELLO'),
+      );
+      expect(
+        await secondChannel.readExact(
+          5,
+          deadline: GuestBridgeDeadline.after(const Duration(seconds: 1)),
+        ),
+        utf8.encode('HELLO'),
+      );
+      await first.close();
+      await firstChannel.closed;
+      await secondChannel.write(
+        Uint8List.fromList(utf8.encode('VM-B')),
+        deadline: GuestBridgeDeadline.after(const Duration(seconds: 1)),
+      );
+      expect(
+        await secondChannel.readExact(
+          4,
+          deadline: GuestBridgeDeadline.after(const Duration(seconds: 1)),
+        ),
+        utf8.encode('VM-B'),
+      );
+      expect((await second.ping()).status, RuntimeCommandStatus.succeeded);
+      await bridgeManager.release(firstCorrelation);
+      await bridgeManager.release(secondCorrelation);
+    },
+  );
+
+  test(
+    'missed driver heartbeat fences the guest channel without guest traffic extending it',
+    () async {
+      final bridgeManager = _manager(
+        temporaryDirectory,
+        scenario: 'guest-bridge-heartbeat-hang',
+        heartbeatInterval: const Duration(milliseconds: 200),
+        heartbeatTimeout: const Duration(milliseconds: 100),
+      );
+      addTearDown(bridgeManager.close);
+      final correlation = _correlation(_vm1, 1, _operation1);
+      final session =
+          await bridgeManager.spawn(
+                RuntimeDriverLaunch(correlation: correlation),
+              )
+              as ProcessRuntimeDriverSession;
+      await session.connect(DriverCapabilities.runtimeCore);
+      final channel = await _openProcessBridge(session);
+      expect(
+        await channel.readExact(
+          5,
+          deadline: GuestBridgeDeadline.after(const Duration(seconds: 1)),
+        ),
+        utf8.encode('HELLO'),
+      );
+      await channel.write(
+        Uint8List.fromList(utf8.encode('LIVE')),
+        deadline: GuestBridgeDeadline.after(const Duration(seconds: 1)),
+      );
+      expect(
+        await channel.readExact(
+          4,
+          deadline: GuestBridgeDeadline.after(const Duration(seconds: 1)),
+        ),
+        utf8.encode('LIVE'),
+      );
+      await channel.closed.timeout(const Duration(seconds: 1));
+      await expectLater(
+        _openProcessBridge(session),
+        throwsA(
+          isA<GuestBridgeException>().having(
+            (error) => error.code,
+            'failure',
+            GuestBridgeFailure.closed,
+          ),
+        ),
+      );
+      await bridgeManager.release(correlation);
+    },
+  );
+
+  test(
+    'unavailable or malformed status results never open the private socket',
+    () async {
+      for (final entry in {
+        'guest-bridge-unavailable': GuestBridgeFailure.unavailable,
+        'guest-bridge-invalid-port': GuestBridgeFailure.invalidResponse,
+        'guest-bridge-extra-status': GuestBridgeFailure.invalidResponse,
+      }.entries) {
+        final bridgeManager = _manager(temporaryDirectory, scenario: entry.key);
+        try {
+          final correlation = _correlation(_vm1, 1, _operation1);
+          final session =
+              await bridgeManager.spawn(
+                    RuntimeDriverLaunch(correlation: correlation),
+                  )
+                  as ProcessRuntimeDriverSession;
+          await session.connect(DriverCapabilities.runtimeCore);
+          await expectLater(
+            _openProcessBridge(session),
+            throwsA(
+              isA<GuestBridgeException>().having(
+                (error) => error.code,
+                'failure',
+                entry.value,
+              ),
+            ),
+          );
+          expect(
+            (await session.ping()).data!.toJson()['bridge_connections'],
+            0,
+          );
+          await bridgeManager.release(correlation);
+        } finally {
+          await bridgeManager.close();
+        }
+      }
+    },
+  );
 
   test(
     'metadata sync failure compensates spawn before a retry can own the VM',
@@ -690,6 +1181,7 @@ void main() {
       handshakeTimeout: const Duration(seconds: 2),
       heartbeatInterval: const Duration(seconds: 30),
     );
+    addTearDown(swiftManager.close);
     final correlation = _correlation(_vm1, 1, _operation1);
     final session = await swiftManager.spawn(
       RuntimeDriverLaunch(correlation: correlation),
@@ -697,10 +1189,52 @@ void main() {
 
     final accepted = await session.connect(DriverCapabilities.runtimeCore);
     expect(accepted.containsAll(DriverCapabilities.runtimeCore), isTrue);
+    for (final capability in const [
+      DriverCapability.displayOpen,
+      DriverCapability.displayClose,
+      DriverCapability.displayStatus,
+      DriverCapability.consoleStatus,
+    ]) {
+      expect(accepted.contains(capability), isTrue);
+    }
+    expect(accepted.contains(DriverCapability.guestStatus), isFalse);
     final status = await session.execute(
       RuntimeStatusCommand(correlation: correlation.withOperation(null)),
     );
     expect(status.status, RuntimeCommandStatus.succeeded);
+    expect(status.data?.toJson()['state'], 'not_created');
+    final console = await session.execute(
+      ConsoleStatusCommand(correlation: correlation.withOperation(null)),
+    );
+    expect(console.status, RuntimeCommandStatus.succeeded);
+    expect(console.data?.toJson()['ready'], isFalse);
+    expect(console.data?.toJson().containsKey('log_path'), isTrue);
+    expect(console.data?.toJson()['log_path'], isNull);
+    final display = await session.execute(
+      DisplayStatusCommand(correlation: correlation.withOperation(null)),
+    );
+    expect(display.data?.toJson()['display_state'], 'closed');
+    for (var attempt = 0; attempt < 2; attempt++) {
+      final closed = await session.execute(
+        DisplayCloseCommand(correlation: correlation),
+      );
+      expect(closed.status, RuntimeCommandStatus.succeeded);
+      expect(closed.data?.toJson()['display_state'], 'closed');
+      expect(swiftManager.activeProcessCount, 1);
+    }
+    await expectLater(
+      session.execute(
+        DisplayOpenCommand(correlation: correlation, activate: false),
+      ),
+      throwsA(
+        isA<RuntimeDriverError>().having(
+          (error) => error.code,
+          'unconfigured display',
+          RuntimeDriverErrorCode.invalidRuntimeState,
+        ),
+      ),
+    );
+    expect((await session.ping()).status, RuntimeCommandStatus.succeeded);
 
     await session.execute(RuntimeStopCommand(correlation: correlation));
     final exit = await session.exited.timeout(const Duration(seconds: 2));
@@ -710,18 +1244,78 @@ void main() {
     await swiftManager.release(correlation);
     expect(swiftManager.activeProcessCount, 0);
 
-    final killCorrelation = _correlation(_vm2, 1, _operation2);
-    final killSession = await swiftManager.spawn(
-      RuntimeDriverLaunch(correlation: killCorrelation),
-    );
-    await killSession.connect(DriverCapabilities.runtimeCore);
-    await killSession.execute(RuntimeKillCommand(correlation: killCorrelation));
-    final killed = await killSession.exited.timeout(const Duration(seconds: 2));
-    expect(killed.clean, isFalse);
-    expect(killed.exitCode, 137);
-    await swiftManager.release(killCorrelation);
+    // Exercise the real local socket-interruption/read-loop race repeatedly.
+    for (var generation = 1; generation <= 12; generation++) {
+      final killCorrelation = _correlation(_vm2, generation, _operation2);
+      final killSession = await swiftManager.spawn(
+        RuntimeDriverLaunch(correlation: killCorrelation),
+      );
+      await killSession.connect(DriverCapabilities.runtimeCore);
+      await killSession.execute(
+        RuntimeKillCommand(correlation: killCorrelation),
+      );
+      final killed = await killSession.exited.timeout(
+        const Duration(seconds: 2),
+      );
+      expect(killed.clean, isFalse);
+      expect(killed.exitCode, 137, reason: 'driver generation $generation');
+      await swiftManager.release(killCorrelation);
+    }
     await swiftManager.close();
   });
+
+  test(
+    'in-flight display cancellation preserves the process and its runtime exit correlation',
+    () async {
+      final displayManager = _manager(
+        temporaryDirectory,
+        scenario: 'display-hold',
+        heartbeatInterval: const Duration(seconds: 30),
+      );
+      addTearDown(displayManager.close);
+      final correlation = _correlation(_vm1, 1, _operation1);
+      final session = await displayManager.spawn(
+        RuntimeDriverLaunch(correlation: correlation),
+      );
+      await session.connect(DriverCapabilities.runtimeCore);
+      await session.execute(RuntimeStartCommand(correlation: correlation));
+      final entered = Completer<void>();
+      final subscription = session.events.listen((event) {
+        if (event is DisplayStateChanged &&
+            event.state == RuntimeDisplayState.opening &&
+            !entered.isCompleted) {
+          expect(event.correlation.operationId, _operation2);
+          entered.complete();
+        }
+      });
+      addTearDown(subscription.cancel);
+      final display = session
+          .execute(
+            DisplayOpenCommand(
+              correlation: correlation.withOperation(_operation2),
+            ),
+          )
+          .then<RuntimeCommandResult?>(
+            (value) => value,
+            onError: (Object _) => null,
+          );
+      // This authenticated wire event proves the display RPC is in flight.
+      await entered.future.timeout(const Duration(seconds: 2));
+      await session.cancel(_operation2);
+      // The fixture releases the SDK response on ping; no sleep or OS signal
+      // is used to simulate completion. Heartbeat/control remain usable.
+      expect((await session.ping()).status, RuntimeCommandStatus.succeeded);
+      final completed = await display;
+      expect(completed?.data?.toJson()['display_state'], 'open');
+      expect(displayManager.activeProcessCount, 1);
+      expect((await session.ping()).status, RuntimeCommandStatus.succeeded);
+      await session.close();
+      final exit = await session.exited.timeout(const Duration(seconds: 2));
+      expect(exit.correlation.operationId, _operation1);
+      await displayManager.release(correlation);
+      expect(displayManager.activeProcessCount, 0);
+    },
+  );
 
   test(
     'cancelling an in-flight lifecycle command terminates its process',
@@ -759,6 +1353,18 @@ void main() {
     },
   );
 }
+
+Future<GuestBridgeChannel> _openProcessBridge(
+  ProcessRuntimeDriverSession session, {
+  GuestBridgeStreamKind streamKind = GuestBridgeStreamKind.control,
+  OperationId? operationId,
+  Duration budget = const Duration(seconds: 2),
+}) => session.openGuestChannel(
+  streamKind: streamKind,
+  requestId: RequestId('req_01J00000000000000000000001'),
+  operationId: operationId,
+  deadline: GuestBridgeDeadline.after(budget),
+);
 
 DriverProcessManager _manager(
   Directory root, {

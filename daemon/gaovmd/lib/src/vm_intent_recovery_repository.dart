@@ -89,6 +89,8 @@ final class SqliteVmIntentRecoveryRepository
     return !(terminal ||
         head.action == VmCommandAction.start ||
         head.action == VmCommandAction.restart ||
+        head.action == VmCommandAction.openDisplay ||
+        head.action == VmCommandAction.closeDisplay ||
         head.action == VmCommandAction.patch);
   });
 
@@ -173,7 +175,7 @@ final class SqliteVmIntentRecoveryRepository
       if (operation == null ||
           operation.resourceType != ResourceType.virtualMachine ||
           operation.resourceId != vmId ||
-          operation.type != 'vm.${command.action.name}')
+          operation.type != command.action.operationType)
         throw StateError('VM command operation correlation is invalid');
     }
     final vm = await SqliteVmRepository(_database).get(vmId);
@@ -248,7 +250,11 @@ final class SqliteVmIntentRecoveryRepository
           operation.id != lifecycleCommand.operationId &&
           !(kind == VmOperationKind.recovery &&
               (lifecycleCommand.action == VmCommandAction.start ||
-                  lifecycleCommand.action == VmCommandAction.restart)) &&
+                  lifecycleCommand.action == VmCommandAction.restart ||
+                  desired == DesiredState.running &&
+                      (lifecycleCommand.action == VmCommandAction.openDisplay ||
+                          lifecycleCommand.action ==
+                              VmCommandAction.closeDisplay))) &&
           !(operation.type == 'vm.delete.recovery' &&
               lifecycleCommand.action == VmCommandAction.delete))
         throw StateError('active operation disagrees with the applied intent');
@@ -262,6 +268,22 @@ final class SqliteVmIntentRecoveryRepository
         kind: kind,
         state: operation.state,
       );
+    }
+    final driverId = row['driver_operation_id'];
+    final driverOperationId = driverId == null
+        ? null
+        : OperationId(driverId as String);
+    if (driverOperationId != null) {
+      final owner = await SqliteOperationRepository(
+        _database,
+      ).get(driverOperationId);
+      if (owner == null ||
+          owner.resourceType != ResourceType.virtualMachine ||
+          owner.resourceId != vmId) {
+        throw StateError(
+          'driver operation does not belong to the recovering VM',
+        );
+      }
     }
     final status = vm.status;
     return VmIntentRecoverySnapshot(
@@ -281,7 +303,13 @@ final class SqliteVmIntentRecoveryRepository
             driverGeneration: status.driverGeneration,
             lastError: status.lastError,
             currentOperation: currentOperation,
-            driverOperationId: currentOperation?.id,
+            driverOperationId: driverOperationId,
+            displayState: VmDisplayState.values.byName(
+              row['display_state'] as String,
+            ),
+            displayObservedAt: row['display_observed_at'] == null
+                ? null
+                : DateTime.parse(row['display_observed_at'] as String),
             deletionState:
                 activeCommand?.action == VmCommandAction.delete ||
                     status.phase == VmPhase.deleting
@@ -377,5 +405,7 @@ VmOperationKind? _operationKind(String type) => switch (type) {
   'vm.kill' => VmOperationKind.kill,
   'vm.delete' || 'vm.delete.recovery' => VmOperationKind.delete,
   'vm.recovery' => VmOperationKind.recovery,
+  'vm.open_display' => VmOperationKind.openDisplay,
+  'vm.close_display' => VmOperationKind.closeDisplay,
   _ => null,
 };

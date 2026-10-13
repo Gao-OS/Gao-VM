@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:gaovm_models/gaovm_models.dart';
 
 import 'runtime_driver.dart';
+import 'guest_bridge_client.dart';
+import 'host_guest_session.dart';
 import 'vm_controller.dart';
 import 'vm_controller_reducer.dart';
 import 'vm_effect_runner.dart';
@@ -21,6 +23,12 @@ typedef RuntimeDriverCommandDispatcher =
     Future<void> Function(VmId vmId, VmCommand command);
 typedef RuntimeDriverEventObserver = void Function(RuntimeEvent event);
 typedef RuntimeDriverLogObserver = void Function(RuntimeDriverLogChunk chunk);
+typedef RuntimeGuestSessionErrorObserver =
+    void Function(
+      DriverCorrelation correlation,
+      Object error,
+      StackTrace stackTrace,
+    );
 
 final class RuntimeDriverDispatchException implements Exception {
   RuntimeDriverDispatchException({
@@ -44,7 +52,10 @@ final class RuntimeDriverDispatchException implements Exception {
 }
 
 final class RuntimeDriverEffectAdapter
-    implements VmDriverEffectAdapter, VmEffectCancellationAdapter {
+    implements
+        VmDriverEffectAdapter,
+        VmDisplayEffectAdapter,
+        VmEffectCancellationAdapter {
   RuntimeDriverEffectAdapter({
     required RuntimeDriverFactory factory,
     required RuntimeDriverConfigurationResolver resolveConfiguration,
@@ -97,6 +108,22 @@ final class RuntimeDriverEffectAdapter
 
   int get activeSessionCount => _records.length;
 
+  /// Exact current generation only. Guest connection establishment remains in
+  /// the readiness owner; accepting execution never creates a driver channel.
+  GuestControlConnection? readyGuestConnection(VmId vmId, int generation) {
+    if (_closed) return null;
+    final key = _activeByVm[vmId];
+    if (key == null || key != _RuntimeDriverKey(vmId, generation)) return null;
+    final record = _records[key];
+    if (record == null ||
+        record.terminalReported ||
+        !record.runtimeRunning ||
+        !record.guestEnabled ||
+        record.dispatchFailure != null)
+      return null;
+    return record.guestSession?.readyConnection;
+  }
+
   @override
   Future<void> spawn(
     VmControllerState state,
@@ -139,6 +166,18 @@ final class RuntimeDriverEffectAdapter
       }
       final record = _RuntimeDriverRecord(session, operationId);
       _records[key] = record;
+      if (session is GuestSessionProvider) {
+        final guest = (session as GuestSessionProvider).guestSession;
+        record.guestSession = guest;
+        record.guestSubscription = guest.readiness.listen((observation) {
+          if (record.terminalReported ||
+              !record.guestEnabled ||
+              !_matchesCorrelation(record, observation.correlation))
+            return;
+          record.latestGuestObservation = observation;
+          _enqueueGuestReadiness(record);
+        });
+      }
       record.eventSubscription = session.events.listen(
         (event) => _routeEvent(record, event),
         onError: (Object error, StackTrace stackTrace) {
@@ -200,6 +239,7 @@ final class RuntimeDriverEffectAdapter
           configuration: configuration,
         ),
       );
+      record.guestEnabled = configuration.guestAgent.enabled;
     });
   });
 
@@ -282,8 +322,28 @@ final class RuntimeDriverEffectAdapter
           if (cleanupFailure != null) throw cleanupFailure;
           final failure = record.dispatchFailure;
           if (failure != null) throw failure;
+          final guestFailure = record.guestDispatchFailure;
+          if (guestFailure != null) throw guestFailure;
         }
         return;
+      }
+    }
+  }
+
+  /// Start one owned health/reconnect probe per running generation and retry
+  /// current readiness evidence. Guest exec or artifact commands are not replayed.
+  void reconcileGuestSessions({RuntimeGuestSessionErrorObserver? onError}) {
+    if (_closed) return;
+    for (final record in _records.values) {
+      _connectGuest(record, onError: onError);
+      final failure = record.guestDispatchFailure;
+      if (failure != null) {
+        onError?.call(
+          record.session.correlation,
+          failure.error,
+          failure.stackTrace,
+        );
+        _enqueueGuestReadiness(record);
       }
     }
   }
@@ -316,6 +376,9 @@ final class RuntimeDriverEffectAdapter
     for (final record in records) {
       record.terminalReported = true;
       await _cleanupRecord(record);
+      // Cleanup can itself run on dispatchTail, so join delivery only from this
+      // outer close path. Keep the catalog alive until admitted work has drained.
+      await record.dispatchTail;
     }
   }
 
@@ -339,10 +402,10 @@ final class RuntimeDriverEffectAdapter
     await record.session.execute(command);
   });
 
-  Future<void> _translateErrors(Future<void> Function() action) async {
+  Future<T> _translateErrors<T>(Future<T> Function() action) async {
     try {
       _requireOpen();
-      await action();
+      return await action();
     } on RuntimeDriverError catch (error) {
       throw VmEffectException(_operationError(error), cause: error);
     } on DriverCapabilityMismatch catch (error) {
@@ -387,6 +450,7 @@ final class RuntimeDriverEffectAdapter
     _observeEvent?.call(event);
     switch (event) {
       case RuntimeStateChanged(:final state):
+        record.runtimeRunning = state == RuntimeDriverState.running;
         final operationId = _eventOperationId(record, event.correlation);
         _enqueue(
           record,
@@ -396,6 +460,7 @@ final class RuntimeDriverEffectAdapter
             phase: _phase(state),
           ),
         );
+        if (state == RuntimeDriverState.running) _connectGuest(record);
       case RuntimeCleanShutdown():
         record.cleanShutdownObserved = true;
       case RuntimeErrorEvent(:final error):
@@ -408,12 +473,90 @@ final class RuntimeDriverEffectAdapter
             driverGeneration: event.correlation.driverGeneration,
           ),
         );
-      case DisplayStateChanged() ||
-          RuntimeConsoleReady() ||
+      case DisplayStateChanged(:final state):
+        record.displayRevision++;
+        record.latestDisplayState = VmDisplayState.values.byName(state.name);
+        _enqueue(
+          record,
+          DisplayObserved(
+            driverGeneration: event.correlation.driverGeneration,
+            operationId: event.correlation.operationId,
+            state: record.latestDisplayState!,
+            occurredAt: event.occurredAt,
+          ),
+        );
+      case RuntimeConsoleReady() ||
           RuntimeGuestChannelReady() ||
           RuntimeDriverWarning():
         break;
     }
+  }
+
+  @override
+  Future<VmDisplayState> setDisplay(
+    VmControllerState state,
+    OperationId operationId,
+    int driverGeneration, {
+    required bool open,
+  }) => _translateErrors(() async {
+    final record = _requireRecord(state.vmId, driverGeneration);
+    final revision = record.displayRevision;
+    final correlation = _correlation(state.vmId, driverGeneration, operationId);
+    // Display operation correlation must not replace the runtime lifecycle
+    // owner used for null-correlated state, heartbeat and exit events.
+    final result = await record.session.execute(
+      open
+          ? DisplayOpenCommand(correlation: correlation)
+          : DisplayCloseCommand(correlation: correlation),
+    );
+    final value = result.data?.toJson()['display_state'];
+    final snapshot = VmDisplayState.values
+        .where(
+          (state) => state != VmDisplayState.unknown && state.name == value,
+        )
+        .firstOrNull;
+    if (result.status == RuntimeCommandStatus.accepted || snapshot == null) {
+      throw RuntimeDriverError(
+        code: RuntimeDriverErrorCode.protocolViolation,
+        message: 'display response did not confirm a snapshot',
+        retryable: false,
+      );
+    }
+    return record.displayRevision != revision &&
+            record.latestDisplayState != null
+        ? record.latestDisplayState!
+        : snapshot;
+  });
+
+  void _connectGuest(
+    _RuntimeDriverRecord record, {
+    RuntimeGuestSessionErrorObserver? onError,
+  }) {
+    final guest = record.guestSession;
+    if (!record.guestEnabled ||
+        !record.runtimeRunning ||
+        guest == null ||
+        record.guestProbe != null ||
+        record.terminalReported ||
+        _closed)
+      return;
+    // A guest hello/health failure is independent of driver/VM lifecycle. Keep
+    // ownership until real IO completion, not just a caller timeout wrapper.
+    late final Future<void> probe;
+    probe = guest
+        .refresh(deadline: GuestBridgeDeadline.after(guest.frameTimeout))
+        .then<void>(
+          (_) {},
+          onError: (Object error, StackTrace stackTrace) {
+            if (!_closed && !record.terminalReported) {
+              onError?.call(record.session.correlation, error, stackTrace);
+            }
+          },
+        )
+        .whenComplete(() {
+          if (identical(record.guestProbe, probe)) record.guestProbe = null;
+        });
+    record.guestProbe = probe;
   }
 
   void _routeExit(_RuntimeDriverRecord record, RuntimeDriverExit exit) {
@@ -544,7 +687,11 @@ final class RuntimeDriverEffectAdapter
     );
     await record.eventSubscription?.cancel();
     await record.logSubscription?.cancel();
+    await record.guestSubscription?.cancel();
+    final guestClosing = record.guestSession?.close();
     await _factory.release(record.session.correlation);
+    await guestClosing;
+    await record.guestProbe;
     if (_activeByVm[record.session.correlation.vmId] == key) {
       _activeByVm.remove(record.session.correlation.vmId);
     }
@@ -591,6 +738,45 @@ final class RuntimeDriverEffectAdapter
     });
   }
 
+  void _enqueueGuestReadiness(_RuntimeDriverRecord record) {
+    if (_closed ||
+        record.terminalReported ||
+        !record.runtimeRunning ||
+        !record.guestEnabled ||
+        record.dispatchFailure != null ||
+        record.guestPublicationPending)
+      return;
+    record.guestPublicationPending = true;
+    record.dispatchTail = record.dispatchTail.then((_) async {
+      final observation = record.latestGuestObservation;
+      try {
+        if (_closed ||
+            record.terminalReported ||
+            !record.runtimeRunning ||
+            observation == null ||
+            !observation.isCurrent)
+          return;
+        await _dispatchCommand(
+          record,
+          GuestReadinessObserved(
+            vmId: observation.correlation.vmId,
+            driverGeneration: observation.correlation.driverGeneration,
+            revision: observation.revision,
+            ready: observation.ready,
+            stillCurrent: () => observation.isCurrent,
+          ),
+        );
+      } finally {
+        record.guestPublicationPending = false;
+        // Coalesce changes arriving during delivery. A failed unchanged
+        // observation waits for the next tick instead of retrying in a loop.
+        if (!identical(observation, record.latestGuestObservation)) {
+          _enqueueGuestReadiness(record);
+        }
+      }
+    });
+  }
+
   Future<void> _dispatchCommand(
     _RuntimeDriverRecord record,
     VmCommand command,
@@ -598,6 +784,7 @@ final class RuntimeDriverEffectAdapter
     if (record.dispatchFailure != null) return;
     try {
       await _dispatch(record.session.correlation.vmId, command);
+      if (command is GuestReadinessObserved) record.guestDispatchFailure = null;
     } catch (error, stackTrace) {
       final failure = RuntimeDriverDispatchException(
         vmId: record.session.correlation.vmId,
@@ -606,6 +793,12 @@ final class RuntimeDriverEffectAdapter
         error: error,
         stackTrace: stackTrace,
       );
+      if (command is GuestReadinessObserved) {
+        // Surface the rolled-back observation without converting a guest
+        // publication failure into driver death or a VM restart decision.
+        record.guestDispatchFailure = failure;
+        return;
+      }
       record.dispatchFailure = failure;
       _dispatchFailure ??= failure;
       record.terminalReported = true;
@@ -655,6 +848,15 @@ final class _RuntimeDriverRecord {
   OperationId? terminalOperationId;
   StreamSubscription<RuntimeEvent>? eventSubscription;
   StreamSubscription<RuntimeDriverLogChunk>? logSubscription;
+  HostGuestSession? guestSession;
+  StreamSubscription<GuestReadinessObservation>? guestSubscription;
+  Future<void>? guestProbe;
+  bool guestEnabled = false;
+  bool runtimeRunning = false;
+  int displayRevision = 0;
+  VmDisplayState? latestDisplayState;
+  GuestReadinessObservation? latestGuestObservation;
+  bool guestPublicationPending = false;
   Future<void> dispatchTail = Future<void>.value();
   bool terminalReported = false;
   bool cleanupScheduled = false;
@@ -663,6 +865,7 @@ final class _RuntimeDriverRecord {
   bool cleanShutdownObserved = false;
   RuntimeDriverError? runtimeError;
   RuntimeDriverDispatchException? dispatchFailure;
+  RuntimeDriverDispatchException? guestDispatchFailure;
 }
 
 final class _InFlightSpawn {

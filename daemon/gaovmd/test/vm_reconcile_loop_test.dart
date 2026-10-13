@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:gaovm_models/gaovm_models.dart';
 import 'package:gaovmd/gaovmd.dart';
+import 'package:gaovmd/src/guest_session_reconcile_loop.dart';
 import 'package:test/test.dart';
 
 void main() {
@@ -69,6 +70,55 @@ void main() {
       expect(catalog.scans, 2);
       expect(loop.start, throwsStateError);
       await loop.close();
+    },
+  );
+
+  test(
+    'guest safety timer continues independently of a stalled catalog scan',
+    () async {
+      final release = Completer<void>();
+      catalog.beforeList = () => release.future;
+      final vmTimers = _Scheduler();
+      final vmLoop = VmReconcileLoop(
+        registry: registry,
+        scheduler: vmTimers,
+        onVmError: (_, error, _) => fail('$error'),
+        onError: (error, _) => fail('$error'),
+      );
+      final factory = FakeRuntimeDriverFactory(
+        scheduler: ManualRuntimeScheduler(),
+      );
+      final drivers = RuntimeDriverEffectAdapter(
+        factory: factory,
+        resolveConfiguration: (_) =>
+            throw StateError('no runtime is configured'),
+        dispatch: (_, _) async {},
+      );
+      final guestTimers = _Scheduler();
+      final guestLoop = GuestSessionReconcileLoop(
+        drivers: drivers,
+        scheduler: guestTimers,
+        onError: (_, error, _) => fail('$error'),
+      );
+      try {
+        vmLoop.start();
+        expect(catalog.scans, 1);
+        expect(vmTimers.activeCount, 0);
+        guestLoop.start();
+        guestTimers.fire();
+        guestTimers.fire();
+        expect(guestTimers.handles, hasLength(3));
+        expect(guestTimers.activeCount, 1);
+        expect(catalog.scans, 1);
+        expect(vmTimers.activeCount, 0);
+        await guestLoop.close();
+        expect(guestTimers.activeCount, 0);
+      } finally {
+        release.complete();
+        await guestLoop.close();
+        await vmLoop.close();
+        await drivers.close();
+      }
     },
   );
 

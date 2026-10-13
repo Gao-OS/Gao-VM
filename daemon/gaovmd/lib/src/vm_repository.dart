@@ -10,6 +10,17 @@ final _labelSelectorNamePattern = RegExp(
   r'^[A-Za-z0-9](?:[A-Za-z0-9._/-]*[A-Za-z0-9])?$',
 );
 
+/// Public catalog policy; active and deleting definitions consume a slot until
+/// deletion has actually committed. Tombstones do not consume catalog capacity.
+const maxDefinedVms = 128;
+
+final class VmCatalogLimitExceeded implements Exception {
+  const VmCatalogLimitExceeded();
+
+  @override
+  String toString() => 'VM catalog limit reached ($maxDefinedVms)';
+}
+
 final class LabelSelector {
   LabelSelector._(List<_LabelRequirement> requirements)
     : _requirements = List<_LabelRequirement>.unmodifiable(requirements);
@@ -188,6 +199,14 @@ final class SqliteVmRepository implements VmRepository {
     );
 
     return _database.transaction((connection) {
+      final count =
+          connection
+                  .select(
+                    'SELECT COUNT(*) AS count FROM vms WHERE deleted_at IS NULL',
+                  )
+                  .single['count']
+              as int;
+      if (count >= maxDefinedVms) throw const VmCatalogLimitExceeded();
       connection.execute(
         '''
           INSERT INTO vms(

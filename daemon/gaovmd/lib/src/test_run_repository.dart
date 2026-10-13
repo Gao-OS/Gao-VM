@@ -233,6 +233,26 @@ final class SqliteTestRunRepository implements TestRunRepository {
            THEN 'cancelled' ELSE planned_outcome END WHERE id = ?''',
           [id.value],
         );
+        connection.execute(
+          '''
+          UPDATE guest_exec_jobs SET cancellation_requested = 1
+          WHERE completed_at IS NULL AND operation_id IN (
+            SELECT operation_id FROM test_run_step_execs WHERE test_run_id = ?
+          )
+        ''',
+          [id.value],
+        );
+        connection.execute(
+          '''
+          INSERT INTO outbox(topic, key, payload_json, created_at)
+          SELECT 'guest.exec', j.vm_id, json_object('version', 1, 'vm_id', j.vm_id,
+            'operation_id', j.operation_id, 'driver_generation', j.driver_generation,
+            'spec_generation', j.spec_generation, 'applied_intent_revision', j.applied_intent_revision), ?
+          FROM guest_exec_jobs j JOIN test_run_step_execs e ON e.operation_id = j.operation_id
+          WHERE e.test_run_id = ? AND j.completed_at IS NULL
+        ''',
+          [formatPersistenceTimestamp(_now().toUtc()), id.value],
+        );
         final updated = _require(connection, id);
         await _append(updated, 'test_run.cancel_requested', _now().toUtc());
         return updated;
@@ -480,6 +500,37 @@ final class SqliteTestRunRepository implements TestRunRepository {
     );
     await _requireLiveOperation(run);
     final now = _now().toUtc();
+    final retentionUntil = now.add(
+      Duration(
+        days:
+            outcome == TestRunState.succeeded && run.cleanupDecision == 'delete'
+            ? 7
+            : 30,
+      ),
+    );
+    for (final artifact in connection.select(
+      'SELECT id, retention_until FROM artifacts WHERE test_run_id = ? ORDER BY id',
+      [id.value],
+    )) {
+      connection.execute(
+        'UPDATE artifacts SET retention_until = ? WHERE id = ?',
+        [formatPersistenceTimestamp(retentionUntil), artifact['id']],
+      );
+      await _events.append(
+        type: 'artifact.retention_updated',
+        resourceType: ResourceType.artifact,
+        resourceId: ArtifactId(artifact['id'] as String),
+        vmId: run.vmId,
+        testRunId: id,
+        operationId: run.operationId,
+        occurredAt: now,
+        payload: JsonObjectValue.fromJson({
+          'retention_until': formatPersistenceTimestamp(retentionUntil),
+          'previous_retention_until': artifact['retention_until'],
+          'anchor': 'test_run.completed_at',
+        }),
+      );
+    }
     connection.execute(
       '''UPDATE test_runs SET state = ?, result_json = ?, error_json = ?, completed_at = ?
          WHERE id = ?''',

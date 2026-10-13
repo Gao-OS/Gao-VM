@@ -15,6 +15,11 @@ const coreTableNames = <String>{
   'legacy_vm_migrations',
   'images',
   'operations',
+  'guest_exec_jobs',
+  'guest_exec_cancellations',
+  'guest_artifact_receipts',
+  'guest_artifact_mappings',
+  'guest_diagnostic_attempts',
   'events',
   'test_runs',
   'test_run_vm_provisioning',
@@ -23,6 +28,8 @@ const coreTableNames = <String>{
   'test_run_collection',
   'test_run_collection_items',
   'test_steps',
+  'test_run_step_execs',
+  'test_run_step_artifacts',
   'artifacts',
   'artifact_payloads',
   'resource_leases',
@@ -30,7 +37,7 @@ const coreTableNames = <String>{
   'outbox',
 };
 
-const _latestSchemaVersion = 16;
+const _latestSchemaVersion = 21;
 final _transactionContextKey = Object();
 final _savepointScopeKey = Object();
 final _transactionGates = <String, _AsyncGate>{};
@@ -591,6 +598,177 @@ const _migrations = <_Migration>[
         SELECT RAISE(ABORT, 'TestRun readiness window is immutable');
       END;
     CREATE INDEX test_runs_waiting_ready_idx ON test_runs(id) WHERE state = 'waiting_ready';
+  '''),
+  _Migration(17, '''
+    CREATE TABLE guest_exec_jobs (
+      operation_id TEXT PRIMARY KEY REFERENCES operations(id),
+      vm_id TEXT NOT NULL REFERENCES vms(id),
+      driver_generation INTEGER NOT NULL CHECK (driver_generation > 0),
+      spec_generation INTEGER NOT NULL CHECK (spec_generation > 0),
+      applied_intent_revision INTEGER NOT NULL CHECK (applied_intent_revision >= 0),
+      created_at TEXT NOT NULL,
+      started_at TEXT,
+      completed_at TEXT,
+      attempt_id TEXT CHECK ((started_at IS NULL) = (attempt_id IS NULL)),
+      cancellation_requested INTEGER NOT NULL DEFAULT 0 CHECK (cancellation_requested IN (0, 1)),
+      FOREIGN KEY (vm_id, spec_generation) REFERENCES vm_specs(vm_id, generation)
+    );
+    CREATE UNIQUE INDEX guest_exec_jobs_active_vm_idx
+      ON guest_exec_jobs(vm_id) WHERE completed_at IS NULL;
+    CREATE TRIGGER guest_exec_jobs_immutable_input
+      BEFORE UPDATE OF operation_id, vm_id, driver_generation, spec_generation,
+        applied_intent_revision, created_at ON guest_exec_jobs
+      BEGIN
+        SELECT RAISE(ABORT, 'guest exec input is immutable');
+      END;
+    CREATE TRIGGER guest_exec_jobs_immutable_attempt
+      BEFORE UPDATE OF started_at, attempt_id ON guest_exec_jobs
+      WHEN OLD.started_at IS NOT NULL AND (
+        NEW.started_at IS NOT OLD.started_at OR NEW.attempt_id IS NOT OLD.attempt_id)
+      BEGIN
+        SELECT RAISE(ABORT, 'guest exec attempt is immutable');
+      END;
+    CREATE TRIGGER guest_exec_jobs_immutable_completion
+      BEFORE UPDATE OF completed_at ON guest_exec_jobs
+      WHEN OLD.completed_at IS NOT NULL AND NEW.completed_at IS NOT OLD.completed_at
+      BEGIN
+        SELECT RAISE(ABORT, 'guest exec completion is immutable');
+      END;
+    CREATE TRIGGER guest_exec_jobs_cancellation_fence
+      BEFORE UPDATE OF cancellation_requested ON guest_exec_jobs
+      WHEN OLD.cancellation_requested = 1 AND NEW.cancellation_requested <> 1
+      BEGIN
+        SELECT RAISE(ABORT, 'guest exec cancellation cannot be revoked');
+      END;
+    CREATE TABLE guest_exec_cancellations (
+      action_id TEXT PRIMARY KEY REFERENCES operations(id),
+      target_id TEXT NOT NULL REFERENCES guest_exec_jobs(operation_id)
+    );
+    CREATE INDEX guest_exec_cancellations_target_idx ON guest_exec_cancellations(target_id);
+    CREATE TRIGGER guest_exec_cancellations_immutable
+      BEFORE UPDATE ON guest_exec_cancellations
+      BEGIN
+        SELECT RAISE(ABORT, 'guest exec cancellation identity is immutable');
+      END;
+  '''),
+  _Migration(18, '''
+    ALTER TABLE guest_exec_jobs ADD COLUMN control_epoch_id TEXT;
+    CREATE TRIGGER guest_exec_jobs_immutable_control_epoch
+      BEFORE UPDATE OF control_epoch_id ON guest_exec_jobs
+      WHEN OLD.started_at IS NOT NULL AND NEW.control_epoch_id IS NOT OLD.control_epoch_id
+      BEGIN SELECT RAISE(ABORT, 'guest exec control owner is immutable'); END;
+    CREATE TABLE guest_artifact_receipts (
+      id TEXT PRIMARY KEY,
+      vm_id TEXT NOT NULL REFERENCES vms(id),
+      driver_generation INTEGER NOT NULL CHECK (driver_generation > 0),
+      operation_id TEXT NOT NULL REFERENCES operations(id),
+      attempt_id TEXT,
+      source_kind TEXT NOT NULL CHECK (source_kind IN ('exec', 'collection')),
+      control_epoch_id TEXT NOT NULL,
+      result_json TEXT NOT NULL CHECK (json_valid(result_json) AND json_type(result_json) = 'object'),
+      created_at TEXT NOT NULL,
+      UNIQUE(id, vm_id, driver_generation, operation_id)
+    );
+    CREATE UNIQUE INDEX guest_exec_receipt_operation_idx
+      ON guest_artifact_receipts(operation_id) WHERE source_kind = 'exec';
+    CREATE TRIGGER guest_artifact_receipts_immutable BEFORE UPDATE ON guest_artifact_receipts
+      BEGIN SELECT RAISE(ABORT, 'guest artifact receipt is immutable'); END;
+    CREATE TABLE guest_artifact_mappings (
+      vm_id TEXT NOT NULL,
+      driver_generation INTEGER NOT NULL,
+      operation_id TEXT NOT NULL,
+      guest_artifact_id TEXT NOT NULL,
+      receipt_id TEXT NOT NULL,
+      selector TEXT NOT NULL,
+      host_artifact_id TEXT NOT NULL UNIQUE REFERENCES artifacts(id),
+      kind TEXT NOT NULL,
+      content_type TEXT NOT NULL,
+      size_bytes INTEGER NOT NULL CHECK (size_bytes BETWEEN 0 AND 268435456),
+      digest TEXT NOT NULL,
+      retention_until TEXT,
+      PRIMARY KEY(vm_id, driver_generation, operation_id, guest_artifact_id),
+      UNIQUE(receipt_id, selector),
+      FOREIGN KEY(receipt_id, vm_id, driver_generation, operation_id)
+        REFERENCES guest_artifact_receipts(id, vm_id, driver_generation, operation_id)
+    );
+    CREATE TRIGGER guest_artifact_mappings_immutable BEFORE UPDATE ON guest_artifact_mappings
+      BEGIN SELECT RAISE(ABORT, 'guest artifact mapping is immutable'); END;
+  '''),
+  _Migration(19, '''
+    CREATE TABLE test_run_step_execs (
+      test_run_id TEXT NOT NULL,
+      step_index INTEGER NOT NULL,
+      operation_id TEXT NOT NULL UNIQUE REFERENCES guest_exec_jobs(operation_id),
+      PRIMARY KEY(test_run_id, step_index),
+      FOREIGN KEY(test_run_id, step_index) REFERENCES test_steps(test_run_id, step_index)
+    );
+    CREATE TRIGGER test_run_step_execs_immutable BEFORE UPDATE ON test_run_step_execs
+      BEGIN SELECT RAISE(ABORT, 'TestRun step execution binding is immutable'); END;
+  '''),
+  _Migration(20, '''
+    CREATE TABLE test_run_step_artifacts (
+      test_run_id TEXT NOT NULL,
+      step_index INTEGER NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('stdout', 'stderr')),
+      artifact_id TEXT NOT NULL UNIQUE,
+      source_operation_id TEXT REFERENCES operations(id),
+      source_json TEXT CHECK (source_json IS NULL OR (json_valid(source_json) AND json_type(source_json) = 'object')),
+      state TEXT NOT NULL CHECK (state IN ('pending', 'published', 'absent', 'failed')),
+      host_artifact_id TEXT REFERENCES artifacts(id),
+      error_json TEXT CHECK (error_json IS NULL OR (json_valid(error_json) AND json_type(error_json) = 'object')),
+      PRIMARY KEY(test_run_id, step_index, kind),
+      FOREIGN KEY(test_run_id, step_index) REFERENCES test_steps(test_run_id, step_index),
+      CHECK ((state = 'published') = (host_artifact_id IS NOT NULL)),
+      CHECK ((state = 'failed') = (error_json IS NOT NULL)),
+      CHECK (state <> 'pending' OR source_json IS NOT NULL)
+    );
+    CREATE TRIGGER test_run_step_artifact_input_immutable
+      BEFORE UPDATE OF test_run_id, step_index, kind, artifact_id, source_operation_id, source_json
+      ON test_run_step_artifacts
+      BEGIN SELECT RAISE(ABORT, 'TestRun step artifact source is immutable'); END;
+    CREATE TRIGGER test_run_step_artifact_completion_immutable BEFORE UPDATE ON test_run_step_artifacts
+      WHEN OLD.state <> 'pending'
+      BEGIN SELECT RAISE(ABORT, 'TestRun step artifact completion is immutable'); END;
+    ALTER TABLE test_run_collection ADD COLUMN system_info_json TEXT
+      CHECK (system_info_json IS NULL OR (json_valid(system_info_json) AND json_type(system_info_json) = 'object'));
+    CREATE TRIGGER test_run_system_info_immutable BEFORE UPDATE OF system_info_json ON test_run_collection
+      WHEN OLD.system_info_json IS NOT NULL AND NEW.system_info_json IS NOT OLD.system_info_json
+      BEGIN SELECT RAISE(ABORT, 'TestRun system info snapshot is immutable'); END;
+    CREATE TABLE guest_diagnostic_attempts (
+      operation_id TEXT NOT NULL REFERENCES operations(id),
+      method TEXT NOT NULL CHECK (method IN ('artifact.collect', 'system.info')),
+      attempt_id TEXT NOT NULL UNIQUE,
+      vm_id TEXT NOT NULL REFERENCES vms(id),
+      driver_generation INTEGER NOT NULL CHECK (driver_generation > 0),
+      control_epoch_id TEXT NOT NULL,
+      source_attempt_id TEXT,
+      request_json TEXT NOT NULL CHECK (json_valid(request_json) AND json_type(request_json) = 'object'),
+      started_at TEXT NOT NULL,
+      deadline_at TEXT NOT NULL,
+      result_json TEXT CHECK (result_json IS NULL OR (json_valid(result_json) AND json_type(result_json) = 'object')),
+      completed_at TEXT,
+      error_json TEXT CHECK (error_json IS NULL OR (json_valid(error_json) AND json_type(error_json) = 'object')),
+      PRIMARY KEY(operation_id, method),
+      CHECK (result_json IS NULL OR error_json IS NULL),
+      CHECK ((completed_at IS NULL) = (result_json IS NULL AND error_json IS NULL))
+    );
+    CREATE TRIGGER guest_diagnostic_input_immutable
+      BEFORE UPDATE OF operation_id, method, attempt_id, vm_id, driver_generation,
+        control_epoch_id, source_attempt_id, request_json, started_at, deadline_at
+      ON guest_diagnostic_attempts
+      BEGIN SELECT RAISE(ABORT, 'guest diagnostic input is immutable'); END;
+    CREATE TRIGGER guest_diagnostic_completion_immutable BEFORE UPDATE ON guest_diagnostic_attempts
+      WHEN OLD.completed_at IS NOT NULL
+      BEGIN SELECT RAISE(ABORT, 'guest diagnostic completion is immutable'); END;
+    CREATE UNIQUE INDEX guest_collection_receipt_operation_idx
+      ON guest_artifact_receipts(operation_id) WHERE source_kind = 'collection';
+  '''),
+  _Migration(21, '''
+    ALTER TABLE vm_runtime ADD COLUMN driver_operation_id TEXT REFERENCES operations(id);
+    ALTER TABLE vm_runtime ADD COLUMN display_state TEXT NOT NULL DEFAULT 'unknown'
+      CHECK (display_state IN ('unknown', 'closed', 'opening', 'open', 'closing', 'error'));
+    ALTER TABLE vm_runtime ADD COLUMN display_observed_at TEXT;
+    UPDATE vm_runtime SET driver_operation_id = active_operation_id;
   '''),
 ];
 

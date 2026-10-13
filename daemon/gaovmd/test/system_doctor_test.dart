@@ -9,6 +9,43 @@ import 'package:test/test.dart';
 
 void main() {
   test(
+    'public capabilities reports enforced limits without native probes',
+    () async {
+      await _withDoctor((fixture) async {
+        fixture.host.processes = DriverInventorySnapshot(
+          processes: [],
+          unresolvedProcessIds: [123],
+        );
+        final response = await fixture.request(path: '/v1/system/capabilities');
+        expect(response.status, HttpStatus.ok);
+        final capabilities = PublicCapabilities.fromJson(response.body);
+        expect(capabilities.maxDefinedVms, 128);
+        expect(capabilities.maxRunningVms, 8);
+        expect(capabilities.maxConcurrentBoots, 2);
+        expect(capabilities.backends, ['vz']);
+        expect(capabilities.guest, isEmpty);
+      });
+    },
+  );
+
+  test('public capabilities rejects bodies and query parameters', () async {
+    await _withDoctor((fixture) async {
+      for (final input in [
+        (query: '?limit=1', body: null),
+        (query: '', body: <String, Object?>{}),
+      ]) {
+        final response = await fixture.request(
+          path: '/v1/system/capabilities',
+          query: input.query,
+          body: input.body,
+        );
+        expect(response.status, HttpStatus.badRequest);
+        expect((response.body as Map)['code'], 'INVALID_REQUEST');
+      }
+    });
+  });
+
+  test(
     'public doctor reports all required checks without repairing the host',
     () async {
       await _withDoctor((fixture) async {
@@ -615,6 +652,7 @@ final class _Fixture {
   final SystemDoctorService doctor;
 
   Future<({int status, Object? body})> request({
+    String path = '/v1/system/doctor',
     String query = '',
     Map<String, Object?>? body,
   }) async {
@@ -627,7 +665,7 @@ final class _Fixture {
     try {
       final request = await client.openUrl(
         'GET',
-        Uri.parse('http://localhost/v1/system/doctor$query'),
+        Uri.parse('http://localhost$path$query'),
       );
       if (body != null) {
         request.headers.contentType = ContentType.json;

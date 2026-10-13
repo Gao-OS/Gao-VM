@@ -6,6 +6,7 @@ import 'package:crypto/crypto.dart';
 import 'package:gaovm_models/gaovm_models.dart';
 import 'package:gaovmd/gaovmd.dart';
 import 'package:gaovmd/src/image_filesystem.dart' show imageFileMode;
+import 'package:gaovmd/src/artifact_retention_loop.dart';
 import 'package:sqlite3/sqlite3.dart';
 import 'package:test/test.dart';
 
@@ -16,6 +17,70 @@ void main() {
   late TestRun run;
   ArtifactApplicationService service() =>
       ArtifactApplicationService(database: database, directory: root);
+
+  test(
+    'retention collection removes only expired unreferenced managed bytes',
+    () async {
+      final expired = await service().publish(
+        bytes: Stream.value([1, 2, 3]),
+        kind: ArtifactKind.file,
+        contentType: 'application/octet-stream',
+        maxBytes: 3,
+        retentionUntil: DateTime.utc(2000),
+      );
+      final pinned = await service().publish(
+        bytes: Stream.value([4, 5, 6]),
+        kind: ArtifactKind.stdout,
+        contentType: 'application/octet-stream',
+        maxBytes: 3,
+        testRunId: run.id,
+        operationId: run.operationId,
+        retentionUntil: DateTime.utc(2000),
+      );
+      final future = await service().publish(
+        bytes: Stream.value([7]),
+        kind: ArtifactKind.file,
+        contentType: 'application/octet-stream',
+        maxBytes: 1,
+        retentionUntil: DateTime.utc(2100),
+      );
+      // Startup reconciliation is also the first retention pass. It must make a
+      // durable catalog decision before deleting its proven private payload.
+      final recovery = await service().reconcile();
+      expect(recovery.removedNames, contains(expired.id.value));
+      await expectLater(
+        service().download(expired.id),
+        throwsA(isA<ArtifactNotFoundException>()),
+      );
+      expect(
+        await Directory('${root.path}/${expired.id.value}').exists(),
+        isFalse,
+      );
+      expect(
+        await (await service().download(
+          pinned.id,
+        )).bytes.expand((bytes) => bytes).toList(),
+        [4, 5, 6],
+      );
+      expect(
+        await (await service().download(
+          future.id,
+        )).bytes.expand((bytes) => bytes).toList(),
+        [7],
+      );
+      expect(
+        (await SqliteTestRunRepository(database).get(run.id))!.artifactIds,
+        contains(pinned.id),
+      );
+      expect(
+        (await SqliteEventRepository(
+          database,
+        ).list(resourceId: expired.id)).map((event) => event.type),
+        contains('artifact.deleted'),
+      );
+      expect((await service().reconcile()).removedNames, isEmpty);
+    },
+  );
 
   setUp(() async {
     temporary = await Directory.systemTemp.createTemp('gvm-art-store-');
@@ -38,6 +103,106 @@ void main() {
         retainOnFailure: true,
       ),
     );
+  });
+
+  test(
+    'retention pins terminal operation results and preserves unknown content',
+    () async {
+      final referenced = await service().publish(
+        bytes: Stream.value([1]),
+        kind: ArtifactKind.file,
+        contentType: 'application/octet-stream',
+        maxBytes: 1,
+        retentionUntil: DateTime.utc(2000),
+      );
+      final operations = SqliteOperationRepository(database);
+      final reference = await operations.createAndStart(
+        type: 'artifact.audit',
+        resourceType: ResourceType.testRun,
+        resourceId: run.id,
+        requestId: RequestId.generate(),
+        cancellable: false,
+        request: JsonObjectValue.empty,
+      );
+      await operations.succeed(
+        reference.id,
+        result: JsonObjectValue.fromJson({'artifact_id': referenced.id.value}),
+      );
+      final unknown = await service().publish(
+        bytes: Stream.value([2]),
+        kind: ArtifactKind.file,
+        contentType: 'application/octet-stream',
+        maxBytes: 1,
+        retentionUntil: DateTime.utc(2000),
+      );
+      final evidence = await File(
+        '${root.path}/${unknown.id.value}/operator-evidence',
+      ).writeAsString('preserve');
+      expect(await service().collectExpired(), isEmpty);
+      expect(await service().repository.get(referenced.id), referenced);
+      expect(await service().repository.get(unknown.id), unknown);
+      expect(await evidence.readAsString(), 'preserve');
+      expect(
+        (await SqliteEventRepository(
+          database,
+        ).list()).where((event) => event.type == 'artifact.deleted'),
+        isEmpty,
+      );
+    },
+  );
+
+  test(
+    'a committed retention deletion is recoverable before byte cleanup',
+    () async {
+      final artifact = await service().publish(
+        bytes: Stream.value([1]),
+        kind: ArtifactKind.file,
+        contentType: 'application/octet-stream',
+        maxBytes: 1,
+        retentionUntil: DateTime.utc(2000),
+      );
+      expect(
+        await service().repository.expireUnreferenced(
+          artifact.id,
+          DateTime.now(),
+        ),
+        isTrue,
+      );
+      database.close();
+      database = await GaoVmDatabase.open('${temporary.path}/catalog.db');
+      expect((await service().reconcile()).removedNames, [artifact.id.value]);
+      expect(
+        await Directory('${root.path}/${artifact.id.value}').exists(),
+        isFalse,
+      );
+      expect(
+        (await SqliteEventRepository(database).list(
+          resourceId: artifact.id,
+        )).where((event) => event.type == 'artifact.deleted'),
+        hasLength(1),
+      );
+    },
+  );
+
+  test('retention loop drains its owned pass before shutdown', () async {
+    final artifact = await service().publish(
+      bytes: Stream.value([1]),
+      kind: ArtifactKind.file,
+      contentType: 'application/octet-stream',
+      maxBytes: 1,
+      retentionUntil: DateTime.utc(2000),
+    );
+    final errors = <Object>[];
+    final loop = ArtifactRetentionLoop(
+      artifacts: service(),
+      onError: (error, _) => errors.add(error),
+    );
+    loop.start();
+    loop.start();
+    await loop.close();
+    expect(errors, isEmpty);
+    expect(await service().repository.get(artifact.id), isNull);
+    expect(() => loop.start(), throwsStateError);
   });
 
   tearDown(() async {
@@ -86,6 +251,228 @@ void main() {
     final content = await service().download(id);
     expect(await content.bytes.expand((chunk) => chunk).toList(), [1, 2, 3]);
   });
+
+  for (final revisedRetention in [
+    DateTime.utc(2026, 11, 14),
+    null,
+    DateTime.utc(2000),
+  ]) {
+    test(
+      'SQLite retention $revisedRetention keeps referenced bytes after reopen',
+      () async {
+        final bytes = [0, 255, 10, 13, 128, 1];
+        final artifact = await service().publish(
+          bytes: Stream.value(bytes),
+          kind: ArtifactKind.stdout,
+          contentType: 'application/octet-stream',
+          maxBytes: 16,
+          testRunId: run.id,
+          operationId: run.operationId,
+          retentionUntil: DateTime.utc(2026, 11, 7),
+        );
+        final manifest = File(
+          '${root.path}/${artifact.id.value}/manifest.json',
+        );
+        final sealedManifest = await manifest.readAsBytes();
+        // Simulate a retention policy write at the real SQLite boundary. This
+        // does not choose default deadlines or implement a policy/GC worker.
+        await database.transaction(
+          (db) => db.execute(
+            'UPDATE artifacts SET retention_until = ? WHERE id = ?',
+            [revisedRetention?.toIso8601String(), artifact.id.value],
+          ),
+        );
+        database.close();
+        database = await GaoVmDatabase.open('${temporary.path}/catalog.db');
+
+        final download = await service().download(artifact.id);
+        expect(download.artifact.retentionUntil, revisedRetention);
+        expect(download.artifact.digest, artifact.digest);
+        expect(download.artifact.sizeBytes, bytes.length);
+        expect(await download.bytes.expand((chunk) => chunk).toList(), bytes);
+        final recovery = await service().reconcile();
+        expect(recovery.damagedArtifactIds, isEmpty);
+        expect(recovery.removedNames, isEmpty);
+        expect(recovery.retainedNames, isEmpty);
+        expect((await service().listForTestRun(run.id)).items, [
+          download.artifact,
+        ]);
+        expect(await manifest.readAsBytes(), sealedManifest);
+      },
+    );
+  }
+
+  for (final originalRetention in [DateTime.utc(2026, 11, 7), null]) {
+    test(
+      'reserved replay with original retention $originalRetention preserves revised retention without consuming input',
+      () async {
+        final id = ArtifactId.generate();
+        final revisedRetention = DateTime.utc(2026, 11, 14);
+        final first = await service().publish(
+          artifactId: id,
+          bytes: Stream.value([1, 2, 3]),
+          kind: ArtifactKind.result,
+          contentType: 'application/json',
+          maxBytes: 16,
+          testRunId: run.id,
+          operationId: run.operationId,
+          retentionUntil: originalRetention,
+        );
+        await database.transaction(
+          (db) => db.execute(
+            'UPDATE artifacts SET retention_until = ? WHERE id = ?',
+            [revisedRetention.toIso8601String(), id.value],
+          ),
+        );
+        database.close();
+        database = await GaoVmDatabase.open('${temporary.path}/catalog.db');
+        final events = SqliteEventRepository(database);
+        final before = await events.list();
+        var consumed = false;
+        Stream<List<int>> retryInput() async* {
+          consumed = true;
+          yield [4, 5, 6];
+        }
+
+        final retry = await service().publish(
+          artifactId: id,
+          bytes: retryInput(),
+          kind: ArtifactKind.result,
+          contentType: 'application/json',
+          maxBytes: 16,
+          testRunId: run.id,
+          operationId: run.operationId,
+          retentionUntil: originalRetention,
+        );
+        expect(consumed, isFalse);
+        expect(
+          retry,
+          Artifact.fromJson({
+            ...first.toJson(),
+            'retention_until': revisedRetention.toIso8601String(),
+          }),
+        );
+        expect(await ArtifactRepository(database).get(id), retry);
+        expect(
+          (await SqliteTestRunRepository(database).get(run.id))!.artifactIds,
+          [id],
+        );
+        expect(await events.list(), before);
+        final content = await service().download(id);
+        expect(content.artifact, retry);
+        expect(await content.bytes.expand((chunk) => chunk).toList(), [
+          1,
+          2,
+          3,
+        ]);
+      },
+    );
+  }
+
+  test(
+    'a reserved retry cannot adopt revised retention as publication input',
+    () async {
+      final id = ArtifactId.generate();
+      final originalRetention = DateTime.utc(2026, 11, 7);
+      final revisedRetention = DateTime.utc(2026, 11, 14);
+      final artifact = await service().publish(
+        artifactId: id,
+        bytes: Stream.value([1, 2, 3]),
+        kind: ArtifactKind.result,
+        contentType: 'application/json',
+        maxBytes: 16,
+        retentionUntil: originalRetention,
+      );
+      await database.transaction(
+        (db) => db.execute(
+          'UPDATE artifacts SET retention_until = ? WHERE id = ?',
+          [revisedRetention.toIso8601String(), id.value],
+        ),
+      );
+      final before = await SqliteEventRepository(database).list();
+      var consumed = false;
+      Stream<List<int>> retryInput() async* {
+        consumed = true;
+        yield [4, 5, 6];
+      }
+
+      for (final retention in [revisedRetention, null]) {
+        await expectLater(
+          service().publish(
+            artifactId: id,
+            bytes: retryInput(),
+            kind: ArtifactKind.result,
+            contentType: 'application/json',
+            maxBytes: 16,
+            retentionUntil: retention,
+          ),
+          throwsA(isA<ArtifactPublicationConflict>()),
+        );
+      }
+      expect(consumed, isFalse);
+      expect(await SqliteEventRepository(database).list(), before);
+      final download = await service().download(id);
+      expect(download.artifact.retentionUntil, revisedRetention);
+      expect(download.artifact.digest, artifact.digest);
+      expect(await download.bytes.expand((chunk) => chunk).toList(), [1, 2, 3]);
+    },
+  );
+
+  for (final entry in <String, Object?>{
+    'id': ArtifactId.generate().value,
+    'vm_id': VmId.generate().value,
+    'operation_id': OperationId.generate().value,
+    'test_run_id': TestRunId.generate().value,
+    'kind': 'stderr',
+    'content_type': 'text/plain',
+    'size_bytes': 4,
+    'digest': contentDigest('different'),
+    'download_url': '/v1/artifacts/${ArtifactId.generate().value}',
+    'created_at': DateTime.utc(2000).toIso8601String(),
+  }.entries) {
+    test(
+      'retention updates do not bypass sealed ${entry.key} integrity',
+      () async {
+        final artifact = await service().publish(
+          bytes: Stream.value([1, 2, 3]),
+          kind: ArtifactKind.stdout,
+          contentType: 'application/octet-stream',
+          maxBytes: 16,
+          testRunId: run.id,
+          operationId: run.operationId,
+          retentionUntil: DateTime.utc(2026, 11, 7),
+        );
+        await database.transaction(
+          (db) => db.execute(
+            'UPDATE artifacts SET retention_until = ? WHERE id = ?',
+            [DateTime.utc(2026, 11, 14).toIso8601String(), artifact.id.value],
+          ),
+        );
+        // Fault injection changes one otherwise well-formed immutable field
+        // in this test's owned manifest, not the catalog or payload bytes.
+        final manifest = File(
+          '${root.path}/${artifact.id.value}/manifest.json',
+        );
+        final json = jsonDecode(await manifest.readAsString()) as Map;
+        (json['artifact'] as Map)[entry.key] = entry.value;
+        imageFileMode(manifest.path, 0x180);
+        await manifest.writeAsString(jsonEncode(json));
+        imageFileMode(manifest.path, 0x100);
+
+        await expectLater(
+          service().download(artifact.id),
+          throwsA(isA<ArtifactContentUnavailable>()),
+        );
+        final recovery = await service().reconcile();
+        expect(recovery.damagedArtifactIds, [artifact.id]);
+        expect(recovery.removedNames, isEmpty);
+        expect(
+          await File('${root.path}/${artifact.id.value}/payload').readAsBytes(),
+          [1, 2, 3],
+        );
+      },
+    );
+  }
 
   test('sealed binary payload and catalog references survive reopen', () async {
     final bytes = [0, 255, 10, 13, 128, 1];

@@ -762,6 +762,26 @@ void main() {
       final before = (await SqliteTestRunRepository(database).get(id))!;
       database.close();
       final legacy = sqlite3.open('${temporary.path}/catalog.db');
+      legacy.execute('DROP TRIGGER test_run_system_info_immutable');
+      legacy.execute(
+        'ALTER TABLE test_run_collection DROP COLUMN system_info_json',
+      );
+      legacy.execute('DROP TABLE test_run_step_artifacts');
+      legacy.execute('DROP TABLE guest_diagnostic_attempts');
+      legacy.execute('DROP INDEX guest_collection_receipt_operation_idx');
+      legacy.execute('ALTER TABLE vm_runtime DROP COLUMN display_observed_at');
+      legacy.execute('ALTER TABLE vm_runtime DROP COLUMN display_state');
+      legacy.execute('ALTER TABLE vm_runtime DROP COLUMN driver_operation_id');
+      legacy.execute('DELETE FROM schema_migrations WHERE version = 21');
+      legacy.execute('DELETE FROM schema_migrations WHERE version = 20');
+      legacy.execute('DROP TABLE test_run_step_execs');
+      legacy.execute('DELETE FROM schema_migrations WHERE version = 19');
+      legacy.execute('DROP TABLE guest_artifact_mappings');
+      legacy.execute('DROP TABLE guest_artifact_receipts');
+      legacy.execute('DELETE FROM schema_migrations WHERE version = 18');
+      legacy.execute('DROP TABLE guest_exec_cancellations');
+      legacy.execute('DROP TABLE guest_exec_jobs');
+      legacy.execute('DELETE FROM schema_migrations WHERE version = 17');
       legacy.execute('DROP TRIGGER test_run_readiness_window_immutable');
       legacy.execute('DROP INDEX test_runs_waiting_ready_idx');
       legacy.execute('ALTER TABLE test_runs DROP COLUMN readiness_deadline_at');
@@ -770,7 +790,7 @@ void main() {
       legacy.userVersion = 15;
       legacy.dispose();
       database = await GaoVmDatabase.open('${temporary.path}/catalog.db');
-      expect(database.schemaVersion, 16);
+      expect(database.schemaVersion, 21);
       final runs = SqliteTestRunRepository(database);
       expect(await runs.get(id), before);
       expect(await runs.readinessWindow(id), original);
@@ -1674,6 +1694,26 @@ void main() {
       final original = (await SqliteTestRunRepository(database).get(id))!;
       database.close();
       final legacy = sqlite3.open('${temporary.path}/catalog.db');
+      legacy.execute('DROP TRIGGER test_run_system_info_immutable');
+      legacy.execute(
+        'ALTER TABLE test_run_collection DROP COLUMN system_info_json',
+      );
+      legacy.execute('DROP TABLE test_run_step_artifacts');
+      legacy.execute('DROP TABLE guest_diagnostic_attempts');
+      legacy.execute('DROP INDEX guest_collection_receipt_operation_idx');
+      legacy.execute('ALTER TABLE vm_runtime DROP COLUMN display_observed_at');
+      legacy.execute('ALTER TABLE vm_runtime DROP COLUMN display_state');
+      legacy.execute('ALTER TABLE vm_runtime DROP COLUMN driver_operation_id');
+      legacy.execute('DELETE FROM schema_migrations WHERE version = 21');
+      legacy.execute('DELETE FROM schema_migrations WHERE version = 20');
+      legacy.execute('DROP TABLE test_run_step_execs');
+      legacy.execute('DELETE FROM schema_migrations WHERE version = 19');
+      legacy.execute('DROP TABLE guest_artifact_mappings');
+      legacy.execute('DROP TABLE guest_artifact_receipts');
+      legacy.execute('DELETE FROM schema_migrations WHERE version = 18');
+      legacy.execute('DROP TABLE guest_exec_cancellations');
+      legacy.execute('DROP TABLE guest_exec_jobs');
+      legacy.execute('DELETE FROM schema_migrations WHERE version = 17');
       legacy.execute('DROP TRIGGER test_run_readiness_window_immutable');
       legacy.execute('DROP INDEX test_runs_waiting_ready_idx');
       legacy.execute('ALTER TABLE test_runs DROP COLUMN readiness_deadline_at');
@@ -1692,7 +1732,7 @@ void main() {
       legacy.userVersion = 12;
       legacy.dispose();
       database = await GaoVmDatabase.open('${temporary.path}/catalog.db');
-      expect(database.schemaVersion, 16);
+      expect(database.schemaVersion, 21);
       final restored = (await SqliteTestRunRepository(database).get(id))!;
       expect(restored.toJson()['spec'], original.toJson()['spec']);
       expect(restored.vmId, original.vmId);

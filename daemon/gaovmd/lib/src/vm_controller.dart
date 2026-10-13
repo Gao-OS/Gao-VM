@@ -304,15 +304,42 @@ final class VmController {
       }
       final commandWork = queued as _QueuedCommand;
       try {
-        final transition = reduce(_state, commandWork.command);
-        _state = transition.state;
-        _onStateChanged?.call(_state);
-        _synchronizeTimers();
-        await _executeEffects(
-          transition.effects,
-          transition.state,
-          commandWork.command,
-        );
+        final command = commandWork.command;
+        final transition =
+            command is GuestReadinessObserved &&
+                command.stillCurrent?.call() == false
+            ? VmTransition(state: _state)
+            : reduce(_state, command);
+        if (commandWork.command is GuestReadinessObserved &&
+            transition.effects.isNotEmpty) {
+          // Guest observations have only one durable effect. Do not advance
+          // their local fence until publication commits, and never convert a
+          // failed guest status write into a VM stop/restart policy decision.
+          final runner = _effectRunner;
+          if (runner is! TransactionalVmEffectRunner) {
+            throw StateError(
+              'guest observations require transactional effects',
+            );
+          }
+          await _mutate(
+            () => _runBatchWithDeadline(
+              runner,
+              transition.effects,
+              transition.state,
+            ),
+          );
+          _state = transition.state;
+          _onStateChanged?.call(_state);
+        } else {
+          _state = transition.state;
+          _onStateChanged?.call(_state);
+          _synchronizeTimers();
+          await _executeEffects(
+            transition.effects,
+            transition.state,
+            commandWork.command,
+          );
+        }
         if (commandWork.completer != null) {
           _causalCompleter = commandWork.completer;
         }
@@ -424,6 +451,7 @@ final class VmController {
             failedEffect,
             error,
             rolledBackCompletionOperationId: rolledBackCompletionOperationId,
+            sourceCommand: sourceCommand,
           );
           if (sourceCommand is! EffectExecutionFailed &&
               sourceCommand is! ControllerShutdownRequested &&
@@ -557,11 +585,13 @@ final class VmController {
     VmEffect effect,
     Object error, {
     OperationId? rolledBackCompletionOperationId,
+    VmCommand? sourceCommand,
   }) {
     final command = _failureCommand(
       effect,
       error,
       rolledBackCompletionOperationId: rolledBackCompletionOperationId,
+      sourceCommand: sourceCommand,
     );
     if (!_acceptingExternal) {
       _shutdownErrors.add(_operationError(effect, error));
@@ -573,8 +603,17 @@ final class VmController {
     VmEffect effect,
     Object error, {
     OperationId? rolledBackCompletionOperationId,
+    VmCommand? sourceCommand,
   }) {
     final operationError = _operationError(effect, error);
+    if (sourceCommand is DisplayObserved) {
+      // The observation transaction rolled back. Keep its last committed SQL
+      // snapshot and invalidate only the uncommitted in-memory display cache.
+      return DisplayObservationCommitFailed(
+        driverGeneration: sourceCommand.driverGeneration,
+        error: operationError,
+      );
+    }
     final operationId = effect.operationId;
     final driverGeneration = effect.driverGeneration;
     final effectiveRollbackOperationId = rolledBackCompletionOperationId;
@@ -589,6 +628,15 @@ final class VmController {
       );
     }
     final underlying = error is VmEffectBatchException ? error.error : error;
+    if (effect is ChangeDisplay &&
+        operationId != null &&
+        driverGeneration != null) {
+      return DisplayCommandFailed(
+        operationId: operationId,
+        driverGeneration: driverGeneration,
+        error: operationError,
+      );
+    }
     if (underlying is VmEffectTimeoutException) {
       return EffectExecutionFailed(
         effectType: effect.runtimeType.toString(),

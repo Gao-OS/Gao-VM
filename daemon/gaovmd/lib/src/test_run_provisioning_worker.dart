@@ -7,6 +7,7 @@ import 'sqlite_database.dart';
 import 'test_run_repository.dart';
 import 'vm_application_service.dart';
 import 'vm_create_intent.dart';
+import 'vm_repository.dart';
 import 'vm_provisioning_plan.dart';
 
 /// A per-run dispatch result. An error is an infrastructure failure, not a
@@ -209,6 +210,8 @@ final class TestRunProvisioningWorker {
           [id.value, accepted.resourceId.value, accepted.operationId.value],
         );
         return run;
+      } on VmCatalogLimitExceeded {
+        return _failure(runs, run, ErrorCode.hostResourceExhausted);
       } on FormatException {
         return _failure(runs, run, ErrorCode.vmSpecInvalid);
       } on ArgumentError {

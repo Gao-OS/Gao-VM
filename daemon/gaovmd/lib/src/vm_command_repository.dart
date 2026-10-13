@@ -8,7 +8,23 @@ import 'sqlite_database.dart';
 
 const vmCommandOutboxTopic = 'vm.commands';
 
-enum VmCommandAction { create, patch, start, stop, restart, kill, delete }
+enum VmCommandAction {
+  create,
+  patch,
+  start,
+  stop,
+  restart,
+  kill,
+  delete,
+  openDisplay,
+  closeDisplay;
+
+  String get operationType => switch (this) {
+    openDisplay => 'vm.open_display',
+    closeDisplay => 'vm.close_display',
+    _ => 'vm.$name',
+  };
+}
 
 final class VmCommandRecord {
   const VmCommandRecord._({

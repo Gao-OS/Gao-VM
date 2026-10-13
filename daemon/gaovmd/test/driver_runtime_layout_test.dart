@@ -1,5 +1,9 @@
+import 'dart:convert';
+import 'dart:ffi' as ffi;
 import 'dart:io';
+import 'dart:typed_data';
 
+import 'package:ffi/ffi.dart';
 import 'package:gaovm_models/gaovm_models.dart';
 import 'package:gaovmd/src/driver_runtime_layout.dart';
 import 'package:gaovmd/src/runtime_driver.dart';
@@ -17,6 +21,75 @@ void main() {
 
   tearDown(() async {
     if (await root.exists()) await root.delete(recursive: true);
+  });
+
+  test(
+    'cleanup accepts only the exact owned generation guest socket',
+    () async {
+      final layout = DriverRuntimeLayout('${root.path}/run');
+      final paths = await layout.create(_correlation);
+      expect(paths.guestSocketPath, '${paths.directory}/guest.sock');
+      _leaveClosedUnixSocket(paths.guestSocketPath);
+      expect(
+        await FileSystemEntity.type(paths.guestSocketPath, followLinks: false),
+        FileSystemEntityType.unixDomainSock,
+      );
+      await layout.remove(paths);
+      expect(await Directory(paths.directory).exists(), isFalse);
+      expect(await Directory(paths.directory).parent.exists(), isFalse);
+    },
+  );
+
+  test(
+    'guest socket-shaped files are quarantined without partial cleanup',
+    () async {
+      final layout = DriverRuntimeLayout('${root.path}/run');
+      final paths = await layout.create(_correlation);
+      await File(paths.metadataPath).writeAsString('{}');
+      await File(paths.guestSocketPath).writeAsString('preserve');
+      await expectLater(
+        layout.remove(paths),
+        throwsA(isA<FileSystemException>()),
+      );
+      final quarantine = '${paths.directory}.cleanup.${paths.cleanupToken}';
+      expect(await File('$quarantine/guest.sock').readAsString(), 'preserve');
+      expect(await File('$quarantine/metadata.json').readAsString(), '{}');
+    },
+  );
+
+  test('guest socket symlinks never authorize deleting their target', () async {
+    final layout = DriverRuntimeLayout('${root.path}/run');
+    final paths = await layout.create(_correlation);
+    final foreign = File('${root.path}/foreign');
+    await foreign.writeAsString('preserve');
+    await Link(paths.guestSocketPath).create(foreign.path);
+    await expectLater(
+      layout.remove(paths),
+      throwsA(isA<FileSystemException>()),
+    );
+    final quarantine = '${paths.directory}.cleanup.${paths.cleanupToken}';
+    expect(await Link('$quarantine/guest.sock').target(), foreign.path);
+    expect(await foreign.readAsString(), 'preserve');
+  });
+
+  test('unknown guest socket names preserve every recognized leaf', () async {
+    final layout = DriverRuntimeLayout('${root.path}/run');
+    final paths = await layout.create(_correlation);
+    _leaveClosedUnixSocket(paths.guestSocketPath);
+    _leaveClosedUnixSocket('${paths.directory}/guest-extra.sock');
+    await File(paths.metadataPath).writeAsString('{}');
+    await expectLater(
+      layout.remove(paths),
+      throwsA(isA<FileSystemException>()),
+    );
+    final quarantine = '${paths.directory}.cleanup.${paths.cleanupToken}';
+    for (final name in ['guest.sock', 'guest-extra.sock']) {
+      expect(
+        await FileSystemEntity.type('$quarantine/$name', followLinks: false),
+        FileSystemEntityType.unixDomainSock,
+      );
+    }
+    expect(await File('$quarantine/metadata.json').readAsString(), '{}');
   });
 
   test('cleanup preserves unknown generation content for recovery', () async {
@@ -242,3 +315,46 @@ final _correlation = DriverCorrelation(
   driverGeneration: 1,
   operationId: OperationId('op_01J00000000000000000000000'),
 );
+
+// Dart's ServerSocket.close unlinks its path. This real POSIX fixture closes
+// the native descriptor while leaving the same residue as an exited driver.
+void _leaveClosedUnixSocket(String path) {
+  final libc = ffi.DynamicLibrary.process();
+  final socket = libc
+      .lookupFunction<
+        ffi.Int32 Function(ffi.Int32, ffi.Int32, ffi.Int32),
+        int Function(int, int, int)
+      >('socket');
+  final bind = libc
+      .lookupFunction<
+        ffi.Int32 Function(ffi.Int32, ffi.Pointer<ffi.Void>, ffi.Uint32),
+        int Function(int, ffi.Pointer<ffi.Void>, int)
+      >('bind');
+  final close = libc
+      .lookupFunction<ffi.Int32 Function(ffi.Int32), int Function(int)>(
+        'close',
+      );
+  final descriptor = socket(1, 1, 0); // AF_UNIX, SOCK_STREAM
+  if (descriptor < 0) throw FileSystemException('fixture socket failed', path);
+  final address = calloc<ffi.Uint8>(110);
+  try {
+    final bytes = utf8.encode(path);
+    if (bytes.length >= 104)
+      throw FileSystemException('fixture path too long', path);
+    final length = bytes.length + 3;
+    final buffer = address.asTypedList(110);
+    if (Platform.isMacOS) {
+      buffer[0] = length;
+      buffer[1] = 1;
+    } else {
+      ByteData.sublistView(buffer).setUint16(0, 1, Endian.host);
+    }
+    buffer.setRange(2, 2 + bytes.length, bytes);
+    if (bind(descriptor, address.cast(), length) != 0) {
+      throw FileSystemException('fixture bind failed', path);
+    }
+  } finally {
+    close(descriptor);
+    calloc.free(address);
+  }
+}

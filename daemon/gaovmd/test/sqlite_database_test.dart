@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'dart:io';
+
+import 'package:gaovm_models/gaovm_models.dart';
 import 'dart:isolate';
 
 import 'package:gaovmd/gaovmd.dart';
@@ -28,6 +30,21 @@ Database _legacyDatabase(String path) {
   return database;
 }
 
+// Reduced historical fixtures must retain the runtime table required by the
+// additive display migration. Do not weaken production migration validation.
+void _finishLegacyDatabase(Database database, int version) {
+  final runtime = database.select(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'vm_runtime'",
+  );
+  if (runtime.isEmpty) {
+    database.execute(
+      'CREATE TABLE vm_runtime(vm_id TEXT PRIMARY KEY, active_operation_id TEXT)',
+    );
+  }
+  database.userVersion = version;
+  database.dispose();
+}
+
 void main() {
   late Directory temporaryDirectory;
   late String databasePath;
@@ -48,7 +65,7 @@ void main() {
   test('bootstrap configures SQLite and applies the schema once', () async {
     var database = await GaoVmDatabase.open(databasePath);
 
-    expect(database.schemaVersion, 16);
+    expect(database.schemaVersion, 21);
     expect(database.appliedMigrationVersions, [
       1,
       2,
@@ -66,6 +83,11 @@ void main() {
       14,
       15,
       16,
+      17,
+      18,
+      19,
+      20,
+      21,
     ]);
     expect(database.journalMode, 'wal');
     expect(database.foreignKeysEnabled, isTrue);
@@ -93,7 +115,7 @@ void main() {
     database.close();
 
     database = await GaoVmDatabase.open(databasePath);
-    expect(database.schemaVersion, 16);
+    expect(database.schemaVersion, 21);
     expect(database.appliedMigrationVersions, [
       1,
       2,
@@ -111,9 +133,95 @@ void main() {
       14,
       15,
       16,
+      17,
+      18,
+      19,
+      20,
+      21,
     ]);
     database.close();
   });
+
+  test(
+    'v17 adds guest execution ownership without changing a v16 catalog or pending work',
+    () async {
+      var database = await GaoVmDatabase.open(databasePath);
+      final vm = await SqliteVmRepository(database).create(
+        name: 'legacy-guest',
+        spec: VmSpec(
+          cpu: 2,
+          memoryBytes: 268435456,
+          boot: EfiBoot(),
+          disks: [
+            VmDisk(
+              id: 'root',
+              source: ExternalDiskSource('/private/tmp/root.img'),
+              writable: true,
+            ),
+          ],
+          networks: [DisconnectedNetwork(id: 'net0')],
+          graphics: GraphicsConfig(enabled: false),
+          serial: const SerialConfig(enabled: true, capture: true),
+          guestAgent: GuestAgentConfig(enabled: true, requiredForReady: false),
+          restartPolicy: RestartPolicy.never,
+        ),
+      );
+      final operation = await SqliteOperationRepository(database).create(
+        type: 'vm.start',
+        resourceType: ResourceType.virtualMachine,
+        resourceId: vm.metadata.id,
+        requestId: RequestId.generate(),
+        cancellable: true,
+        request: JsonObjectValue.empty,
+      );
+      final events = await SqliteEventRepository(database).list();
+      final outbox = await SqliteEventRepository(
+        database,
+      ).readUnpublishedOutbox();
+      database.close();
+      final legacy = sqlite3.open(databasePath);
+      legacy.execute('ALTER TABLE vm_runtime DROP COLUMN driver_operation_id');
+      legacy.execute('ALTER TABLE vm_runtime DROP COLUMN display_state');
+      legacy.execute('ALTER TABLE vm_runtime DROP COLUMN display_observed_at');
+      legacy.execute('DELETE FROM schema_migrations WHERE version = 21');
+      legacy.execute('DROP TRIGGER test_run_system_info_immutable');
+      legacy.execute(
+        'ALTER TABLE test_run_collection DROP COLUMN system_info_json',
+      );
+      legacy.execute('DROP TABLE test_run_step_artifacts');
+      legacy.execute('DROP TABLE guest_diagnostic_attempts');
+      legacy.execute('DROP INDEX guest_collection_receipt_operation_idx');
+      legacy.execute('DELETE FROM schema_migrations WHERE version = 20');
+      legacy.execute('DROP TABLE test_run_step_execs');
+      legacy.execute('DELETE FROM schema_migrations WHERE version = 19');
+      legacy.execute('DROP TABLE guest_artifact_mappings');
+      legacy.execute('DROP TABLE guest_artifact_receipts');
+      legacy.execute('DELETE FROM schema_migrations WHERE version = 18');
+      legacy.execute('DROP TABLE guest_exec_cancellations');
+      legacy.execute('DROP TABLE guest_exec_jobs');
+      legacy.execute('DELETE FROM schema_migrations WHERE version = 17');
+      legacy.userVersion = 16;
+      legacy.dispose();
+      database = await GaoVmDatabase.open(databasePath);
+      addTearDown(() => database.close());
+      expect(database.schemaVersion, 21);
+      expect(database.tableNames, containsAll(coreTableNames));
+      expect(await SqliteVmRepository(database).get(vm.metadata.id), vm);
+      expect(
+        await SqliteOperationRepository(database).get(operation.id),
+        operation,
+      );
+      expect(await SqliteEventRepository(database).list(), events);
+      final restored = await SqliteEventRepository(
+        database,
+      ).readUnpublishedOutbox();
+      expect(restored.map((row) => row.id), outbox.map((row) => row.id));
+      expect(
+        restored.map((row) => row.payload),
+        outbox.map((row) => row.payload),
+      );
+    },
+  );
 
   test(
     'v9 preserves v8 TestRun inputs and steps with safe recovery defaults',
@@ -153,11 +261,10 @@ void main() {
       final step = Map<String, Object?>.from(
         legacy.select('SELECT * FROM test_steps').single,
       );
-      legacy.userVersion = 8;
-      legacy.dispose();
+      _finishLegacyDatabase(legacy, 8);
       var database = await GaoVmDatabase.open(databasePath);
       addTearDown(() => database.close());
-      expect(database.schemaVersion, 16);
+      expect(database.schemaVersion, 21);
       await database.read((connection) {
         final row = connection.select('SELECT * FROM test_runs').single;
         for (final entry in original.entries) {
@@ -206,6 +313,11 @@ void main() {
         14,
         15,
         16,
+        17,
+        18,
+        19,
+        20,
+        21,
       ]);
       await database.read((connection) {
         expect(connection.select('SELECT * FROM test_steps').single, step);
@@ -228,11 +340,10 @@ void main() {
         INSERT INTO operations VALUES('operation');
       ''');
       _createLegacyTestRunTable(legacy);
-      legacy.userVersion = 4;
-      legacy.dispose();
+      _finishLegacyDatabase(legacy, 4);
       final database = await GaoVmDatabase.open(databasePath);
       try {
-        expect(database.schemaVersion, 16);
+        expect(database.schemaVersion, 21);
         expect(database.appliedMigrationVersions, [
           1,
           2,
@@ -250,6 +361,11 @@ void main() {
           14,
           15,
           16,
+          17,
+          18,
+          19,
+          20,
+          21,
         ]);
         await database.read((db) {
           expect(db.select('SELECT * FROM vm_provisioning'), isEmpty);
@@ -297,11 +413,10 @@ void main() {
       INSERT INTO vm_provisioning VALUES('vm', 'op', 7, '{"pinned":true}', 0, 'old');
     ''');
       _createLegacyTestRunTable(legacy);
-      legacy.userVersion = 5;
-      legacy.dispose();
+      _finishLegacyDatabase(legacy, 5);
       final database = await GaoVmDatabase.open(databasePath);
       try {
-        expect(database.schemaVersion, 16);
+        expect(database.schemaVersion, 21);
         await database.read((db) {
           final job = db.select('SELECT * FROM vm_provisioning').single;
           expect(job['plan_json'], '{"pinned":true}');
@@ -367,12 +482,11 @@ void main() {
         Map<String, Object?>.from(row),
     ];
     _createLegacyTestRunTable(legacy);
-    legacy.userVersion = 6;
-    legacy.dispose();
+    _finishLegacyDatabase(legacy, 6);
 
     var database = await GaoVmDatabase.open(databasePath);
     try {
-      expect(database.schemaVersion, 16);
+      expect(database.schemaVersion, 21);
       expect(database.appliedMigrationVersions, [
         1,
         2,
@@ -390,6 +504,11 @@ void main() {
         14,
         15,
         16,
+        17,
+        18,
+        19,
+        20,
+        21,
       ]);
       await database.read((db) {
         expect(
@@ -458,6 +577,11 @@ void main() {
         14,
         15,
         16,
+        17,
+        18,
+        19,
+        20,
+        21,
       ]);
       await database.read((db) {
         expect(
@@ -494,7 +618,7 @@ void main() {
       legacy.dispose();
       final database = await GaoVmDatabase.open(databasePath);
       try {
-        expect(database.schemaVersion, 16);
+        expect(database.schemaVersion, 21);
         await database.read((db) {
           final row = db.select('SELECT * FROM vm_runtime').single;
           expect(row['applied_intent_revision'], 7);
@@ -525,7 +649,7 @@ void main() {
       legacy.dispose();
       final database = await GaoVmDatabase.open(databasePath);
       try {
-        expect(database.schemaVersion, 16);
+        expect(database.schemaVersion, 21);
         expect(database.appliedMigrationVersions, [
           1,
           2,
@@ -543,6 +667,11 @@ void main() {
           14,
           15,
           16,
+          17,
+          18,
+          19,
+          20,
+          21,
         ]);
         await database.read((db) {
           final vm = db.select('SELECT * FROM vms').single;
@@ -618,7 +747,7 @@ void main() {
 
       final database = await GaoVmDatabase.open(databasePath);
 
-      expect(database.schemaVersion, 16);
+      expect(database.schemaVersion, 21);
       expect(database.appliedMigrationVersions, [
         1,
         2,
@@ -636,6 +765,11 @@ void main() {
         14,
         15,
         16,
+        17,
+        18,
+        19,
+        20,
+        21,
       ]);
       await database.read((connection) {
         expect(
@@ -870,7 +1004,7 @@ void main() {
     ]);
 
     for (final database in databases) {
-      expect(database.schemaVersion, 16);
+      expect(database.schemaVersion, 21);
       expect(database.appliedMigrationVersions, [
         1,
         2,
@@ -888,6 +1022,11 @@ void main() {
         14,
         15,
         16,
+        17,
+        18,
+        19,
+        20,
+        21,
       ]);
       database.close();
     }
@@ -908,7 +1047,7 @@ void main() {
     ]);
 
     for (final result in results) {
-      expect(result.schemaVersion, 16);
+      expect(result.schemaVersion, 21);
       expect(result.migrations, [
         1,
         2,
@@ -926,6 +1065,11 @@ void main() {
         14,
         15,
         16,
+        17,
+        18,
+        19,
+        20,
+        21,
       ]);
     }
   });

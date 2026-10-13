@@ -86,6 +86,37 @@ void main() {
   }
 
   test(
+    'closing a stopped VM display completes durably without a runtime action',
+    () async {
+      final accepted = await accept(VmLifecycleAction.closeDisplay);
+      final claimed = await claim();
+      expect(await adopt(claimed), VmIntentAdoptionDisposition.adopted);
+      await controller.waitUntilIdle();
+      final operation = (await operations.get(accepted.operationId))!;
+      expect(operation.state, OperationState.succeeded);
+      expect(operation.result?.toJson()['state'], 'closed');
+      expect(controller.state.desiredState, DesiredState.stopped);
+      expect(controller.state.phase, VmPhase.stopped);
+      expect(external.effects, isEmpty);
+      expect(await commands.acknowledge(claimed), isTrue);
+      final restored = await SqliteVmIntentRecoveryRepository(
+        database,
+      ).restore(vm.metadata.id);
+      expect(
+        restored!.executionState.currentOperation!.state,
+        OperationState.succeeded,
+      );
+      expect(
+        await SqliteVmIntentAdoption.isDurablyAdopted(
+          database: database,
+          record: claimed.record,
+        ),
+        isTrue,
+      );
+    },
+  );
+
+  test(
     'durable adoption proof is read-only for pending, adopted and tombstoned VMs',
     () async {
       await accept(VmLifecycleAction.stop);

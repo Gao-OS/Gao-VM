@@ -37,6 +37,7 @@ void main() {
           idempotencyRetention: const Duration(days: 30),
         ),
         waiter: _OutsideVmWait(),
+        display: SqliteVmDisplayRepository(database),
       ),
       operations: OperationApplicationService(
         repository: SqliteOperationRepository(database),
@@ -93,7 +94,7 @@ void main() {
   }
 
   String path(VmLifecycleAction action, [VmId? id]) =>
-      '/v1/vms/${(id ?? vm.metadata.id).value}${action == VmLifecycleAction.delete ? '' : '/actions/${action.name}'}';
+      '/v1/vms/${(id ?? vm.metadata.id).value}${action == VmLifecycleAction.delete ? '' : '/actions/${action.endpoint}'}';
   String method(VmLifecycleAction action) =>
       action == VmLifecycleAction.delete ? 'DELETE' : 'POST';
 
@@ -119,6 +120,42 @@ void main() {
     await directory.delete(recursive: true);
   });
 
+  test(
+    'HTTP open-display accepts a durable operation without changing desired state',
+    () async {
+      final accepted = await request(
+        'POST',
+        '/v1/vms/${vm.metadata.id.value}/actions/open-display',
+        body: '{}',
+        key: 'display-once',
+      );
+      expect(accepted.status, 202);
+      expect(accepted.json['state'], 'pending');
+      final operation = await request('GET', accepted.location!);
+      expect(operation.json['type'], 'vm.open_display');
+      expect(operation.json['state'], 'pending');
+      final current = await SqliteVmRepository(database).get(vm.metadata.id);
+      expect(current!.status.desiredState, DesiredState.stopped);
+      expect(current.status.phase, VmPhase.stopped);
+      expect(runtime.effects, isEmpty);
+      final replay = await request(
+        'POST',
+        '/v1/vms/${vm.metadata.id.value}/actions/open-display',
+        body: '{}',
+        key: 'display-once',
+      );
+      expect(replay.json, accepted.json);
+      expect(await SqliteOperationRepository(database).list(), hasLength(1));
+      final claims = await SqliteVmCommandRepository(
+        database,
+      ).claim(owner: 'display-evidence', lease: const Duration(seconds: 30));
+      expect(
+        claims.single.record.operationId.value,
+        accepted.json['operation_id'],
+      );
+    },
+  );
+
   for (final action in VmLifecycleAction.values) {
     test(
       'HTTP ${action.name} returns durable pending acceptance without runtime dispatch',
@@ -140,7 +177,7 @@ void main() {
         final operation = await request('GET', accepted.location!);
         expect(operation.status, 200);
         expect(operation.json['state'], 'pending');
-        expect(operation.json['type'], 'vm.${action.name}');
+        expect(operation.json['type'], action.operationType);
         final replay = await request(
           method(action),
           path(action),
@@ -162,6 +199,25 @@ void main() {
       },
     );
   }
+
+  test(
+    'HTTP display status is a committed observation without runtime dispatch',
+    () async {
+      final status = await request(
+        'GET',
+        '/v1/vms/${vm.metadata.id.value}/display',
+      );
+      expect(status.status, 200);
+      expect(status.json, {
+        'vm_id': vm.metadata.id.value,
+        'driver_generation': null,
+        'state': 'unknown',
+        'observed_at': null,
+      });
+      expect(runtime.effects, isEmpty);
+      expect(await SqliteOperationRepository(database).list(), isEmpty);
+    },
+  );
 
   test(
     'HTTP delete retry replays after tombstone and cold registry restart',

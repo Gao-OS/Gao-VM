@@ -63,6 +63,7 @@ export 'src/sqlite_vm_patch_acceptor.dart';
 export 'src/sqlite_vm_runtime_assets.dart';
 export 'src/sqlite_vm_state_effect_adapter.dart';
 export 'src/vm_application_service.dart';
+export 'src/vm_display_repository.dart';
 export 'src/vm_bundle_manifest.dart';
 export 'src/vm_bundle_store.dart';
 export 'src/vm_command_dispatcher.dart';

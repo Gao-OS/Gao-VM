@@ -299,14 +299,24 @@ void main() {
           final events = <Map<String, Object?>>[];
           final fixturePath =
               '${Directory.current.path}/test/fixtures/fake_driver.dart';
+          // Each retry uses the same compiled fixture and real RPC handshake.
+          final driver = File('${tempDir.path}/fake-driver');
+          final compilation = await Process.run(Platform.resolvedExecutable, [
+            'compile',
+            'exe',
+            fixturePath,
+            '-o',
+            driver.path,
+          ]);
+          expect(
+            compilation.exitCode,
+            0,
+            reason: '${compilation.stdout}\n${compilation.stderr}',
+          );
           final failStartFlag = File('${tempDir.path}/fail-vm-start');
           final supervisor = DriverSupervisor(
-            driverBinary: Platform.resolvedExecutable,
-            driverArguments: [
-              fixturePath,
-              '--fail-vm-start-when',
-              failStartFlag.path,
-            ],
+            driverBinary: driver.path,
+            driverArguments: ['--fail-vm-start-when', failStartFlag.path],
             stateDir: tempDir.path,
             loadVmConfig: () async => <String, Object?>{'version': 1},
             restartDelay: (_) => const Duration(milliseconds: 200),
@@ -346,9 +356,15 @@ void main() {
             4,
             5,
           ], reason: 'events=$events status=${supervisor.status()}');
-          final permanentFailure = events.singleWhere(
-            (event) => event['type'] == 'driver.permanent_failure',
+          final permanentFailures = events
+              .where((event) => event['type'] == 'driver.permanent_failure')
+              .toList();
+          expect(
+            permanentFailures,
+            hasLength(1),
+            reason: 'events=$events status=${supervisor.status()}',
           );
+          final permanentFailure = permanentFailures.single;
           expect(permanentFailure['attempts'], 5);
           expect(supervisor.status()['desired'], 'stopped');
         },

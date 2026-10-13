@@ -106,6 +106,53 @@ void main() {
   );
 
   test(
+    'Unix HTTP lists current retention and downloads the original sealed bytes',
+    () async {
+      final vm = await SqliteVmRepository(
+        database,
+      ).create(name: 'retention-update', spec: _vmSpec());
+      final bytes = [0, 255, 10, 13, 128, 1];
+      final artifact = await artifacts.publish(
+        bytes: Stream.value(bytes),
+        kind: ArtifactKind.stdout,
+        contentType: 'application/octet-stream',
+        maxBytes: 16,
+        vmId: vm.metadata.id,
+        retentionUntil: DateTime.utc(2026, 11, 7),
+      );
+      final revisedRetention = DateTime.utc(2026, 11, 14);
+      await database.transaction(
+        (db) => db.execute(
+          'UPDATE artifacts SET retention_until = ? WHERE id = ?',
+          [revisedRetention.toIso8601String(), artifact.id.value],
+        ),
+      );
+
+      final list = await getJson('/v1/vms/${vm.metadata.id.value}/artifacts');
+      expect(list.status, 200);
+      expect((list.body['items'] as List).map(Artifact.fromJson), [
+        Artifact.fromJson({
+          ...artifact.toJson(),
+          'retention_until': revisedRetention.toIso8601String(),
+        }),
+      ]);
+      final request = await client.getUrl(
+        Uri.parse('http://localhost${artifact.downloadUrl}'),
+      );
+      final response = await request.close().timeout(
+        const Duration(seconds: 5),
+      );
+      expect(response.statusCode, 200);
+      expect(response.contentLength, bytes.length);
+      expect(
+        response.headers.value('digest'),
+        'sha-256=${base64.encode(sha256.convert(bytes).bytes)}',
+      );
+      expect(await response.expand((chunk) => chunk).toList(), bytes);
+    },
+  );
+
+  test(
     'VM and TestRun lists have isolated stable pages when timestamps tie',
     () async {
       final vms = SqliteVmRepository(database);

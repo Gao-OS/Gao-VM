@@ -254,6 +254,7 @@ final class FakeRuntimeDriverSession implements RuntimeDriverSession {
   final DriverCapabilities capabilities;
   late final FakeRuntimeDriverControl control;
   RuntimeDriverState _state = RuntimeDriverState.stopped;
+  RuntimeDisplayState _displayState = RuntimeDisplayState.closed;
   DriverCapabilities? _acceptedCapabilities;
   bool _configured = false;
   bool _heartbeatHung = false;
@@ -324,15 +325,41 @@ final class FakeRuntimeDriverSession implements RuntimeDriverSession {
       RuntimeKillCommand() => _kill(command),
       RuntimeStatusCommand() ||
       RuntimePingCommand() ||
-      DisplayStatusCommand() ||
       ConsoleStatusCommand() ||
       GuestStatusCommand() => const RuntimeCommandResult(
         status: RuntimeCommandStatus.succeeded,
       ),
-      DisplayOpenCommand() || DisplayCloseCommand() =>
-        const RuntimeCommandResult(status: RuntimeCommandStatus.succeeded),
+      DisplayStatusCommand() => _displayResult(),
+      DisplayOpenCommand() => _display(command, RuntimeDisplayState.open),
+      DisplayCloseCommand() => _display(command, RuntimeDisplayState.closed),
     };
   }
+
+  RuntimeCommandResult _display(
+    RuntimeCommand command,
+    RuntimeDisplayState target,
+  ) {
+    if (target == RuntimeDisplayState.open &&
+        _state != RuntimeDriverState.running) {
+      throw _invalidState('display requires a running runtime');
+    }
+    if (_displayState != target) {
+      _displayState = target;
+      _emit(
+        DisplayStateChanged(
+          correlation: command.correlation,
+          occurredAt: _scheduler.now,
+          state: target,
+        ),
+      );
+    }
+    return _displayResult();
+  }
+
+  RuntimeCommandResult _displayResult() => RuntimeCommandResult(
+    status: RuntimeCommandStatus.succeeded,
+    data: JsonObjectValue.fromJson({'display_state': _displayState.name}),
+  );
 
   RuntimeCommandResult _configure(RuntimeConfigureCommand command) {
     if (_configureFailures.isNotEmpty) throw _configureFailures.removeFirst();

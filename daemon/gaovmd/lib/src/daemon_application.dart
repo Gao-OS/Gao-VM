@@ -5,6 +5,7 @@ import 'package:gaovm_models/gaovm_models.dart';
 
 import 'artifact_api_handlers.dart';
 import 'artifact_application_service.dart';
+import 'artifact_retention_loop.dart';
 import 'daemon_ownership.dart';
 import 'driver_process_manager.dart';
 import 'driver_runtime_discovery.dart';
@@ -12,6 +13,11 @@ import 'driver_runtime_layout.dart';
 import 'driver_startup_recovery.dart';
 import 'event_api_handlers.dart';
 import 'event_repository.dart';
+import 'guest_exec_application_service.dart';
+import 'guest_exec_dispatch_loop.dart';
+import 'guest_exec_worker.dart';
+import 'guest_session_reconcile_loop.dart';
+import 'host_guest_artifacts.dart';
 import 'host_lease_repository.dart';
 import 'host_scheduler.dart';
 import 'host_scheduler_models.dart';
@@ -55,9 +61,12 @@ import 'test_run_provisioning_dispatch_loop.dart';
 import 'test_run_provisioning_worker.dart';
 import 'test_run_readiness_dispatch_loop.dart';
 import 'test_run_readiness_worker.dart';
+import 'test_run_step_dispatch_loop.dart';
+import 'test_run_step_worker.dart';
 import 'test_run_vm_start_dispatch_loop.dart';
 import 'test_run_vm_start_worker.dart';
 import 'vm_application_service.dart';
+import 'vm_display_repository.dart';
 import 'vm_bundle_store.dart';
 import 'vm_command_dispatch_loop.dart';
 import 'vm_command_dispatcher.dart';
@@ -169,7 +178,7 @@ final class DaemonApplication {
         );
       }
       await server.prepare();
-      await DriverStartupRecovery(
+      final startupRecovery = DriverStartupRecovery(
         ownership: ownership,
         layout: layout,
         discovery: DriverRuntimeDiscovery(
@@ -177,7 +186,8 @@ final class DaemonApplication {
           resolveBinding: recoveryBinding,
         ),
         readInventory: inventory.snapshot,
-      ).recover();
+      );
+      await startupRecovery.recover();
       await LegacyVmMigration(
         database: database,
         state: state,
@@ -287,6 +297,10 @@ final class DaemonApplication {
       }
 
       final workerOwner = RequestId.generate().value;
+      final artifactRetention = ArtifactRetentionLoop(
+        artifacts: artifactService,
+        onError: (error, _) => report('artifact_retention', error),
+      );
       final imageWork = ImageWorkDispatchLoop(
         images: imageService,
         onError: (error, _) => report('images', error),
@@ -337,7 +351,49 @@ final class DaemonApplication {
         onVmError: (vm, error, _) => report('vm_reconcile', error, vm: vm),
         onError: (error, _) => report('vm_reconcile', error),
       );
+      final guestReconcile = GuestSessionReconcileLoop(
+        drivers: drivers,
+        onError: (correlation, error, _) => report(
+          'guest_sessions',
+          error,
+          vm: correlation.vmId,
+          driverGeneration: correlation.driverGeneration,
+        ),
+      );
       const retention = Duration(days: 1);
+      final guestExecService = GuestExecApplicationService(
+        database: database,
+        resolveController: registry.get,
+        idempotencyRetention: retention,
+      );
+      final guestArtifactBudget = GuestArtifactBudget(
+        maxTransfers: maxRunningVms * 2,
+        maxReservedBytes: 256 * 1024 * 1024,
+      );
+      final guestExecWorker = GuestExecWorker(
+        database: database,
+        acceptance: guestExecService,
+        artifacts: artifactService,
+        budget: guestArtifactBudget,
+        resolveConnection: drivers.readyGuestConnection,
+        maxInFlight: maxRunningVms,
+      );
+      final guestExec = GuestExecDispatchLoop(
+        worker: guestExecWorker,
+        onComplete: (operation, vm, generation) {
+          if (operation.error case final error?)
+            report(
+              'guest_exec',
+              error,
+              vm: vm,
+              operation: operation.id,
+              request: operation.requestId,
+              driverGeneration: generation,
+            );
+        },
+        onError: (operation, error, _) =>
+            report('guest_exec', error, operation: operation),
+      );
       final feed = SqliteDurableEventFeed(database);
       final testRuns = TestRunApplicationService(
         database: database,
@@ -397,12 +453,23 @@ final class DaemonApplication {
         },
         onError: (error, _) => report('test_run_readiness', error),
       );
+      final testRunStepsWorker = TestRunStepWorker(
+        database: database,
+        guestExec: guestExecService,
+      );
+      final testRunSteps = TestRunStepDispatchLoop(
+        worker: testRunStepsWorker,
+        onError: (error, _) => report('test_run_steps', error),
+      );
+      final testRunCollectionWorker = TestRunCollectionWorker(
+        database: database,
+        bundles: bundles,
+        artifacts: artifactService,
+        guestBudget: guestArtifactBudget,
+        resolveGuestConnection: drivers.readyGuestConnection,
+      );
       final testRunCollection = TestRunCollectionDispatchLoop(
-        worker: TestRunCollectionWorker(
-          database: database,
-          bundles: bundles,
-          artifacts: artifactService,
-        ),
+        worker: testRunCollectionWorker,
         onDispatch: (results) {
           for (final result in results) {
             if (result.error case final error?) {
@@ -457,6 +524,7 @@ final class DaemonApplication {
             idempotencyRetention: retention,
           ),
           waiter: SqliteVmConditionWaiter(repository: catalog, events: feed),
+          display: SqliteVmDisplayRepository(database),
         ),
         operations: OperationApplicationService(
           repository: operations,
@@ -464,6 +532,7 @@ final class DaemonApplication {
             operations: operations,
             images: imageService,
             testRuns: testRuns,
+            guestExec: guestExecService,
             provisioning: SqliteVmProvisioningCancellation(
               database: database,
               idempotencyRetention: retention,
@@ -471,6 +540,7 @@ final class DaemonApplication {
           ),
           waiter: SqliteOperationWaiter(operations: operations, events: feed),
         ),
+        guestExec: guestExecService,
       ).register(router);
       ImageApiHandlers(images: imageService).register(router);
       ArtifactApiHandlers(artifacts: artifactService).register(router);
@@ -505,12 +575,16 @@ final class DaemonApplication {
         // cancellation can unblock delivery already in flight. Drain all of
         // them before closing their shared catalog and filesystem roots.
         await Future.wait([
+          artifactRetention.close(),
+          guestReconcile.close(),
+          guestExec.close(),
           doctor.close(),
           commands.close(),
           provisioning.close(),
           testRunProvisioning.close(),
           testRunVmStart.close(),
           testRunReadiness.close(),
+          testRunSteps.close(),
           testRunCollection.close(),
           testRunCleanup.close(),
           imageWork.close(),
@@ -530,16 +604,38 @@ final class DaemonApplication {
       // No reservation, controller, worker or public listener may activate
       // before previous-owner teardown and a complete driver census succeed.
       await scheduler.recover();
+      await testRunCollectionWorker.recoverInterrupted(
+        retireOriginalOwners: () => testRunStepsWorker.recoverInterrupted(
+          retireOriginalOwners: () => guestExecWorker.recoverInterrupted(
+            retireOriginalOwners: () async {
+              await startupRecovery.recover();
+              await ownership!.verify();
+              // A fresh complete census is required while no current runtime has
+              // activated. Missing worker-cache entries never establish retirement.
+              if ((await inventory.snapshot()).countUnmanaged({}) != 0) {
+                throw StateError(
+                  'guest recovery still has live original drivers',
+                );
+              }
+              await ownership.verify();
+            },
+          ),
+        ),
+      );
       await ownership.verify();
+      artifactRetention.start();
+      guestExec.start();
       commands.start();
       provisioning.start();
       testRunProvisioning.start();
       testRunVmStart.start();
       testRunReadiness.start();
+      testRunSteps.start();
       testRunCollection.start();
       testRunCleanup.start();
       imageWork.start();
       reconcile.start();
+      guestReconcile.start();
       health.ready = true;
       await server.start();
       return application;
@@ -620,11 +716,13 @@ final class _DaemonOperationCancellation implements OperationMutationAcceptor {
     required this.operations,
     required this.images,
     required this.testRuns,
+    required this.guestExec,
     required this.provisioning,
   });
   final OperationRepository operations;
   final ImageApplicationService images;
   final TestRunApplicationService testRuns;
+  final GuestExecApplicationService guestExec;
   final OperationMutationAcceptor provisioning;
   @override
   Future<OperationAcceptance> cancel(OperationCancelCommand command) async {
@@ -633,6 +731,8 @@ final class _DaemonOperationCancellation implements OperationMutationAcceptor {
         ? images.cancel(command)
         : target?.type == 'test.run'
         ? testRuns.cancel(command)
+        : target?.type == 'guest.exec'
+        ? guestExec.cancel(command)
         : provisioning.cancel(command);
   }
 }

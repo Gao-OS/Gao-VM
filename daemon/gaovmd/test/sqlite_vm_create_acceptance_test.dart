@@ -6,6 +6,7 @@ import 'package:gaovmd/src/event_repository.dart';
 import 'package:gaovmd/src/image_manifest.dart';
 import 'package:gaovmd/src/image_repository.dart';
 import 'package:gaovmd/src/idempotency_repository.dart';
+import 'package:gaovmd/src/operation_application_service.dart';
 import 'package:gaovmd/src/operation_repository.dart';
 import 'package:gaovmd/src/sqlite_database.dart';
 import 'package:gaovmd/src/sqlite_vm_create_acceptance.dart';
@@ -77,6 +78,85 @@ void main() {
     database: database,
     idempotencyRetention: const Duration(days: 30),
   );
+
+  test(
+    'a full 128-VM catalog rejects creation without partial acceptance',
+    () async {
+      final repository = SqliteVmRepository(database);
+      for (var index = 0; index < 128; index++) {
+        await repository.create(name: 'defined-$index', spec: spec);
+      }
+      final before = await SqliteEventRepository(database).list();
+      await expectLater(
+        acceptor().accept(command()),
+        throwsA(
+          predicate<Object>(
+            (error) => error.toString().contains('VM catalog limit reached'),
+          ),
+        ),
+      );
+      expect(await repository.list(), hasLength(128));
+      expect(await SqliteOperationRepository(database).list(), isEmpty);
+      expect(await SqliteEventRepository(database).list(), before);
+    },
+  );
+
+  test(
+    'concurrent creates share the last slot and full-catalog retries replay',
+    () async {
+      final repository = SqliteVmRepository(database);
+      for (var index = 0; index < 127; index++) {
+        await repository.create(name: 'defined-$index', spec: spec);
+      }
+      final accepted = <OperationAcceptance>[];
+      final rejected = <Object>[];
+      await Future.wait([
+        for (var index = 0; index < 4; index++)
+          acceptor()
+              .accept(command(name: 'candidate-$index', key: 'key-$index'))
+              .then<void>(
+                accepted.add,
+                onError: (Object error) => rejected.add(error),
+              ),
+      ]);
+      expect(accepted, hasLength(1));
+      expect(rejected, everyElement(isA<VmCatalogLimitExceeded>()));
+      expect(rejected, hasLength(3));
+      final winner = (await SqliteOperationRepository(
+        database,
+      ).get(accepted.single.operationId))!;
+      final vm = (await repository.get(accepted.single.resourceId as VmId))!;
+      final retry = await acceptor().accept(
+        command(name: vm.metadata.name, key: winner.idempotencyKey),
+      );
+      expect(retry.toJson(), accepted.single.toJson());
+      expect(await repository.list(), hasLength(128));
+      expect(await SqliteOperationRepository(database).list(), hasLength(1));
+    },
+  );
+
+  test('only a committed tombstone frees a catalog slot', () async {
+    final repository = SqliteVmRepository(database);
+    final victim = await repository.create(name: 'victim', spec: spec);
+    for (var index = 1; index < 128; index++) {
+      await repository.create(name: 'defined-$index', spec: spec);
+    }
+    final deleting = await repository.markDeleting(
+      victim.metadata.id,
+      expectedRevision: 1,
+    );
+    await expectLater(
+      acceptor().accept(command()),
+      throwsA(isA<VmCatalogLimitExceeded>()),
+    );
+    await repository.tombstone(
+      victim.metadata.id,
+      expectedRevision: deleting.metadata.revision,
+    );
+    expect((await acceptor().accept(command())).state, OperationState.pending);
+    expect(await repository.list(), hasLength(128));
+    expect(await repository.list(includeDeleted: true), hasLength(129));
+  });
 
   test(
     'accepted create durably pins a pending job without provisioning IO',

@@ -28,7 +28,7 @@ final class SqliteVmLifecycleAcceptance
   static String scopeFor(VmLifecycleCommand command) =>
       command.action == VmLifecycleAction.delete
       ? 'DELETE /v1/vms/${command.vmId.value}'
-      : 'POST /v1/vms/${command.vmId.value}/actions/${command.action.name}';
+      : 'POST /v1/vms/${command.vmId.value}/actions/${command.action.endpoint}';
 
   static VmAcceptedIntent<OperationAcceptance> decodeResponse(
     VmLifecycleCommand command,

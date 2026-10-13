@@ -62,6 +62,9 @@ final class TestRunCollectionDispatchLoop {
     _closed = true;
     _timer?.cancel();
     _timer = null;
-    return _inFlight ?? Future<void>.value();
+    return Future.wait<void>([
+      _worker.close(),
+      if (_inFlight != null) _inFlight!,
+    ]);
   }
 }

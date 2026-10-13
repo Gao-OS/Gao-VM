@@ -2,18 +2,72 @@ import 'dart:convert';
 
 import 'package:gaovm_models/gaovm_models.dart';
 
+import 'event_repository.dart';
 import 'persistence_timestamp.dart';
 import 'sqlite_database.dart';
 import 'vm_controller_reducer.dart';
 import 'vm_effect_runner.dart';
 import 'vm_repository.dart';
 
-final class SqliteVmStateEffectAdapter implements VmStateEffectAdapter {
+final class SqliteVmStateEffectAdapter
+    implements VmStateEffectAdapter, VmGuestReadinessEffectAdapter {
   SqliteVmStateEffectAdapter(this._database, {DateTime Function()? now})
     : _now = now ?? DateTime.now;
 
   final GaoVmDatabase _database;
   final DateTime Function() _now;
+
+  @override
+  Future<void> persistGuestReadiness(
+    VmControllerState state,
+    bool ready, {
+    bool Function()? stillCurrent,
+  }) => _database.transaction((connection) async {
+    if (stillCurrent?.call() == false) throw const GuestObservationSuperseded();
+    if (state.phase != VmPhase.running ||
+        state.desiredState != DesiredState.running ||
+        state.deletionState != VmDeletionState.active ||
+        state.activeDriverGeneration == null)
+      return;
+    final rows = connection.select(
+      '''
+          SELECT r.guest_agent, s.spec_json
+          FROM vm_runtime r JOIN vms v ON v.id = r.vm_id
+          JOIN vm_specs s ON s.vm_id = r.vm_id AND s.generation = r.observed_generation
+          WHERE r.vm_id = ? AND r.driver_generation = ? AND r.phase = 'running'
+            AND r.observed_generation = ? AND r.applied_intent_revision = ?
+            AND r.desired_state = 'running' AND v.deleting_at IS NULL AND v.deleted_at IS NULL
+        ''',
+      [
+        state.vmId.value,
+        state.activeDriverGeneration,
+        state.activeSpecGeneration ?? state.observedGeneration,
+        state.appliedIntentRevision,
+      ],
+    );
+    if (rows.isEmpty) return;
+    final row = rows.single;
+    final spec = VmSpec.fromJson(
+      Map<String, Object?>.from(jsonDecode(row['spec_json'] as String) as Map),
+    );
+    if (!spec.guestAgent.enabled) return;
+    final next = ready ? GuestAgentState.ready : GuestAgentState.unavailable;
+    if (row['guest_agent'] == next.name) return;
+    connection.execute(
+      'UPDATE vm_runtime SET guest_agent = ? WHERE vm_id = ?',
+      [next.name, state.vmId.value],
+    );
+    await SqliteEventRepository(_database, now: _now).append(
+      type: ready ? 'vm.guest_agent_ready' : 'vm.guest_agent_unavailable',
+      resourceType: ResourceType.virtualMachine,
+      resourceId: state.vmId,
+      vmId: state.vmId,
+      payload: JsonObjectValue.fromJson({
+        'driver_generation': state.activeDriverGeneration,
+      }),
+    );
+    if (stillCurrent?.call() == false) throw const GuestObservationSuperseded();
+  });
 
   @override
   Future<void> persistVm(VmControllerState state) => _database.transaction((
@@ -76,8 +130,13 @@ final class SqliteVmStateEffectAdapter implements VmStateEffectAdapter {
   Future<void> persistRuntime(VmControllerState state) =>
       _database.transaction((connection) {
         final checkpoint = connection.select(
-          'SELECT applied_intent_revision FROM vm_runtime WHERE vm_id = ?',
-          [state.vmId.value],
+          '''
+            SELECT r.applied_intent_revision, r.driver_generation, r.guest_agent, s.spec_json
+            FROM vm_runtime r JOIN vms v ON v.id = r.vm_id
+            LEFT JOIN vm_specs s ON s.vm_id = r.vm_id AND s.generation = COALESCE(?, v.spec_generation)
+            WHERE r.vm_id = ?
+          ''',
+          [state.activeSpecGeneration, state.vmId.value],
         );
         if (checkpoint.isEmpty) throw VmNotFoundException(state.vmId);
         if ((checkpoint.single['applied_intent_revision'] as int) >
@@ -85,6 +144,19 @@ final class SqliteVmStateEffectAdapter implements VmStateEffectAdapter {
           return;
         final phase = _phase(state.phase);
         final error = state.lastError;
+        final row = checkpoint.single;
+        var guestAgent = row['guest_agent'] as String;
+        if (state.phase != VmPhase.running ||
+            state.activeDriverGeneration != state.driverGeneration ||
+            row['driver_generation'] != state.driverGeneration) {
+          final specJson = row['spec_json'] as String?;
+          final enabled = specJson == null
+              ? guestAgent != GuestAgentState.disabled.name
+              : (jsonDecode(specJson) as Map)['guest_agent']['enabled'] == true;
+          guestAgent = enabled
+              ? GuestAgentState.unavailable.name
+              : GuestAgentState.disabled.name;
+        }
         connection.execute(
           '''
             UPDATE vm_runtime
@@ -92,9 +164,10 @@ final class SqliteVmStateEffectAdapter implements VmStateEffectAdapter {
                 restart_required = CASE
                   WHEN (SELECT spec_generation FROM vms WHERE id = vm_runtime.vm_id) > ?
                   THEN restart_required ELSE ? END,
-                last_error_json = ?,
+                last_error_json = ?, guest_agent = ?,
                 applied_intent_revision = ?, active_operation_id = ?,
                 execution_desired_state = ?, execution_spec_generation = ?,
+                driver_operation_id = ?, display_state = ?, display_observed_at = ?,
                 last_transition_at = CASE
                   WHEN phase <> ? THEN ? ELSE last_transition_at END
             WHERE vm_id = ?
@@ -106,10 +179,16 @@ final class SqliteVmStateEffectAdapter implements VmStateEffectAdapter {
             state.specGeneration,
             state.restartRequired ? 1 : 0,
             error == null ? null : jsonEncode(error.toJson()),
+            guestAgent,
             state.appliedIntentRevision,
             state.currentOperation?.id.value,
             state.desiredState.name,
             state.specGeneration,
+            state.driverOperationId?.value,
+            state.displayState.name,
+            state.displayObservedAt == null
+                ? null
+                : formatPersistenceTimestamp(state.displayObservedAt!),
             phase,
             formatPersistenceTimestamp(_now().toUtc()),
             state.vmId.value,

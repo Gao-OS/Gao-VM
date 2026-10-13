@@ -291,34 +291,38 @@ final class SqliteOperationRepository implements OperationRepository {
       });
 
   @override
-  Future<Operation> fail(OperationId id, {required OperationError error}) =>
-      _database.transaction((connection) async {
-        final current = _require(connection, id);
-        _requireTransition(current, OperationState.failed);
-        final completedAt = _now().toUtc();
-        connection.execute(
-          '''
+  Future<Operation> fail(
+    OperationId id, {
+    required OperationError error,
+    JsonObjectValue? result,
+  }) => _database.transaction((connection) async {
+    final current = _require(connection, id);
+    _requireTransition(current, OperationState.failed);
+    final completedAt = _now().toUtc();
+    connection.execute(
+      '''
         UPDATE operations
         SET state = 'failed', cancellable = 0,
-            result_json = NULL, error_json = ?,
+            result_json = ?, error_json = ?,
             completed_at = ?
         WHERE id = ?
       ''',
-          [
-            jsonEncode(error.toJson()),
-            formatPersistenceTimestamp(completedAt),
-            id.value,
-          ],
-        );
-        final completed = _require(connection, id);
-        _appendLifecycleEvent(
-          connection,
-          completed,
-          lifecycle: _OperationLifecycle.completed,
-          occurredAt: completedAt,
-        );
-        return completed;
-      });
+      [
+        result == null ? null : jsonEncode(result.toJson()),
+        jsonEncode(error.toJson()),
+        formatPersistenceTimestamp(completedAt),
+        id.value,
+      ],
+    );
+    final completed = _require(connection, id);
+    _appendLifecycleEvent(
+      connection,
+      completed,
+      lifecycle: _OperationLifecycle.completed,
+      occurredAt: completedAt,
+    );
+    return completed;
+  });
 
   @override
   Future<Operation> setCancellable(
@@ -349,7 +353,7 @@ final class SqliteOperationRepository implements OperationRepository {
   });
 
   @override
-  Future<Operation> cancel(OperationId id) =>
+  Future<Operation> cancel(OperationId id, {JsonObjectValue? result}) =>
       _database.transaction((connection) async {
         final current = _require(connection, id);
         _requireTransition(current, OperationState.cancelled);
@@ -359,11 +363,15 @@ final class SqliteOperationRepository implements OperationRepository {
           '''
         UPDATE operations
         SET state = 'cancelled', cancellable = 0,
-            result_json = NULL, error_json = NULL,
+            result_json = ?, error_json = NULL,
             completed_at = ?
         WHERE id = ?
       ''',
-          [formatPersistenceTimestamp(completedAt), id.value],
+          [
+            result == null ? null : jsonEncode(result.toJson()),
+            formatPersistenceTimestamp(completedAt),
+            id.value,
+          ],
         );
         final completed = _require(connection, id);
         _appendLifecycleEvent(

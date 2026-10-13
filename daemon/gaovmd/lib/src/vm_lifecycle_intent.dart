@@ -26,7 +26,7 @@ Future<VmAcceptedIntent<OperationAcceptance>> commitVmLifecycleIntent({
   return database.transaction((_) async {
     final rows = await database.read(
       (db) => db.select(
-        'SELECT v.*, r.phase FROM vms v JOIN vm_runtime r ON r.vm_id = v.id WHERE v.id = ? AND v.deleted_at IS NULL',
+        'SELECT v.*, r.phase, r.desired_state FROM vms v JOIN vm_runtime r ON r.vm_id = v.id WHERE v.id = ? AND v.deleted_at IS NULL',
         [command.vmId.value],
       ),
     );
@@ -60,10 +60,12 @@ Future<VmAcceptedIntent<OperationAcceptance>> commitVmLifecycleIntent({
       }
     }
     final revision = (vm['intent_revision'] as int) + 1;
-    final desired = switch (command.action) {
-      VmLifecycleAction.start || VmLifecycleAction.restart => 'running',
-      _ => 'stopped',
-    };
+    final desired = command.action.isDisplay
+        ? vm['desired_state'] as String
+        : switch (command.action) {
+            VmLifecycleAction.start || VmLifecycleAction.restart => 'running',
+            _ => 'stopped',
+          };
     final timestamp = formatPersistenceTimestamp(now().toUtc());
     await database.read((db) {
       db.execute(
@@ -99,12 +101,16 @@ Future<VmAcceptedIntent<OperationAcceptance>> commitVmLifecycleIntent({
     });
     final operation = await SqliteOperationRepository(database, now: now)
         .create(
-          type: 'vm.${command.action.name}',
+          type: command.action.operationType,
           resourceType: ResourceType.virtualMachine,
           resourceId: command.vmId,
           requestId: command.requestId,
           idempotencyKey: command.idempotencyKey,
-          cancellable: command.action != VmLifecycleAction.delete,
+          // Window calls are non-preemptible. Local client cancellation only
+          // closes its request; it must not advertise a runtime-stop fallback.
+          cancellable:
+              command.action != VmLifecycleAction.delete &&
+              !command.action.isDisplay,
           request: payload,
           deadlineAt: command.deadlineAt,
         );

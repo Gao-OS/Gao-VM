@@ -101,7 +101,7 @@ final class ArtifactApplicationService {
 
   /// [artifactId], when supplied, is a daemon-reserved publication identity,
   /// never a client-selected public ID. Retries return its verified immutable
-  /// payload without consuming a new input stream.
+  /// payload and current catalog metadata without consuming a new input stream.
   Future<Artifact> publish({
     required Stream<List<int>> bytes,
     required ArtifactKind kind,
@@ -114,6 +114,9 @@ final class ArtifactApplicationService {
     OperationId? operationId,
     TestRunId? testRunId,
     DateTime? retentionUntil,
+    // Internal SQL references share the managed payload/event/outbox commit.
+    // This callback must not perform external IO or complete an entire job.
+    Future<void> Function(Artifact)? commitReferences,
   }) async {
     if (database.hasActiveCallerTransaction) {
       throw StateError('artifact publication must own its commit boundary');
@@ -147,7 +150,6 @@ final class ArtifactApplicationService {
             existing.vmId != vmId ||
             existing.operationId != operationId ||
             existing.testRunId != testRunId ||
-            existing.retentionUntil != retentionUntil?.toUtc() ||
             existing.sizeBytes > maxBytes ||
             expectedSizeBytes != null &&
                 existing.sizeBytes != expectedSizeBytes ||
@@ -156,7 +158,13 @@ final class ArtifactApplicationService {
         }
         if (!await repository.hasManagedPayload(id))
           throw ArtifactContentUnavailable(id);
-        (await _verifiedPayload(existing)).close();
+        final verified = await _verifiedPayload(existing);
+        verified.payload.close();
+        // A policy update must not turn an unchanged publication into a
+        // conflict, or let a retry overwrite the current catalog deadline.
+        if (verified.manifest.retentionUntil != retentionUntil?.toUtc()) {
+          throw ArtifactPublicationConflict(id, 'reserved publication differs');
+        }
         return existing;
       }
       stage = directory.createDirectory(stageName);
@@ -236,6 +244,7 @@ final class ArtifactApplicationService {
           published = true;
           _onCheckpoint?.call(ArtifactPublicationCheckpoint.published, id);
           await repository.publish(artifact, managedPayload: true);
+          await commitReferences?.call(artifact);
         });
       } finally {
         publication.close();
@@ -265,8 +274,9 @@ final class ArtifactApplicationService {
       throw StateError('artifact reconciliation must own its commit boundary');
     }
     await _verifyRoot();
+    final expired = await collectExpired();
     final publication = await directory.acquireLock('.gaovmd-artifacts.lock');
-    final removed = <String>[];
+    final removed = <String>[for (final id in expired) id.value];
     final retained = <String>[];
     final damaged = <ArtifactId>[];
     try {
@@ -326,7 +336,8 @@ final class ArtifactApplicationService {
               } finally {
                 child.close();
               }
-              if (manifest != null) (await _verifiedPayload(manifest)).close();
+              if (manifest != null)
+                (await _verifiedPayload(manifest)).payload.close();
             }
             await SqliteEventRepository(database).append(
               type: 'artifact.store_cleanup_started',
@@ -358,7 +369,7 @@ final class ArtifactApplicationService {
         if (page.isEmpty) break;
         for (final artifact in page) {
           try {
-            (await _verifiedPayload(artifact)).close();
+            (await _verifiedPayload(artifact)).payload.close();
           } catch (_) {
             damaged.add(artifact.id);
           }
@@ -383,20 +394,106 @@ final class ArtifactApplicationService {
     }
   }
 
+  /// Reclaims only sealed, expired, unreferenced catalog-owned payloads. A crash
+  /// after catalog commit leaves proven orphan bytes for startup reconciliation.
+  Future<List<ArtifactId>> collectExpired({int limit = 100}) async {
+    if (database.hasActiveCallerTransaction) {
+      throw StateError('artifact retention must own its commit boundary');
+    }
+    await _verifyRoot();
+    final removed = <ArtifactId>[];
+    for (final artifact in await repository.expiredUnreferenced(
+      _now(),
+      limit: limit,
+    )) {
+      final lock = await directory.tryAcquireLock('.lock-${artifact.id.value}');
+      if (lock == null) continue;
+      try {
+        final publication = await directory.acquireLock(
+          '.gaovmd-artifacts.lock',
+        );
+        try {
+          try {
+            await _verifyRemoval(artifact);
+          } on FileSystemException {
+            continue;
+          } on FormatException {
+            continue;
+          } on StateError {
+            continue;
+          } on ArtifactContentUnavailable {
+            continue;
+          }
+          if (!await repository.expireUnreferenced(artifact.id, _now()))
+            continue;
+          await _removeOwned(artifact.id.value, artifact.id);
+          removed.add(artifact.id);
+          await SqliteEventRepository(database).append(
+            type: 'artifact.content_removed',
+            resourceType: ResourceType.artifact,
+            resourceId: artifact.id,
+            vmId: artifact.vmId,
+            operationId: artifact.operationId,
+            testRunId: artifact.testRunId,
+            occurredAt: _now(),
+            payload: JsonObjectValue.empty,
+          );
+        } finally {
+          publication.close();
+        }
+      } finally {
+        lock.close();
+      }
+    }
+    return List.unmodifiable(removed);
+  }
+
+  Future<void> _verifyRemoval(Artifact artifact) async {
+    (await _verifiedPayload(artifact)).payload.close();
+    final child = directory.directory(artifact.id.value);
+    try {
+      await for (final entry in Directory(
+        child.path,
+      ).list(followLinks: false)) {
+        final name = entry.path.split('/').last;
+        if (!const {'owner.json', 'manifest.json', 'payload'}.contains(name)) {
+          throw StateError('artifact directory contains unknown content');
+        }
+        child.file(name).close();
+      }
+      final owner = child.file('owner.json');
+      try {
+        final json = jsonDecode(utf8.decode(await owner.readBounded(4096)));
+        if (json is! Map ||
+            json['format'] != _artifactFormat ||
+            json['artifact_id'] != artifact.id.value) {
+          throw StateError(
+            'artifact directory has no matching ownership proof',
+          );
+        }
+      } finally {
+        owner.close();
+      }
+      await child.verifyPathBinding();
+    } finally {
+      child.close();
+    }
+  }
+
   Future<ArtifactDownload> download(ArtifactId id) async {
     final artifact = await repository.get(id);
     if (artifact == null) throw ArtifactNotFoundException(id);
     if (!await repository.hasManagedPayload(id))
       throw ArtifactContentUnavailable(id);
     final verified = await _verifiedPayload(artifact);
-    verified.close();
+    verified.payload.close();
     // No file descriptor survives in an unconsumed response. The stream opens
     // and revalidates its own held inode only when the transport subscribes.
     return ArtifactDownload(artifact: artifact, bytes: _read(artifact));
   }
 
   Stream<List<int>> _read(Artifact artifact) async* {
-    final file = await _verifiedPayload(artifact);
+    final file = (await _verifiedPayload(artifact)).payload;
     try {
       var size = 0;
       final result = _DigestSink();
@@ -418,20 +515,32 @@ final class ArtifactApplicationService {
     }
   }
 
-  Future<OwnedImageFile> _verifiedPayload(Artifact artifact) async {
+  Future<({Artifact manifest, OwnedImageFile payload})> _verifiedPayload(
+    Artifact artifact,
+  ) async {
     await _verifyRoot();
     final child = directory.directory(artifact.id.value);
     OwnedImageFile? payload;
     try {
       if (child.mode & 0x3f != 0) throw ArtifactContentUnavailable(artifact.id);
+      late final Artifact sealed;
       final manifest = child.file('manifest.json');
       try {
         final json = jsonDecode(
           utf8.decode(await manifest.readBounded(64 * 1024)),
         );
-        if (json is! Map ||
-            json['format'] != _artifactFormat ||
-            Artifact.fromJson(json['artifact']) != artifact) {
+        if (json is! Map || json['format'] != _artifactFormat) {
+          throw ArtifactContentUnavailable(artifact.id);
+        }
+        sealed = Artifact.fromJson(json['artifact']);
+        // SQLite owns the live retention policy; only immutable publication
+        // metadata must match the sealed manifest.
+        if (JsonObjectValue.fromJson(
+              sealed.toJson()..remove('retention_until'),
+            ) !=
+            JsonObjectValue.fromJson(
+              artifact.toJson()..remove('retention_until'),
+            )) {
           throw ArtifactContentUnavailable(artifact.id);
         }
       } finally {
@@ -455,7 +564,7 @@ final class ArtifactApplicationService {
       if (size != artifact.sizeBytes || 'sha256:$digest' != artifact.digest) {
         throw ArtifactContentUnavailable(artifact.id);
       }
-      return payload;
+      return (manifest: sealed, payload: payload);
     } catch (_) {
       payload?.close();
       rethrow;
