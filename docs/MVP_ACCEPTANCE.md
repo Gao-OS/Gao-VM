@@ -247,6 +247,13 @@ Previously completed reports inspected directly on this host:
   the default test concurrency. Formatting and analysis also passed. This
   subsequent green run does not erase the reproduced earlier failure.
 - JSON Schema/OpenAPI validation was rerun successfully for this audit.
+- A subsequent test-only migration cleanup checkpoint preserves fixture state
+  when an owned child's exit is unconfirmed and still retires sibling children.
+  Filtered migration/helper coverage passed 17 tests, helper/packaged-daemon/
+  launch-configuration coverage 12, packaged CLI four and cold backup four
+  (34 distinct test names). Daemon analysis and formatting passed. The actual
+  native executable-unlink case remains unrun; neither positive installed case
+  was recertified. See [the migration checkpoint](LEGACY_VM_MIGRATION.md#owned-child-cleanup-checkpoint-2026-10-13).
 
 Local reports are diagnostic evidence, not a GitHub Actions run. Older Swift,
 Rust, AOT and signed-fixture results remain scoped component evidence; this

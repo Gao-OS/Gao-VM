@@ -6,7 +6,59 @@ import 'package:gaovm_models/gaovm_models.dart';
 import 'package:gaovmd/gaovmd.dart';
 import 'package:test/test.dart';
 
+import 'helpers/owned_test_process.dart';
+
 void main() {
+  test(
+    'migration fixture joins sibling retirement before retaining state',
+    () async {
+      final fixture = await _Fixture.open();
+      final exit = Completer<int>();
+      final unknown = OwnedTestProcess(_UnconfirmedProcess(exit.future));
+      final sibling = OwnedTestProcess(
+        await Process.start('/bin/sleep', ['60']),
+      );
+      fixture.children.addAll([unknown, sibling]);
+      try {
+        await expectLater(fixture.close(), throwsStateError);
+        expect(sibling.exitConfirmed, isTrue);
+        expect(await fixture.temporary.exists(), isTrue);
+      } finally {
+        exit.complete(0);
+        await unknown.terminate();
+        expect(await sibling.terminate(), isTrue);
+        if (await fixture.temporary.exists()) await fixture.close();
+      }
+    },
+  );
+
+  test(
+    'migration fixture retains state without a child exit receipt',
+    () async {
+      final fixture = await _Fixture.open();
+      final exit = Completer<int>();
+      final child = OwnedTestProcess(_UnconfirmedProcess(exit.future));
+      fixture.children.add(child);
+      try {
+        await expectLater(
+          fixture.close(),
+          throwsA(
+            isA<StateError>().having(
+              (error) => error.message,
+              'diagnostic',
+              contains('retained'),
+            ),
+          ),
+        );
+        expect(await fixture.temporary.exists(), isTrue);
+        expect(child.exitConfirmed, isFalse);
+      } finally {
+        exit.complete(0);
+        await child.terminate();
+        if (await fixture.temporary.exists()) await fixture.close();
+      }
+    },
+  );
   test(
     'a new state directory does not create an implicit default VM',
     () async {
@@ -242,10 +294,15 @@ void main() {
       expect(signed.exitCode, 0, reason: '${signed.stderr}');
       final canonical = await executable.resolveSymbolicLinks();
       final process = await Process.start(canonical, const []);
-      final output = StreamIterator(
-        process.stdout.transform(utf8.decoder).transform(const LineSplitter()),
+      final stream = process.stdout.transform(utf8.decoder).asBroadcastStream();
+      final errors = process.stderr.transform(utf8.decoder).join();
+      final child = OwnedTestProcess(
+        process,
+        stdoutCapture: stream.join(),
+        stderrCapture: errors,
       );
-      final errors = process.stderr.drain<void>();
+      fixture.children.add(child);
+      final output = StreamIterator(stream.transform(const LineSplitter()));
       try {
         process.stdin.writeln('native-fixture-ready');
         expect(
@@ -296,11 +353,14 @@ void main() {
           );
         }
       } finally {
-        await output.cancel();
         await process.stdin.close();
-        process.kill(ProcessSignal.sigkill);
-        await process.exitCode.timeout(const Duration(seconds: 5));
-        await errors;
+        final retired = await child.terminate();
+        await output.cancel();
+        if (!retired)
+          throw StateError(
+            'unconfirmed fixture PID ${child.pid}; retained at ${fixture.temporary.path}',
+          );
+        await child.result();
       }
     },
     skip: !Platform.isMacOS,
@@ -401,6 +461,7 @@ final class _Fixture {
   final OwnedImageDirectory images;
   DaemonOwnership ownership;
   GaoVmDatabase database;
+  final children = <OwnedTestProcess>[];
   File get kernel => File('${temporary.path}/kernel');
   File get initrd => File('${temporary.path}/initrd');
   File get disk => File('${temporary.path}/root.raw');
@@ -472,30 +533,37 @@ final class _Fixture {
   Future<void> crash(String checkpoint) async {
     database.close();
     ownership.close();
-    final child = await Process.start(Platform.resolvedExecutable, [
-      '--packages=${Directory.current.path}/.dart_tool/package_config.json',
-      '${Directory.current.path}/test/fixtures/crash_legacy_migration.dart',
-      state.path,
-      checkpoint,
-    ]);
-    final output = child.stdout.drain<void>();
-    final errors = child.stderr.transform(utf8.decoder).join();
-    late int code;
+    final child = OwnedTestProcess(
+      await Process.start(Platform.resolvedExecutable, [
+        '--packages=${Directory.current.path}/.dart_tool/package_config.json',
+        '${Directory.current.path}/test/fixtures/crash_legacy_migration.dart',
+        state.path,
+        checkpoint,
+      ]),
+    );
+    children.add(child);
     try {
-      code = await child.exitCode.timeout(const Duration(seconds: 20));
-    } catch (_) {
-      child.kill(ProcessSignal.sigkill);
-      await child.exitCode;
-      rethrow;
+      final result = await child.result(timeout: const Duration(seconds: 20));
+      expect(result.exitCode, 91, reason: result.stderr.toString());
     } finally {
-      await output;
+      if (!child.exitConfirmed)
+        throw StateError(
+          'unconfirmed fixture PID ${child.pid}; retained at ${temporary.path}',
+        );
       ownership = (await DaemonOwnership.tryAcquire(state))!;
       database = await GaoVmDatabase.open('${state.path}/gaovm.db');
     }
-    expect(code, 91, reason: await errors);
   }
 
   Future<void> close() async {
+    final unconfirmed = <int>[];
+    for (final child in children) {
+      if (!await child.terminate()) unconfirmed.add(child.pid);
+    }
+    if (unconfirmed.isNotEmpty)
+      throw StateError(
+        'unconfirmed fixture PIDs $unconfirmed; retained at ${temporary.path}',
+      );
     database.close();
     ownership.close();
     images.close();
@@ -503,4 +571,21 @@ final class _Fixture {
     state.close();
     await temporary.delete(recursive: true);
   }
+}
+
+// External process boundary: acknowledges signals without reporting an exit.
+final class _UnconfirmedProcess implements Process {
+  _UnconfirmedProcess(this.exitCode);
+  @override
+  final Future<int> exitCode;
+  @override
+  int get pid => 424242;
+  @override
+  Stream<List<int>> get stdout => const Stream.empty();
+  @override
+  Stream<List<int>> get stderr => const Stream.empty();
+  @override
+  IOSink get stdin => throw UnimplementedError();
+  @override
+  bool kill([ProcessSignal signal = ProcessSignal.sigterm]) => true;
 }

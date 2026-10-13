@@ -4,9 +4,16 @@ import 'dart:io';
 
 /// A test fixture may be removed only after [exitConfirmed], not a deadline.
 final class OwnedTestProcess {
-  OwnedTestProcess(this._process)
-    : _stdout = _process.stdout.transform(utf8.decoder).join(),
-      _stderr = _process.stderr.transform(utf8.decoder).join() {
+  /// Supply captures when the caller also consumes interactive process output.
+  /// They must keep draining the streams until the owned child exits.
+  OwnedTestProcess(
+    this._process, {
+    Future<String>? stdoutCapture,
+    Future<String>? stderrCapture,
+  }) : _stdout =
+           stdoutCapture ?? _process.stdout.transform(utf8.decoder).join(),
+       _stderr =
+           stderrCapture ?? _process.stderr.transform(utf8.decoder).join() {
     _exitCode = _process.exitCode.then((code) {
       _exitConfirmed = true;
       return code;
@@ -18,6 +25,7 @@ final class OwnedTestProcess {
   final Future<String> _stderr;
   late final Future<int> _exitCode;
   bool _exitConfirmed = false;
+  int get pid => _process.pid;
   bool get exitConfirmed => _exitConfirmed;
 
   Future<ProcessResult> result({

@@ -44,7 +44,11 @@ Operation filter on provisioning claims, and migration/schema regression tests.
 
 ## Verification
 
-Run from `daemon/gaovmd` with Dart 3.9:
+Run from `daemon/gaovmd` with Dart 3.9. The complete migration and daemon
+commands below include a native executable-unlink fixture; they require a
+controlled host and confirmed owned-child retirement. Use the explicitly
+filtered command in the cleanup checkpoint for ordinary local verification
+while that boundary remains unresolved.
 
 ```sh
 mise exec dart@3.9 -- dart pub get --enforce-lockfile
@@ -71,6 +75,39 @@ alone with its original timeout; the full suite is not reported as green.
 This evidence contributes to `VM-001`, `VM-005`, `VM-009`, and `SPEC-002` only
 within the migration boundary. It does not declare those PRD requirements
 end-to-end complete.
+
+### Owned-child cleanup checkpoint (2026-10-13)
+
+Migration fixtures now track their crash-checkpoint and interactive census
+children through `OwnedTestProcess`. A signal acknowledgement or timeout is
+not an exit receipt: fixture teardown attempts retirement of every child, then
+refuses to close/delete the state directory if any `Process.exitCode` remains
+unconfirmed. The diagnostic identifies the owned PID and retained fixture path.
+An unresolved child must not prevent retirement of confirmed siblings.
+
+Interactive readiness and complete output capture share drained streams rather
+than subscribing twice to a single-subscription process stream. Crash recovery
+reopens catalog ownership only after the child has a confirmed exit.
+
+The safe filtered migration/helper run on Intel macOS passed 17 tests. Shared
+helper/packaged-daemon/launch-configuration regression passed 12, packaged CLI
+passed four, and cold-backup regression passed four: 34 distinct test names
+because the three helper tests run in both of the first two groups. Formatting
+and daemon analysis passed.
+
+```sh
+mise exec dart@3.9.0 -- dart test --reporter expanded test/legacy_vm_migration_test.dart test/owned_test_process_test.dart --name '^(?!unresolved native census rejects startup before legacy migration)'
+mise exec dart@3.9.0 -- dart test --reporter expanded test/owned_test_process_test.dart test/packaged_daemon_launch_test.dart test/daemon_launch_configuration_test.dart
+mise exec dart@3.9.0 -- dart test --reporter expanded test/cold_state_backup_test.dart
+```
+
+The actual `unresolved native census rejects startup before legacy migration`
+unlink case remains **unrun** at this checkpoint. Controlled external-process
+fixtures reproduce missing exit receipts and sibling retirement; a real,
+unchanged `/bin/cat` verifies readiness/output/exit capture. Neither establishes
+retirement of the unlinked native executable or repairs historical remnants.
+Native census guards are unchanged, and the full daemon suite is not reported
+as green.
 
 ## Remaining dependencies and limits
 
