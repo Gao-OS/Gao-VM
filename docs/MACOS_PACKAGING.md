@@ -2,14 +2,15 @@
 
 `daemon/gaovmd/tool/package_macos.dart` is a partial M8.2 build-time assembler.
 It does not compile inputs, install anything, start the daemon, or register a
-launchd service. Hardened-runtime execution validation, installation/update/
-uninstall, notarization, and Apple Silicon VM/GaoOS release acceptance remain
-pending. An assembled bundle is not evidence that those gates passed.
+launchd service. Compiled Dart launch checks cover the scoped signing policy on
+Intel macOS; complete installed startup, installation/update/uninstall,
+notarization, and Apple Silicon VM/GaoOS release acceptance remain pending. An
+assembled bundle is not evidence that those gates passed.
 
 ## Inputs and invocation
 
 Run on macOS with Xcode Command Line Tools and the pinned Dart 3.9 SDK. Supply
-three prebuilt, executable, thin ARM64 Mach-O files. Intel and universal binaries
+four prebuilt, executable, thin ARM64 Mach-O files. Intel and universal binaries
 are rejected. The assembler checks architecture and signatures, not whether an
 input implements the correct GaoVM role, version, or protocol.
 
@@ -20,6 +21,7 @@ mise exec dart@3.9 -- dart run tool/package_macos.dart \
   --daemon /absolute/build/gaovmd \
   --cli /absolute/build/gaovm \
   --driver /absolute/build/gaovm-driver-vz \
+  --service /absolute/build/gaovm-service \
   --schemas ../../schemas \
   --driver-entitlements ../../drivers/vz_macos/Resources/entitlements.plist \
   --output-dir /absolute/private-package-output \
@@ -46,16 +48,26 @@ GaoVM.app/Contents/
   Info.plist
   MacOS/gaovmd
   MacOS/gaovm
+  MacOS/gaovm-service
   Helpers/gaovm-driver-vz
   Library/LaunchAgents/gaovmd.plist
+  Resources/dart-runtime-entitlements.plist
   Resources/driver-entitlements.plist
   Resources/schemas/...
 ```
 
 `Info.plist` declares a macOS 14 background application with `gaovmd` as its main
-executable. Nested code is signed inside out: driver, CLI, then the application.
+executable. Nested code is signed inside out: service helper, driver, CLI, then
+the application.
 The driver must have an enabled `com.apple.security.virtualization` entitlement
-in both the supplied plist and its actual signed entitlements. Each binary is
+in both the supplied plist and its actual signed entitlements. The daemon and CLI
+use a generated, fixed Dart policy containing only
+`com.apple.security.cs.allow-unsigned-executable-memory`, accepted on 2026-10-10.
+The policy does not apply to the Swift driver or service helper. The service
+helper uses `<bundle-id>.service` as its code identifier and has no entitlements.
+Its identifier and lack of entitlement keys are verified after signing the outer
+app. Hardened runtime remains enabled;
+no library-validation, JIT, or other SDK exception is added. Each binary is
 verified, then the bundle is verified with `codesign --verify --deep --strict`.
 `--deep` is not used for signing. The layout and signing order follow
 [Apple's code-signing guidance](https://developer.apple.com/library/archive/technotes/tn2206/).
@@ -67,10 +79,10 @@ VmSpec references are loaded and validated before publication.
 ## Bundled launch agent
 
 The assembler generates `Contents/Library/LaunchAgents/gaovmd.plist` before
-signing. It is intended for a future registration helper in the owning app using
+signing. The native [service helper](MACOS_SERVICE.md) in the owning app uses
 [`SMAppService.agent(plistName: "gaovmd.plist")`](https://developer.apple.com/documentation/servicemanagement/smappservice/agent(plistname:)).
 Apple's API requires the descriptor in that bundle-local directory. No
-registration command is implemented by this assembler, and `BundleProgram` is
+registration action is performed by this assembler, and `BundleProgram` is
 only supported for SMAppService-installed jobs: copying this plist to a shared
 LaunchAgents directory or using `launchctl bootstrap` is not an installation path.
 
@@ -137,41 +149,69 @@ Missing bundled resources fail startup rather than falling back to repository
 assets. Path selection does not bypass startup census, ownership, signing, or VM
 runtime checks.
 
-These defaults do not establish that a signed executable can run. Hardened-runtime
-execution remains blocked by the finding below. This partial component does not
-install a launchd service; launching it through Finder is not installation or
-restart-recovery acceptance.
+These defaults alone do not establish that a signed executable can run. The
+compiled launch checks below exercise the accepted signing policy without
+entering installed daemon startup or VM recovery. This partial component does
+not install a launchd service; launching it through Finder is not installation
+or restart-recovery acceptance.
 
 ## Verification boundary
 
 The assembly suite uses real cross-compiled ARM64 fixtures and macOS signing
 tools, but never executes those fixtures or registers a service. It checks the
 launch-agent descriptor after app renaming, the longest accepted bundle ID, and
-signature rejection after descriptor tampering. Unit tests cover packaged path
-selection, explicit overrides, invalid `HOME`, and preservation of development defaults.
+signature rejection after descriptor tampering. It also checks exact signed
+entitlement dictionaries and the hardened-runtime flag: the driver fixture has
+only virtualization, daemon/CLI fixtures have only the accepted Dart bit, and
+the service helper has no entitlements. The suite also assembles the actual
+cross-built ARM64 Swift helper without executing it and verifies its source bytes
+are unchanged. Build that input first from `services/macos_service`:
+
+```sh
+swift build -c release --triple arm64-apple-macosx14.0
+```
+
+The real-helper assembly case skips explicitly when that build is absent; CI
+builds it before the suite. Signature-only C fixtures still do not prove the
+daemon, CLI, or driver implements its role.
+Unit tests cover packaged path selection, explicit overrides, invalid `HOME`,
+and preservation of development defaults.
+
+Separate launch suites compile the real daemon and CLI for the test host and
+sign them with the same Dart policy in a renamed app layout. On Intel macOS
+15.8.1 with Dart 3.9.0, all three daemon and four CLI launch cases passed. They
+cover help without `HOME`, fail-closed missing paths/resources, a resolved CLI
+symlink, and the compiled CLI reaching a real public HTTP-over-UDS API fixture
+with an explicit socket. Daemon cases deliberately stop before census, state
+creation, or driver startup. These host-architecture executables are not inputs
+to the ARM64-only assembler and do not test Apple Silicon execution.
+
 The test-process cleanup guard requires a confirmed child exit before a fixture
 can be removed; successful signal delivery or an elapsed deadline is not enough.
 Run from `daemon/gaovmd`:
 
 ```sh
-mise exec dart@3.9 -- dart test \
+mise exec dart@3.9.0 -- dart test \
   test/macos_app_package_test.dart test/vm_bundle_filesystem_test.dart \
   test/daemon_launch_configuration_test.dart test/owned_test_process_test.dart \
+  test/packaged_daemon_launch_test.dart \
   --concurrency=1
 ```
 
 From `clients/gaovm_cli`:
 
 ```sh
-mise exec dart@3.9 -- dart test \
-  test/default_socket_path_test.dart test/public_api_cli_test.dart --concurrency=1
+mise exec dart@3.9.0 -- dart test \
+  test/default_socket_path_test.dart test/public_api_cli_test.dart \
+  test/packaged_cli_launch_test.dart --concurrency=1
 ```
 
-Passing these suites proves component assembly/signature, filesystem, and path
-selection behavior, not execution of hardened packaged binaries, a launchd
-lifecycle, native VZ boot/display, Guest Agent/TestRun, upgrade rollback, notarized
-distribution, or release readiness. Hosted macOS execution coverage and the
-required self-hosted Apple Silicon VM E2E gate remain pending.
+Passing these suites proves component assembly/signature, filesystem, path
+selection, and the stated compiled launch behavior. It does not prove complete
+installed daemon startup, a launchd lifecycle, native VZ boot/display, Guest
+Agent/TestRun, upgrade rollback, notarized distribution, or release readiness.
+Hosted macOS execution coverage and the required self-hosted Apple Silicon VM
+E2E gate remain pending.
 
 ### Hardened-runtime signing finding
 
@@ -194,8 +234,9 @@ the tested configuration, rather than snapshot corruption during re-signing.
 The pinned [Dart 3.9 AOT signing policy](https://github.com/dart-lang/sdk/blob/3.9.0/runtime/tools/entitlements/dartaotruntime_product.plist)
 includes that exception. Apple warns that it
 [relaxes executable-memory protection](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.cs.allow-unsigned-executable-memory).
-Production signing policy remains unchanged pending the decision to accept the
-scoped exception or use a different Dart build. The successful help probe does
-not establish complete daemon startup, hardened CLI execution, Apple Silicon
-compatibility, or native VM acceptance. Do not remove live executable fixtures or
-treat signature verification alone as packaged runtime acceptance.
+The user accepted that single exception on 2026-10-10 for the compiled Dart
+daemon and CLI. The assembler now applies it, and the compiled launch suites
+verify the scope described above. Neither the historical help probe nor these
+launch checks establish complete daemon startup, Apple Silicon compatibility,
+or native VM acceptance. Do not remove live executable fixtures or treat
+signature verification alone as packaged runtime acceptance.

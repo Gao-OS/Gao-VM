@@ -1,4 +1,4 @@
-# Public API schema discovery
+# Public API discovery
 
 This implements the schema-discovery boundary in Architecture §11.7 and
 contributes to `API-003`, `API-012`, `CLI-007`, and `CLI-008` under M4/M7. It is
@@ -34,6 +34,37 @@ Malformed responses return exit `4`, API Problems `1`, invalid command options
 `2`, unavailable transports `3`, and deadlines `124`. Read-only discovery sends
 no mutation body, idempotency key, or revision header.
 
+## Query public capabilities
+
+The CLI also supports the frozen capabilities contract:
+
+```sh
+dart run bin/gaovm_cli.dart --socket-path /absolute/state/run/api.sock \
+  capabilities --timeout-seconds 10 --json
+```
+
+It sends only `GET /v1/system/capabilities` and validates HTTP `200` and the
+complete `Capabilities` shape: `api_version: v1`, public backend/guest arrays,
+and the three positive integer limits. Unknown fields, private driver capability
+names, duplicate guest capabilities, and invalid limits return exit `4`.
+Compact/pretty JSON, option validation, API Problems, transport failures, and
+local deadlines use the same exits as `schema` above. No mutation/target/wait/list
+options are accepted, and no driver IPC or repository-local defaults are used.
+
+Advertisements are not host, VM, or guest readiness. Empty guest capabilities
+remain empty; implemented guest handlers alone do not establish native acceptance.
+
+The daemon registers this read-only endpoint and advertises the accepted catalog
+limit of 128 non-deleted VM definitions. Creation checks the limit in the same
+SQLite transaction as acceptance, including TestRun provisioning. Deleting VMs
+still occupy a slot until their tombstone commits; idempotent create retries replay
+their original acceptance even when the catalog is full. A new create at capacity
+returns `409 HOST_RESOURCE_EXHAUSTED` with `max_defined_vms` in Problem details.
+The running/boot limits come from the daemon's scheduler policy (defaults 8/2).
+Capabilities do not perform a host census or imply that a VM can currently start.
+The native guest transport remains disabled, so the guest advertisement is empty.
+Bodies and query parameters are rejected. No public schema field was added.
+
 ## Canonical source and distribution
 
 `gaovmd` loads the operator's `--openapi-path` once at startup. The repository
@@ -63,7 +94,7 @@ From the repository root:
 cd daemon/gaovmd
 mise exec dart@3.9 -- dart test test/openapi_document_test.dart
 cd ../../clients/gaovm_cli
-mise exec dart@3.9 -- dart test test/schema_cli_test.dart test/public_api_cli_test.dart
+mise exec dart@3.9 -- dart test test/schema_cli_test.dart test/capabilities_cli_test.dart test/public_api_cli_test.dart
 ```
 
 The tests fetch the linked document over the real public HTTP/UDS server, compare
@@ -75,4 +106,9 @@ and close borrowed listeners; no production security check is bypassed.
 
 These are schema/transport checks, not installed-daemon startup, Apple Silicon
 VZ, GaoOS Guest Agent/TestRun, packaging, signing, or launchd acceptance.
-`gaovm capabilities` remains a separate, unfinished discovery requirement.
+Capabilities checks additionally exercise strict public DTO validation, preserved
+empty guest advertisements, read-only request headers, and a real CLI process
+outside the checkout. The daemon's real system handler also reports 128/8/2 over
+UDS without native probes. SQLite creation tests cover the 129th definition,
+concurrent last-slot requests, full-catalog idempotency replay and tombstones.
+These checks are not native guest readiness or installed-daemon/VZ acceptance.

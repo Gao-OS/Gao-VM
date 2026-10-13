@@ -4,7 +4,11 @@ GaoVM is a macOS-native, multi-VM manager for ARM64 Linux guests built on Apple'
 
 ## Project Status
 
-The checked-in code is a working single-VM prototype being migrated to the accepted multi-VM v2 contract. The canonical documents are:
+The project began as a single-VM prototype. The current source implements the
+multi-VM daemon composition, durable public API, guest-exec and TestRun workers,
+and CLI; native Apple Silicon/GaoOS and installed-service release acceptance are
+still pending. Component tests do not establish MVP completion. The canonical
+documents are:
 
 - [Product requirements](docs/PRD.md)
 - [Architecture](docs/ARCHITECTURE.md)
@@ -27,6 +31,8 @@ launchd acceptance remain separate gates.
 The daemon uses [bounded JSON Lines logging](docs/DAEMON_LOGGING.md) with
 server-owned request IDs and typed resource correlation, without awaiting log I/O
 in API or background callbacks.
+The public [display API and CLI](docs/PUBLIC_VM_DISPLAY.md) use durable Operations
+without taking ownership of VM lifecycle callbacks or process termination.
 
 ---
 
@@ -114,7 +120,7 @@ As specified in [`AGENTS.md`](AGENTS.md), [`docs/ARCHITECTURE.md`](docs/ARCHITEC
 
 ---
 
-## Building the Current Prototype
+## Building Source Components
 
 ### 1. Swift Driver (`gaovm-driver-vz`)
 
@@ -152,22 +158,25 @@ dart pub get
 ## macOS Bundle Assembly (Partial M8)
 
 The [macOS packaging tool](docs/MACOS_PACKAGING.md) assembles and signs prebuilt
-ARM64 daemon, CLI, and driver binaries with the canonical schemas. This is a
-build-time component, not an installer. Packaged executables resolve assets from
-their app bundle and use `~/Library/Application Support/GaoVM` for state.
-Hardened-runtime execution is an unresolved validation blocker; launchd,
+ARM64 daemon, CLI, driver, and service-helper binaries with the canonical schemas.
+It never installs or registers the app. The separate [service helper](docs/MACOS_SERVICE.md)
+implements bundle-owned status/register/unregister commands, without establishing
+installed-service acceptance. Packaged executables resolve assets from their app
+bundle and use `~/Library/Application Support/GaoVM` for state.
+The accepted Dart hardened-runtime signing policy passes the documented Intel
+compiled-launch checks; Apple Silicon execution, installed startup,
 installation/update/uninstall, notarization, and native VM release acceptance
 remain pending.
 
-## Running the Current Prototype Daemon (`gaovmd`)
+## Running the Source Public-API Daemon (`gaovmd`)
 
 Start the daemon from the repository root or project directory:
 
 ```bash
 cd daemon/gaovmd
-dart run bin/gaovmd.dart \
+mise exec dart@3.9.0 -- dart run bin/gaovmd.dart \
   --state-dir ../../state \
-  --socket-path ../../state/run/daemon.sock \
+  --socket-path ../../state/run/api.sock \
   --driver-bin ../../drivers/vz_macos/.build/debug/gaovm-driver-vz
 ```
 
@@ -175,13 +184,19 @@ dart run bin/gaovmd.dart \
 
 | Option | Default | Description |
 |---|---|---|
-| `--socket-path PATH` | `<state-dir>/run/daemon.sock` | Unix domain socket path for incoming client connections |
-| `--state-dir PATH` | `./state` | Directory storing configs, state files, and logs |
+| `--socket-path PATH` | `<state-dir>/run/api.sock` | Private public API socket, inside the state's `run` directory |
+| `--state-dir PATH` | `./state` | Private SQLite catalog, managed images/VM bundles, runtime namespace, and logs |
 | `--driver-bin PATH` | `$GAOVM_DRIVER_BIN` or relative build path | Absolute or relative path to the `gaovm-driver-vz` binary |
+| `--openapi-path PATH` | `../../schemas/openapi/gaovm-v1.yaml` | Canonical public schema; packaged defaults are bundle-relative |
+| `--max-running-vms N` | `8` | Host admission limit |
+| `--max-concurrent-boots N` | `2` | Concurrent boot admission limit |
 
 ### Legacy Prototype State & Logs
 
-The prototype organizes its state directory as follows. M1 migrates these inputs once into SQLite; they must not remain an active source of truth in v2:
+The old prototype organized its state directory as follows; these paths are not
+the active v2 catalog. See [legacy migration](docs/LEGACY_VM_MIGRATION.md) for the
+supported importer and its backup/compatibility limits. Do not edit historical
+JSON files to change current desired state:
 
 - `state/config/vm.json`: Current VM specification
 - `state/config/pending_config.json`: Staged configuration changes pending VM restart
@@ -207,22 +222,27 @@ Implemented commands at this checkpoint:
 - `vm patch VM_ID --body-json JSON --if-match REVISION`
 - `vm delete VM_ID`
 - `vm start/stop/restart/kill VM_ID`
+- `vm open-display/close-display VM_ID`, `vm display VM_ID`
+- `vm logs VM_ID [--kind driver|serial|guest]`
+- `vm artifacts VM_ID`, `vm download VM_ID ART_ID --output-dir DIRECTORY`
 - `vm wait VM_ID --condition CONDITION --timeout-seconds N` (add `--service-name NAME` for `guest_service_ready`)
 - `image import --body-json JSON`, `image list`, `image get IMG_ID`, `image delete IMG_ID`
 - `operation get/cancel OP_ID`, `operation wait OP_ID --timeout-seconds N`
 - `operation list`
-- `guest exec VM_ID --body-json JSON` (client adapter; installed Guest API pending)
+- `guest exec VM_ID --body-json JSON` (durable acceptance; native Guest execution acceptance pending)
 - `test run --body-json JSON`, `test get/cancel/artifacts TR_ID`
 - `test download TR_ID ART_ID --output-dir DIRECTORY`
 - `events [--after-sequence N] [--vm-id VM_ID] [--operation-id OP_ID] [--test-run-id TR_ID]`
 - `doctor [--timeout-seconds N]`
 - `schema [--timeout-seconds N]`
+- `capabilities [--timeout-seconds N]` (CLI implemented; daemon endpoint pending catalog-limit policy)
 
 `vm list` accepts `--label-selector`, `--sort`, `--limit`, and `--cursor`.
 `image list` accepts `--label-selector`, `--limit`, and `--cursor`.
 `operation list` accepts `--resource-type`, `--resource-id`, `--state`, `--limit`,
-and `--cursor`. `test artifacts` accepts `--limit` and `--cursor` and lists artifact
-metadata with public download URLs, not artifact bytes. Page sizes are 1–200;
+and `--cursor`. `vm artifacts` and `test artifacts` accept `--limit` and
+`--cursor` and list artifact metadata with public download URLs, not artifact
+bytes. Page sizes are 1–200;
 pass the returned `next_cursor` unchanged
 with the same filters and sort to resume. Filtering and cursor validation remain
 owned by the public API.
@@ -248,14 +268,38 @@ All output is JSON; `--json` selects compact output for ordinary results and dia
 
 Requests default to a 30-second local deadline; waits require an explicit `--timeout-seconds` and allow five additional seconds for transport. Mutations return accepted Operations without waiting for completion. Use `--idempotency-key KEY` and reuse it for explicit retries; the client does not automatically retry writes. Patch also requires an explicit revision/ETag through `--if-match`.
 
+See [event streaming and recovery](docs/EVENTS.md) for numeric cursor handling,
+slow-subscriber isolation, and reconnection after a partial frame or deadline.
+
 `guest exec` sends the frozen public `GuestExecRequest` to
 `POST /v1/vms/{vm_id}/guest/exec`, preserving argv, cwd, environment, capture, and
 the Guest execution timeout. It never runs the command on the host. Exit `0`
 requires a valid `202` Operation acceptance for the requested VM; it is not the
-Guest command's exit code. The installed daemon does not yet register this endpoint
-or provide a Guest session/exec worker, so this is client-adapter coverage only,
-not completed Guest execution. See [Guest exec CLI](docs/GUEST_EXEC_CLI.md) for
-timeouts, retries, failure behavior, and the remaining M6 dependency.
+Guest command's exit code. The daemon composition registers durable acceptance,
+guest-session tracking and exec workers; fixture coverage does not establish
+installed GaoOS/vsock execution. Track the accepted Operation separately. See
+[Guest exec CLI](docs/GUEST_EXEC_CLI.md) and [durable host execution](docs/GUEST_EXEC_DURABILITY.md)
+for timeouts, retries, failure behavior and native M6 limits.
+
+`vm logs` reads only `GET /v1/vms/{vm_id}/logs`, with an optional `--kind` filter.
+It prints current file metadata, not bytes or host paths, and does not create an
+artifact or probe a driver. Empty results remain empty; every returned reference
+must match the requested VM/kind and the frozen schema. Use `--json` for compact
+output and `--timeout-seconds` for the local deadline (30 seconds by default).
+Malformed replies return exit `4`; invalid options `2`, API Problems `1`, missing
+transports `3`, and deadlines `124`. See [VM log references](docs/VM_LOGS.md).
+Tail/stream remains P1, and live metadata is not an immutable log snapshot.
+
+`vm artifacts` lists committed artifact metadata, including retained diagnostics
+after VM tombstoning. `vm download` walks only that VM's public artifact pages
+and streams the selected ID through the shared verified downloader; no TestRun
+is required. VM- and TestRun-associated artifacts are both valid when their
+`vm_id` matches. Listing and downloading validate the entire page, its owner,
+IDs, canonical URLs, cursor, and requested page bound before accepting it.
+Downloads create a private child of an existing output directory and never
+overwrite or execute existing files. One deadline covers metadata and bytes;
+SIGINT/SIGTERM clean this transfer without changing VM/Operation/TestRun state.
+See [artifact reads and downloads](docs/ARTIFACTS.md) for limits and stable exits.
 
 `schema` reads `GET /v1/openapi.json` and prints the complete OpenAPI 3.1 JSON,
 including resource schemas. The daemon links canonical VmSpec definitions into
@@ -263,6 +307,15 @@ local references; the CLI never reads repository schema files. Invalid envelopes
 return exit `4`; the ordinary API/transport/deadline exits still apply. Schema
 discovery describes the contract, not runtime or guest readiness. See
 [API discovery](docs/API_DISCOVERY.md) for source layout, limits, and verification.
+
+`capabilities` reads the frozen `GET /v1/system/capabilities` contract and prints
+the daemon's public backend/guest advertisements and limits. It validates the
+complete response and preserves empty guest capabilities; it neither queries a
+driver nor proves host/VM/guest readiness. The current daemon does not yet register
+this endpoint: its required positive `max_defined_vms` needs an accepted, enforced
+catalog ceiling, while VM creation currently has no such ceiling. Until that
+policy is resolved, the daemon returns its normal not-found Problem; the CLI does
+not invent local defaults or infer guest capabilities from implemented handlers.
 
 `test run` takes the public `TestRunCreateRequest`: image source, readiness wait,
 ordered steps, cleanup policy, and `retain_on_failure`, with optional VM overrides
@@ -282,7 +335,7 @@ Image manifests/sizes are required checks; content hashing has a shared 64 MiB
 budget, and skipped digests are explicitly warned about. A no-follow image-root
 scan warns about unregistered digest directories, staging, and unknown entries.
 These can be in-flight publications/cleanup, not confirmed orphan ownership;
-exceeding its 4096-entry budget is an incomplete-check error. Guest session/exec
+exceeding its 4096-entry budget is an incomplete-check error. Native Guest session/exec
 readiness remains unverified. Doctor does not repair files, release leases, signal
 processes, start a VM, or prove native VM/TestRun or release acceptance. It requires
 a running daemon and cannot bypass a pre-listener startup census failure.
@@ -303,7 +356,7 @@ dart run bin/gaovm_cli.dart --socket-path /absolute/state/run/api.sock events --
 dart test
 ```
 
-Coverage includes real public-socket requests, VM/image deletion contracts, SQLite-backed filtered/paginated catalog queries, image lookup across pages, create/import/replay/query/cancellation with durable Operation waits, and resumable/live event streaming. TestRun tests exercise cross-client acceptance/query/cancellation, retry conflicts, isolated artifact pages, and the CLI executable querying a collected pre-allocation cancellation with a downloadable result. Doctor tests cover healthy/unhealthy reports, protocol validation, and local deadlines; daemon tests use real SQLite/filesystem/socket state, plus native static-signing fixtures that are never executed. Executable signal tests verify idle subscription cleanup and stable JSON/exit codes. This is a partial M7 checkpoint: guest exec and the legacy alias adapter remain pending. It does not establish installed-daemon, native guest execution, or Apple Silicon VM boot/display acceptance.
+Coverage includes real public-socket requests, VM/image deletion contracts, SQLite-backed filtered/paginated catalog queries, image lookup across pages, create/import/replay/query/cancellation with durable Operation waits, and resumable/live event streaming. TestRun tests exercise cross-client acceptance/query/cancellation, retry conflicts, isolated artifact pages, and the CLI executable querying a collected pre-allocation cancellation with a downloadable result. Doctor tests cover healthy/unhealthy reports, protocol validation, and local deadlines; daemon tests use real SQLite/filesystem/socket state, plus native static-signing fixtures that are never executed. Executable signal tests verify idle subscription cleanup and stable JSON/exit codes. Guest-exec and display composition now have component coverage. The legacy alias adapter remains pending; these checks do not establish installed-daemon, native guest execution, or Apple Silicon VM boot/display acceptance.
 
 ## Legacy Prototype CLI Reference (Not Supported)
 
@@ -445,6 +498,24 @@ cd daemon/gaovmd
 dart test
 ```
 
+### Swift Formatting and Lint
+
+Both Swift packages use the repository's `.swift-format` configuration and
+Xcode 26.3's built-in `swift format` version 6.2.3. CI pins that toolchain on
+`macos-15` for the style check; the packages' minimum deployment target remains
+macOS 14. From either `drivers/vz_macos` or `services/macos_service`, run:
+
+```bash
+swift format --version  # must be 6.2.3
+swift format lint --strict --recursive Package.swift Sources Tests
+```
+
+To apply the same formatting locally, use
+`swift format format --in-place --recursive Package.swift Sources Tests`.
+Strict lint exits nonzero for both formatting and lint findings. This gate is
+separate from build/test jobs and does not establish native VM or installed
+service acceptance.
+
 ### Swift Driver Tests
 ```bash
 cd drivers/vz_macos
@@ -465,18 +536,41 @@ OS, not an installed guest daemon or native vsock execution. See the
 
 ---
 
-## End-to-End Automated Run
+## Native VM Smoke Recipe (Not MVP Release Acceptance)
 
-The historical [`scripts/e2e_macos14_happy_path.sh`](scripts/e2e_macos14_happy_path.sh) still invokes the removed prototype CLI and socket contract. It must be migrated before use and is not v2 end-to-end acceptance evidence.
+[`scripts/e2e_macos14_happy_path.sh`](scripts/e2e_macos14_happy_path.sh) now uses
+the public CLI/API and explicit server-generated resource IDs. It imports kernel,
+optional initrd and an existing raw disk, creates a VM with a managed writable
+disk, waits for durable start/display/stop Operations, checks display state and
+unchanged VM generation, then confirms its owned daemon exits. It does not use
+prototype RPC commands, fixed startup sleeps, an implicit VM, or launchd.
+Run it only on Apple Silicon macOS 14+ with prepared, quiescent ARM64 inputs;
+the source images and original driver are not modified. Fresh private run state
+is retained, including on failure. See [native smoke setup and limits](docs/NATIVE_VM_SMOKE.md).
 
 ### Running the E2E Script
 
 ```bash
 KERNEL_PATH=/path/to/vmlinuz \
 INITRD_PATH=/path/to/initrd \
-DISK_PATH=$HOME/gaovm/demo.img \
-bash scripts/e2e_macos14_happy_path.sh
+DISK_PATH=/absolute/images/root.raw \
+mise exec dart@3.9.0 -- bash scripts/e2e_macos14_happy_path.sh
 ```
+
+The public-API recipe, owned-process handling, help and unsupported-host guard
+have fixture coverage. The actual build/sign/boot/display branch has not been
+run on this Intel host. Framebuffer/input, GaoOS guest survival/exec/TestRun,
+multi-VM fault isolation, installed service, upgrade and distribution remain
+separate required gates.
+
+---
+
+## Data Backup and Restore
+
+For cold managed-state backup, same-path restore and public diagnostic export,
+see [data backup and restore](docs/DATA_BACKUP.md). This requires confirmed
+daemon/driver shutdown and separate external-disk backups; it is not an online
+snapshot, portable VM import, or installed upgrade/rollback acceptance.
 
 ---
 

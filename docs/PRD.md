@@ -602,6 +602,8 @@ wait 必须有 timeout，timeout 不改变资源本身。
 - driver event 到 durable event 的 P95 小于 1 s；
 - 100 台已定义但停止的 VM 不应产生 100 个常驻 driver process；
 -系统应支持至少 100 个已定义 VM；
+- 已定义且未删除的 VM 目录上限为 128；创建时与 durable acceptance 在同一
+  SQLite 事务内检查。正在删除的 VM 仍占名额，直到 tombstone 提交；
 -实际同时运行数量由 host resource budget 控制，而非写死。
 
 ## 10.4 Resource control
@@ -642,6 +644,11 @@ wait 必须有 timeout，timeout 不改变资源本身。
 - retained VM：直到显式删除；
 - image：直到无引用且显式删除；
 - log rotation：按大小和数量配置。
+
+Artifact 默认期限从 TestRun 的 `completed_at` 起算：成功且删除临时 VM 为
+7 天，失败、取消或保留环境为 30 天。期限不解除引用；仍被 VM、TestRun、
+Operation 或执行/收集记录引用的 artifact 不得自动删除。清理只处理过期、
+无引用且有完整所有权证明的 managed payload。
 
 清理过程本身必须产生 event，并不得删除仍被引用的 image/artifact。
 

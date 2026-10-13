@@ -8,6 +8,12 @@ real GaoOS acceptance scenarios AC-06/07.
 
 The TestRun host collection and completion boundaries are documented separately
 in [TEST_RUNS.md](TEST_RUNS.md).
+The bounded guest stdout/stderr receipt, mapping and commit-ACK library is
+documented in [GUEST_ARTIFACT_PUBLICATION.md](GUEST_ARTIFACT_PUBLICATION.md).
+The [guest-exec worker/API](GUEST_EXEC_DURABILITY.md) and
+[TestRun output/system-info collection](TEST_RUN_ARTIFACTS.md) now use it in
+daemon composition. Generic host `artifact.collect` is an internal original-source
+library boundary, not a new public passthrough.
 
 ## Public reads
 
@@ -71,15 +77,30 @@ belong to the caller, outside the managed daemon artifact store.
 The CLI workflow is explicit:
 
 ```sh
+gaovm --socket-path /absolute/state/run/api.sock vm artifacts VM_ID \
+  --limit 50 --timeout-seconds 10 --json
+gaovm --socket-path /absolute/state/run/api.sock vm download VM_ID ART_ID \
+  --output-dir /absolute/existing/output --timeout-seconds 120 --json
 gaovm --socket-path /absolute/state/run/api.sock test download TR_ID ART_ID \
   --output-dir /absolute/existing/output --timeout-seconds 120 --json
 ```
 
-Use server-generated TestRun and Artifact IDs. The CLI walks that TestRun's public
-artifact pages, validates each complete page and its owner/ID/URL associations, then
-downloads only the selected artifact. There is no invented artifact-metadata GET
-or all-artifact list. Successful JSON contains `artifact`, `request_id`,
-`output_path`, and `verified: true`; verification describes that byte read, not
+Use server-generated VM, TestRun and Artifact IDs. `vm artifacts` and
+`test artifacts` print one public metadata page; `--limit` and opaque `--cursor`
+resume that owner's list. Empty pages remain empty, and VM tombstones remain
+valid artifact owners. Both compact and pretty JSON preserve `items` and
+`next_cursor`. Listings require HTTP `200`, a valid request ID, complete frozen
+DTOs, no duplicate IDs, matching ownership and canonical ID/URL associations,
+and no more than the requested page size. Malformed replies return exit `4`
+without success output. Mutation/wait/event options are rejected locally.
+
+For download, the CLI walks only the selected VM's or TestRun's public pages,
+validates each complete page and its owner/ID/URL associations, then
+downloads only the selected artifact. VM-owned artifacts may also belong to a
+TestRun; a TestRun is not required for VM downloads. Cross-page duplicate IDs and
+repeated cursors fail before selected bytes are fetched. There is no invented
+artifact-metadata GET or all-artifact list. Successful JSON contains `artifact`,
+`request_id`, `output_path`, and `verified: true`; verification describes that byte read, not
 Guest execution. Missing artifacts return `1` / `ARTIFACT_NOT_FOUND`; local output
 errors return `1` / `CLI_LOCAL_IO`, and oversized metadata returns `1` /
 `CLI_ARTIFACT_LIMIT`. Protocol, transport, structured Problem and deadline exits
@@ -107,13 +128,17 @@ for file access and native gates.
 Integration checks use real Unix-socket HTTP and files, including progressive
 writes before withheld EOF, altered/truncated payloads, malformed headers/pages,
 deadline/cancellation EOF, preservation of existing files, the SQLite-backed
-artifact service, and source CLI SIGINT/SIGTERM:
+artifact service, and source CLI SIGINT/SIGTERM for both VM and TestRun downloads.
+VM CLI tests include actual sealed publication, isolated pages, linked TestRun
+artifacts, VM tombstones, existing-file preservation and rejected foreign IDs.
+Separate response fixtures exercise invalid/misbound metadata, full 200-item
+pages, local option validation and deadlines:
 
 ```sh
 cd libs/gaovm_api_client
 mise exec dart@3.9 -- dart test
 cd ../../clients/gaovm_cli
-mise exec dart@3.9 -- dart test test/public_api_cli_test.dart test/test_run_cli_test.dart
+mise exec dart@3.9 -- dart test test/public_api_cli_test.dart test/test_run_cli_test.dart test/vm_artifacts_cli_test.dart
 cd ../gaovm_ui
 flutter test --no-pub
 ```
@@ -134,6 +159,13 @@ the VM bundle. Each directory has a matching `owner.json`, a diagnostic
 `manifest.json`, and `payload`. Manifests are ownership/integrity evidence, not
 an independently writable catalog. The root is private (`0700`), and sealed
 files are read-only (`0400`) and synced through held descriptors.
+
+The sealed manifest records the original publication, including its initial
+retention deadline. Download and recovery compare every immutable artifact field
+and verify the payload bytes, but use SQLite's current `retention_until` rather
+than requiring that mutable policy field to match the original manifest. Reserved
+publication retries must still match the original input deadline; they return
+current catalog metadata without rewriting either the deadline or sealed files.
 
 Internal publication requires a per-artifact output budget, capped at 256 MiB.
 It streams and hashes bytes with bounded reads/writes, validates any advertised
@@ -158,11 +190,31 @@ TestRun references and payloads. Legacy/unbacked references still block cleanup,
 and unknown bundle `artifacts/` content is never erased. This supports deleting
 temporary VMs without deleting their diagnostic results.
 
-Publication can persist a supplied `retention_until`. Outcome-based default
-retention (7 days for successful ephemeral TestRuns, 30 days for failures) and
-retention-aware garbage collection still belong to the TestRun/retention workflow;
-they are not inferred or implemented by these GET routes. There is no new public
-artifact upload or delete endpoint.
+Publication can persist a supplied `retention_until`. TestRun completion sets its
+artifacts' catalog deadlines atomically with the terminal run/Operation and durable
+events: seven days from `completed_at` for success with VM deletion, otherwise
+thirty days (including failure, cancellation and retained environments). The
+original sealed manifest remains unchanged. New completion records use this
+policy; previously completed legacy records are not silently rewritten.
+
+Expiry is eligibility, not permission to delete a referenced resource. Live VM
+ownership, TestRun artifact lists/results, Operation requests/results, leases,
+guest mappings and immutable collection/step journals pin their artifacts, even
+after a run or Operation ends. Cleanup never edits those references to free space.
+Historical event payloads are provenance rather than pins. Consequently, a
+retained TestRun diagnostic may survive beyond its nominal deadline while its
+catalog references remain. Metadata-only/legacy payloads are not reclaimed.
+
+Startup reconciliation and a non-overlapping one-minute daemon loop reclaim
+expired, unreferenced managed payloads in batches of at most 100. Per-artifact and
+publication locks fence writers; references/deadlines are checked again in the
+deletion transaction. Verified ownership, immutable metadata, size, digest and a
+strict file allowlist are required before that decision. Catalog deletion and
+`artifact.deleted` commit together, followed by proven byte cleanup and
+`artifact.content_removed`. Interrupted cleanup is resumed by startup
+reconciliation; unknown or damaged content is preserved. Shutdown drains the
+active retention pass before releasing storage. There is no new public artifact
+upload or delete endpoint, and these GET routes never trigger cleanup.
 
 ## Daemon composition and evidence
 
@@ -183,8 +235,9 @@ mise exec dart@3.9 -- dart test test/artifact_repository_test.dart \
   test/sqlite_database_test.dart test/sqlite_vm_managed_file_effect_adapter_test.dart
 ```
 
-They cover immutable replay, rollback/outbox consistency, migrations, streaming
-budgets, integrity and symlink rejection, crash checkpoints, interrupted cleanup,
+They cover immutable replay across catalog retention changes, unchanged sealed
+manifests, immutable-field rejection, rollback/outbox consistency, migrations,
+streaming budgets, integrity and symlink rejection, crash checkpoints, interrupted cleanup,
 live-writer isolation, cursor isolation, typed errors, and downloads after actual
 bundle cleanup, VM tombstoning and catalog reopen. Daemon tests additionally cover
 linked-root rejection. These checks do not establish installed-daemon startup,

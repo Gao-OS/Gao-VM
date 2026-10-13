@@ -18,6 +18,24 @@ curl --http1.1 --max-time 10 --unix-socket /absolute/state/run/api.sock \
   'http://localhost/v1/vms/VM_ID/logs?kind=serial'
 ```
 
+The public-API CLI exposes the same read-only view:
+
+```sh
+cd clients/gaovm_cli
+mise exec dart@3.9 -- dart run bin/gaovm_cli.dart \
+  --socket-path /absolute/state/run/api.sock \
+  vm logs VM_ID --kind serial --timeout-seconds 10 --json
+```
+
+Omit `--kind` for all current kinds. Compact `--json` and pretty JSON retain the
+`items` envelope; no log bytes, driver IPC, host filename or artifact snapshot is
+introduced. The ordinary local deadline is 30 seconds, configurable from 1 to
+86400 seconds. The CLI requires HTTP `200`, the complete frozen envelope and
+typed references belonging to the requested VM and optional kind. Malformed or
+mismatched replies return exit `4` without success output. Usage errors return
+`2` before socket I/O, API Problems `1`, transport errors `3`, and deadlines `124`.
+Mutation, wait, output-directory, event and pagination options are not accepted.
+
 The response is `200 application/json` with an `X-Request-ID` header and exactly
 an `items` array. Each item has the frozen `LogReference` fields:
 
@@ -90,6 +108,12 @@ Only the fixed files and a manifest of at most 1 MiB are inspected. Log tail/str
   growth/rotation, pinned origins across spec changes, malformed requests,
   missing/corrupt manifests, links, unsafe permissions, FIFO rejection,
   descriptor replacement and unchanged durable work/files.
+- `clients/gaovm_cli/test/vm_logs_cli_test.dart` exercises the actual log service,
+  SQLite catalog, owned VM bundles and public UDS through `runCli`: VM isolation,
+  fixed current-file metadata, filtering, growth, absent bundles/logs, and
+  not-found/redacted unsafe-file Problems. Separate HTTP fixtures check malformed
+  and mismatched replies, read-only headers, option rejection, deadlines and a
+  real CLI process launched outside the checkout. No driver is launched.
 
 ```sh
 cd libs/gaovm_models
@@ -97,6 +121,8 @@ mise exec dart@3.9 -- dart test
 cd ../../daemon/gaovmd
 mise exec dart@3.9 -- dart test test/vm_log_api_handlers_test.dart test/vm_bundle_filesystem_test.dart
 mise exec dart@3.9 -- dart test test/daemon_application_test.dart --name 'installed daemon serves the VM catalog over HTTP UDS'
+cd ../../clients/gaovm_cli
+mise exec dart@3.9 -- dart test test/vm_logs_cli_test.dart
 ```
 
 The portable API tests use real SQLite, managed image/bundle publication and HTTP

@@ -2,9 +2,11 @@
 
 This is the client boundary for development-plan M7 and PRD `CLI-005`, `CLI-007`,
 `CLI-008`, and `API-012`. It does not complete those requirements' installed or
-GaoOS acceptance. The installed daemon does not yet register the Guest exec
-endpoint, and its per-VM Guest sessions, durable exec worker, and binary artifact
-transport remain M6 work. An unavailable route/agent is an API failure, never a
+GaoOS acceptance. Daemon composition now registers the Guest exec endpoint with
+the [durable application service and worker](GUEST_EXEC_DURABILITY.md), including
+binary stdout/stderr publication. Installed/native GaoOS integration remains M6
+work; optional native Guest capability advertisement is still disabled.
+An unavailable route/agent is an API failure, never a
 reason to run a command on the host.
 
 ## Request and acceptance
@@ -67,8 +69,9 @@ request preservation, private socket ownership, generated/supplied keys, JSON
 formats, acceptance correlation, API errors, local validation, and deadlines.
 They do not implement or validate server-side durability, cancellation, Guest
 authentication, vsock, actual Guest execution, or artifact transfer. No frozen
-public/driver/Guest schema or production daemon behavior is changed by this slice.
+public/driver/Guest schema is changed by the client adapter; server execution is
+implemented separately by the host worker boundary.
 
 Full `CLI-005`/M6 acceptance still requires the installed public application
-service and worker, authenticated per-generation Guest sessions, and real GaoOS
+service/worker validation, authenticated per-generation Guest sessions, and real GaoOS
 readiness/exec/artifact E2E. Client fixture success is not that evidence.

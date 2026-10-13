@@ -1,18 +1,23 @@
 ---
 project: GaoVM
-title: Guest binary stream v1 提案
-document: protocol-proposal
-status: proposed
-accepted: false
+title: Guest binary stream v1 契约
+document: protocol-contract
+status: accepted
+accepted: true
+accepted_on: 2026-10-10
 target_work_packages: ["023", "024", "025"]
-updated: 2026-10-10
+updated: 2026-10-11
 ---
 
-# Guest binary stream v1 提案
+# Guest binary stream v1 契约
 
-本文待评审，不是已冻结契约，不证明 native vsock 或完整 Guest Agent 已实现。
-在用户批准之前，不修改 M0 文档、guest/driver schema、public API 或运行中的 wire behavior。
-当前实现基线为 e4f6bed，包含 async control negotiation；本文的 binary wire 仍未实施。
+用户于 2026-10-10 批准本文与 [private driver bridge 契约](GUEST_DRIVER_BRIDGE_V1.md)。
+本文冻结下述独立 binary wire 与 trust boundary；不证明 native vsock 或完整 Guest Agent 已实现。
+实施时保持既有 M0 control framing、guest/driver schema 与 public API 不变。
+原实现基线 e4f6bed 包含 async control negotiation。现在增加独立 schema、golden header 与
+Rust framing、control epoch、grant/ACK、P0 dispatcher/sealed-source、owned control coordinator 与 Linux resident entrypoint。
+driver/daemon 通路与 durable host publication 已有实现及 Unix 组件验证，真实 Rust guest → Dart host
+也已验证 durable commit-before-ACK。installed/native service acceptance 仍未完成，不能将组件测试视为完整 binary transfer acceptance。
 
 ## 1. 范围与已核实缺口
 
@@ -31,10 +36,12 @@ updated: 2026-10-10
 来源：[guest schema](../../schemas/guest-protocol/v1.schema.json)、
 [driver schema](../../schemas/driver-protocol/v2.schema.json)、
 [guest library scope](../../guest/gaovm_guestd/README.md)。
+独立 grammar/golden header 见 [binary schema](../../schemas/guest-binary/v1.schema.json)；
+schema 与 framing 组件不证明 runtime session/grant、durable publish 或 native acceptance。
 
-## 2. 建议决策
+## 2. 已接受决策
 
-建议在既有 guest_agent.vsock_port 上使用独立 binary connection；默认端口仍是
+在既有 guest_agent.vsock_port 上使用独立 binary connection；默认端口仍是
 VmSpec 已定义的 10777。每条 binary connection 只传一个 sealed artifact。
 binary framing 使用独立版本 gaovm.binary.v1，不增加现有 control method、
 capability、event 或 outputReference 字段。
@@ -50,7 +57,7 @@ daemon 不调用 Virtualization.framework；public API 不暴露 bridge、stream
 
 ## 3. Trust 与 session binding
 
-以下是建议的授权模型，不是已验证的平台安全结论：
+以下是已接受的授权模型，不是已验证的平台安全结论：
 
 1. Swift driver 仅为已通过 per-generation token 验证的 daemon 建立私有 bridge；
    每个额外 bridge connection 也必须验证调用者，不能只认证最初的 driver RPC。
@@ -74,10 +81,15 @@ host CID 检查本身不足以支持共享 CID 的任意第三方 host backend�
 私有 bridge 无法保证上述调用者身份隔离，必须先增加并批准显式 authentication/
 channel-binding 契约，不能宣称本提案已解决该环境的进程级认证。
 
-generic image 不预埋 VM ID/generation。建议 guest 仅在没有 active control session 时，
+generic image 不预埋 VM ID/generation。guest 仅在没有 active control session 时，
 从已验证 host peer 的第一个合法 host hello 接受 binding，再创建显式 Session、
 flush host hello acknowledgement，并完成 guest hello。已有 binding 不能在原连接中重写。
-该 bootstrap 流程需要独立测试；现有 negotiate helper 本身不执行 native peer 检查或 binding adoption。
+`ControlSlot` 的 host-first bootstrap 已有独立 Unix socket 测试；现有 negotiate helper
+本身不执行 native peer 检查或 binding adoption。`GuestResources::bootstrap` 现通过 counted
+owned worker 在 guest hello/ACK 前初始化 core handler/resource；初始化失败不发 readiness
+bytes，取消后同一 opening 不能换 framing halves/deadline 重试，真实 worker 与被丢弃的
+engine result cleanup 完成前不能复用 slot。native coordinator 必须使用该初始化路径，
+不能将协议 hello 完成或旧 `bind` 路径当作 service readiness。
 
 ## 4. Connection framing
 
@@ -221,8 +233,9 @@ output 匹配。不能拿任意 op/artifact ID 查询全局存储，不能从 in
 guest 在 seal 阶段计算并保留 digest，不能在每次 transfer 临时重读源文件来掩盖
 source 已变化。当前 library 的 `Executor::output_artifact` 已提供 capture-time SHA-256、
 ID、kind、content type 和 size 的本地 metadata，并受原 session/VM/generation/op 检查约束。
-它不是 wire descriptor，没有 stream_id，也未实现 grant registry 或 binary transfer；
-上述 channel/session 授权与传输仍需接受本提案后实施。
+它本身不是 wire descriptor，没有 stream_id。`grants::GrantRegistry` 现在仅在同一
+opaque control epoch 的 terminal status response flush 成功后授权相应 output，并在
+binary ready 中补充 CSPRNG stream handle；host publication 已有实现，native channel 认证与 installed acceptance 仍需验证。
 返回 metadata：
 
 ```json
@@ -283,17 +296,84 @@ service 才调用现有内部 release。inline-only exec 的 terminal-result TTL
 在 service lifecycle 中定义；本文不暗中增加 result.release wire RPC。
 host artifact 保留期遵循 PRD，不因 guest spool retirement 或 control EOF 被删除。
 
-## 7. 有界资源与失败语义（建议值，未实施）
+## 7. 有界资源与失败语义（已接受值，部分组件已实施）
 
-| 项目 | 建议 |
+| 项目 | 契约 |
 |---|---|
 | metadata header | 1..4096 encoded bytes |
 | body chunk | 1..8192 bytes；0 为 end，不是空 data chunk |
 | artifact hard maximum | 256 MiB；实际 admission 取双方 policy、remaining budget 的更小值 |
 | 默认 capture/collection limit | 保持当前 library 的 16 MiB；不因 binary transport 放宽 |
 | 同一 guest active transfer / pending open | 2 / 8；超额拒绝，不无界排队 |
-| guest aggregate retained spool | 默认 256 MiB，包含 exec 与 collection；现有独立 limits 不证明此 aggregate 已落实 |
+| guest aggregate retained spool | 默认 256 MiB，exec 与 collection 共享；运行 capture reservation、retained file、open reader 与真实 I/O worker 都占用同一 lifetime budget |
 | open / body / commit-ACK deadline | 默认 5 / 30 / 30 秒；每阶段 absolute deadline，受外层 operation deadline 限制，不按每个 chunk 重置 |
+
+Rust library 已实施 header/chunk/size/digest、post-flush grant、每 epoch 两个 active
+transfer、单 grant reader、original open/30 秒 body/ACK deadline 和对应 ACK retirement。
+registry descriptor cap 为当前默认 engine retention 推导的 4,160；不是 spool byte quota。
+Linux-only `HostListener` 已有 native AF_VSOCK/getpeername host-CID admission、八个
+pending open permit 和原始五秒 deadline；coordinator 必须保持同一 long-lived listener、
+在 hello/grant admission 前持有 permit，不能按 preface 重置 deadline。该组件及 Linux-only
+rejection tests 目前仅 cross-compile，未证明真实 GaoOS/VZ CID 或 quota 行为。
+`ControlSlot` 已有 host-first binding 与 EOF/deadline/revocation fencing；cleanup owner
+显式 finish 前不允许 replacement，真实 Unix fixture 验证先 revoke 并 join binary I/O。
+`GuestDispatcher` 现已组合 P0 request、post-flush grant 与 sealed collection/stdout/stderr
+source-provider；binary open 先通过完整 grant admission，再用已授权 operation 查原始
+sealed source，不接受路径、不扫描 artifact、不重新执行 command。terminal exec metadata
+先同步 snapshot 并释放 executor lock，再等待 entropy；real Unix regression 验证等待
+entropy 不阻塞 health/cancel。跨 epoch 重用的 `GuestResources` 为 entropy/system.info
+提供一个 shared owned blocking permit，caller cancel 也不提前释放真实 worker。
+`GuestResources` 现还跨 epoch 共享默认 256 MiB `SpoolBudget`；exec 在 spawn 前预留
+最大 combined capture，collection 在复制前预留 remaining capacity，capture seal 且真实
+writer 完成后才返还未用容量。metadata 不为每个 artifact 保留 FD；reader 保有原始
+readonly inode、private directory 和整组 reservation，release/drop 不会提前返还仍由
+sibling/reader/worker 持有的容量。真实 subprocess 和跨 generation reader 测试验证
+quota rejection 发生在 command side effect 前，以及旧 reader 关闭后才能重用容量。
+collection copy、capture write/sync/inline read 和 binary source read 由共享 11 个 owned
+blocking I/O permit 限制（4 exec × 2 stream + 1 collection + 2 transfer），不无界排队。
+caller cancel 不提前归还 queued/running syscall 的 file/quota；被丢弃的 result 先关闭
+file，再归还 worker permit。新 bootstrap 在 owned worker 执行初始化；旧 `bind`、
+open/metadata/final unlink 仍含同步 filesystem 调用，这不是完整 filesystem latency 或
+installed shutdown policy。
+`shutdown` 先 revoke，再等待执行进程与 capture/metadata worker；真实 child 测试验证
+正常 cleanup 路径。协调器仍必须 join transfer/capture task、关闭控制通道、drop context，
+并通过 `GuestResources::quiesce`，才可 finish cleanup slot。缺失/替换对象或 removal
+失败会保留 suspect spool、永久 quarantine 此 budget 并使 final barrier 失败；不能通过
+new budget 隐藏未确认占用。当前没有 crash recovery scanner 或持久化 quota reconstruction。
+inline file 的 final removal 发生在 reservation seal 前；cleanup fence 也阻止 seal 缩减
+该 charge 或将未确认 cleanup 作为正常 terminal result，沿用 `GUEST_INTERNAL_ERROR`。
+`GuestControl` library coordinator 现拥有 framing halves、最多八个 in-flight request 和
+十个 binary job（八个 pending opening + 两个 active transfer），保留 listener 的 opening
+permit/original deadline。control EOF/error/deadline 或 trusted local `stop` 先 revoke，
+再 abort/join task、reap process、关闭 transport、drop dispatcher，并通过 final resource
+barrier 才 finish slot；requested stop 不能掩盖 cleanup failure，weak session handle 不持有
+dispatcher，也不能授权 replacement epoch。frame/request budget 由 caller 显式提供，
+不新增 wire heartbeat 要求或 installed-service 默认值。Unix fixture 验证 real process stop、
+stalled binary 下 health/EOF cleanup、sibling ACK，以及 drop-time removal failure 后 fresh
+slot 也不能绕过同一 quarantined resource owner 广告 readiness。
+Linux `gaovm-guestd` entrypoint 现组合 long-lived `HostListener`、`GuestAcceptor` 和同一
+`GuestResources`。只有实际 native peer admission 后的 stream 进入 router；control prefix
+带原 deadline 交回 decoder，已读取 GAB1 的 binary stream 不重复消费 magic。router 拥有
+最多九个 connection task（一个 control owner + listener 的八个 opening），用 opaque
+owner identity 防止旧 task 清除 replacement handle，且 resident loop 在没有新 connection
+时也 supervise completion。SIGTERM/SIGINT 关闭 listener，再永久 stop admission、join
+opening/control owner 并通过 actual worker barrier；取消 opening 不等于 initializer/result
+cleanup 已完成。Unix fixture 验证这些 ownership 路径及 confirmed cleanup 后 replacement。
+CLI 要求显式 absolute source/spool root 与 positive finite I/O budget，port 默认仍为 10777；
+无 VM identity/root/budget 默认值。Linux path 仅 compile/lint，native signal/vsock/prctl
+尚未执行。`PR_SET_NO_NEW_PRIVS` 继承到 child，但不移除现有 UID/capability，也不代替
+unprivileged account/cgroup installation。authorized binary-open error header 现已组合：
+仅 live published full binding/selector 匹配后才允许 bounded correlated error，无 body，
+固定 diagnostics；quota check 排在 binding match 后，未知/未发布/过期/retired binding
+即使 pool 已满也不回显 identity。source failure 不 retire grant，busy/quota failure 不
+admit reader。error reply 保留 opening permit 到 flush/transport close，受原 opening、
+operation、grant deadline 与 epoch revocation 约束；ready/body 后失败仍直接 close，
+不追加 error frame。真实 Unix fixture 验证 source restoration/retry、full quota 下 foreign
+binding silence，以及 stalled error 的 health/deadline/EOF cleanup。group/result
+retirement、crash recovery、least-privilege image integration 与 installed/native acceptance 仍未完成；
+guest quota/retirement 不暗中定义 host artifact retention policy。
+`ControlEpoch` 只证明 wire hello/flush，
+不证明 native peer CID；native acceptor 在读取 preface 前独立检查 kernel peer address。
 
 open error header 字段严格为 protocol_version、kind=error、vm_id、
 driver_generation、operation_id、artifact_id、error。error 只含 code、message、
@@ -322,7 +402,7 @@ retryable 不承诺自动重试；过期 grant 必须通过原 control operation
    保留原 control schema 与 framing 回归，先做真实 Unix socket 成功/失败测试。
 2. Rust service：native Linux vsock、peer CID、host-first binding bootstrap、bounded worker/
    spool/retention、signal/disconnect cleanup；全部 P0 handler/binary path 可用才 advertise core。
-3. Swift/Dart：另行批准并冻结 private driver bridge 的创建/认证/关闭契约；VZ device 操作只在
+3. Swift/Dart：遵循已接受的 [private driver bridge 契约](GUEST_DRIVER_BRIDGE_V1.md)；VZ device 操作只在
    runtime queue，bytes pump 不占用该 queue；daemon per-VM guest session 使用该私有通路。
 4. Host artifact service：durable mapping、stage/fsync/publication/recovery、Operation/TestRun
    引用与 outbox，并接入现有 public artifact endpoint。
@@ -341,16 +421,31 @@ retryable 不承诺自动重试；过期 grant 必须通过原 control operation
 - binary backpressure 下 control health/cancel 仍响应，VM-B 不受 VM-A 失败影响；
 - 真实 VZ vsock peer CID、driver bridge 每连接授权、guest bootstrap 与公开 artifact download。
 
-上述均为待实施/验证门槛，不因 schema examples 或 library tests 通过而视为完成。
+Rust grant/transfer fixture 已验证 post-flush admission、完整 binding/ACK、reader/expiry
+ownership、retry、sibling spool 保留与 stalled binary 下的 control health。其 ACK 由 fixture
+发送，不证明 host durable commit；其 Unix socket 不证明 native CID/bridge authentication。
+Dart [host stdout/stderr library](../GUEST_ARTIFACT_PUBLICATION.md) 现组合 original
+control epoch/start-marker、durable complete terminal snapshot、bounded receive、
+managed publication 与同一 transaction 的 mapping/event/outbox。真实 Unix/SQLite fixture
+验证 commit 前不发 ACK、ACK 丢失保留 bytes、重试不重复 resource、public HTTP download、
+共享 admission/cleanup barrier。另有 [真实 Rust guest → Dart host 检查](../GUEST_ARTIFACT_PUBLICATION.md#real-rust-guest-to-dart-host)，
+验证 actual grant/ACK consumption、stdout/stderr sibling、raw collection/empty bytes、durable mapping
+与公开 HTTP download，以及实际 Unix guest/exec shutdown 后 unknown recovery 不重放 command。
+该 test-only private Unix bridge 不证明 native CID、VZ bridge 或 escaped-descendant containment。
+[production worker/API](../GUEST_EXEC_DURABILITY.md) 与
+[ordered TestRun steps](../TEST_RUN_STEPS.md) 已接入 daemon composition，并有 Unix/SQLite
+fixture 验证。[host collection / TestRun diagnostics](../TEST_RUN_ARTIFACTS.md)
+已有 one-shot SQLite marker、exact collection descriptor receive 与 production composition。
+真实 guest retirement/recovery 与 installed/native 门槛仍待验证，不能因 library checks 通过视为完成。
 
-## 9. 待用户决定
+## 9. 决策记录
 
-是否接受“同端口独立 connection + GAB1/gaovm.binary.v1 + binary-side exec metadata lookup +
-chunk/end + durable commit ACK”的整体方向及第 3 节 trust boundary？
+用户于 2026-10-10 接受“同端口独立 connection + GAB1/gaovm.binary.v1 + binary-side exec metadata lookup +
+chunk/end + durable commit ACK”及第 3 节 trust boundary。
 若要求 shared-host 的独立进程级 guest authentication，先设计显式 session secret/channel
 binding，而不是把 stream_id、public artifact_id 或日志中的 request_id 当作凭证。
 
-接受本提案不自动批准任何尚未定义的 driver protocol schema 变更；第 8 节第 3 项仍须明确契约。
+此决定不批准任何尚未定义的 driver protocol schema 变更；第 8 节第 3 项遵循同日接受的独立 bridge 契约。
 本文不把 M6、package 023 或 MVP 标记为完成。
 
 ## 10. 平台依据与证据边界

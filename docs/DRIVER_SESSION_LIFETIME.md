@@ -10,8 +10,10 @@ recovery or native release acceptance.
 The monotonic deadline starts when the v2 session runs, before accepting a daemon
 connection. Connecting late does not grant another 15 seconds. A hello result
 alone does not authenticate the daemon or refresh the deadline: both directions
-of the version/capability/token handshake must complete. Subsequent authenticated,
-correlation-checked RPCs renew the deadline.
+of the version/capability/token handshake must complete with the same negotiated
+capability intersection. Subsequent authenticated, correlation-checked RPCs with
+negotiated command capabilities renew the deadline. Optional
+[display capabilities](DRIVER_DISPLAY.md) do not become runtime-core requirements.
 
 The same watchdog covers waiting for a connection, incomplete frame headers and
 payloads, and response writes under backpressure. Partial byte progress and
