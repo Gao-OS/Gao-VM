@@ -5,6 +5,8 @@ import 'dart:io';
 import 'package:gaovm_cli/gaovm_cli.dart';
 import 'package:gaovm_models/gaovm_models.dart';
 
+import 'e2e_runtime_inspection.dart';
+
 Future<void> main(List<String> args) async {
   if (args.length == 1 && args.single == '--help') {
     stdout.writeln(
@@ -13,18 +15,21 @@ Future<void> main(List<String> args) async {
       'Optional: INITRD_PATH, DRIVER_BIN, STATE_DIR (must not exist),\n'
       'SOCK_PATH (inside STATE_DIR/run), TIMEOUT_SECONDS (default 120).\n'
       'DART_BIN selects the Dart 3.9 executable in the shell entrypoint.\n'
+      '--multi-vm selects the three-VM independence check instead of display.\n'
       'Inputs are imported; the VM receives a managed writable disk.\n'
       'Run files are retained. This is not installed-service or GaoOS acceptance.',
     );
     return;
   }
   OwnedE2eDaemon? daemon;
+  NativeVmRuntimeInspection? inspection;
   ProcessSignal? interrupted;
   final signals = <StreamSubscription<ProcessSignal>>[];
   try {
-    if (args.isNotEmpty)
+    final multiVm = args.length == 1 && args.single == '--multi-vm';
+    if (args.isNotEmpty && !multiVm)
       throw const FormatException(
-        'use --help or environment inputs, not positional arguments',
+        'use --help, --multi-vm or environment inputs, not positional arguments',
       );
     if (!Platform.isMacOS ||
         (await Process.run('/usr/bin/uname', [
@@ -60,27 +65,14 @@ Future<void> main(List<String> args) async {
     final customDriver = env['DRIVER_BIN'] == null
         ? null
         : await _existingFile(env['DRIVER_BIN'], 'DRIVER_BIN');
-    Directory state;
-    if (env['STATE_DIR'] case final requested?) {
-      if (!Directory(requested).isAbsolute ||
-          await FileSystemEntity.type(requested, followLinks: false) !=
-              FileSystemEntityType.notFound) {
-        throw const FormatException(
-          'STATE_DIR must be an absolute, new directory; existing state is never reused',
-        );
-      }
-      state = await Directory(requested).create();
-    } else {
-      state = await Directory.systemTemp.createTemp('gaovm-native-e2e-');
-    }
-    state = Directory(await state.resolveSymbolicLinks());
-    await _tool('/bin/chmod', ['700', state.path]);
+    final state = await createSmokeState(requested: env['STATE_DIR']);
     stdout.writeln(jsonEncode({'state_dir': state.path, 'retained': true}));
     final socket = env['SOCK_PATH'] ?? '${state.path}/run/api.sock';
     if (!File(socket).isAbsolute ||
-        File(socket).parent.path != '${state.path}/run')
+        File(socket).parent.path != '${state.path}/run' ||
+        utf8.encode(socket).length >= 104)
       throw const FormatException(
-        'SOCK_PATH must be inside the canonical STATE_DIR/run',
+        'SOCK_PATH must fit the Unix socket limit inside canonical STATE_DIR/run',
       );
     final driverProject = '${root.path}/drivers/vz_macos';
     String sourceDriver;
@@ -114,6 +106,13 @@ Future<void> main(List<String> args) async {
       '$driverProject/Resources/entitlements.plist',
       driver.path,
     ]);
+    if (multiVm)
+      inspection = await NativeVmRuntimeInspection.open(
+        stateDirectory: state,
+        executable: driver.path,
+      );
+    final vmIds = <VmId>[];
+    final runtimeBindings = <Map<String, Object?>>[];
     final process = await Process.start(
       Platform.resolvedExecutable,
       [
@@ -151,6 +150,25 @@ Future<void> main(List<String> args) async {
       initrdPath: initrd,
       diskPath: disk,
       timeoutSeconds: timeout,
+      multiVm: multiVm,
+      inspectRuntimes: inspection == null
+          ? null
+          : (vms) async {
+              final records = await inspection!.check(vms);
+              if (vmIds.isEmpty) {
+                vmIds.addAll(vms.map((vm) => vm.metadata.id));
+                runtimeBindings.addAll(
+                  records.map(
+                    (record) => {
+                      'vm_id': record.correlation.vmId.value,
+                      'driver_generation': record.correlation.driverGeneration,
+                      'pid': record.pid,
+                      'socket_path': record.socketPath,
+                    },
+                  ),
+                );
+              }
+            },
     );
     await owned.stop();
     if (interrupted != null) throw StateError('native run interrupted');
@@ -158,13 +176,20 @@ Future<void> main(List<String> args) async {
       jsonEncode({
         'vm_id': id.value,
         'state_dir': state.path,
-        'public_vm_display_flow': 'passed',
+        if (multiVm) ...{
+          'vm_ids': vmIds.map((id) => id.value).toList(),
+          'public_multi_vm_isolation': 'passed',
+          'runtime_bindings': runtimeBindings,
+        } else
+          'public_vm_display_flow': 'passed',
         'daemon_exit_confirmed': true,
         'not_verified': [
           'framebuffer',
           'input',
           'guest_exec',
-          'multi_vm',
+          if (multiVm) 'display' else 'multi_vm',
+          'test_run',
+          'daemon_restart_recovery',
           'crash_recovery',
           'installed_service',
           'release',
@@ -185,9 +210,39 @@ Future<void> main(List<String> args) async {
       exitCode = 1;
     }
     for (final signal in signals) await signal.cancel();
+    inspection?.close();
     if (interrupted != null)
       exitCode = interrupted == ProcessSignal.sigint ? 130 : 143;
   }
+}
+
+Future<Directory> createSmokeState({String? requested}) async {
+  Directory state;
+  if (requested != null) {
+    if (!Directory(requested).isAbsolute ||
+        await FileSystemEntity.type(requested, followLinks: false) !=
+            FileSystemEntityType.notFound)
+      throw const FormatException(
+        'STATE_DIR must be an absolute, new directory; existing state is never reused',
+      );
+    state = await Directory(requested).create();
+  } else {
+    state =
+        await (Platform.isMacOS
+                ? Directory('/private/tmp')
+                : Directory.systemTemp)
+            .createTemp('gvm-e2e-');
+  }
+  state = Directory(await state.resolveSymbolicLinks());
+  await _tool('/bin/chmod', ['700', state.path]);
+  // Shape-only probe for the frozen 26-character VM ID, not a created resource.
+  final driverSocket =
+      '${state.path}/run/vm_00000000000000000000000000/1/driver.sock';
+  if (utf8.encode(driverSocket).length >= 104)
+    throw FormatException(
+      'STATE_DIR leaves no room for the driver socket; choose a shorter path. New private state retained at ${state.path}',
+    );
+  return state;
 }
 
 Future<String> _existingFile(String? path, String name) async {
@@ -303,7 +358,13 @@ Future<VmId> runVmHappyPath({
   required String diskPath,
   String? initrdPath,
   int timeoutSeconds = 120,
+  bool multiVm = false,
+  Future<void> Function(List<VirtualMachine>)? inspectRuntimes,
 }) async {
+  if (multiVm && inspectRuntimes == null)
+    throw ArgumentError(
+      'multi-VM acceptance requires native runtime inspection',
+    );
   final keyPrefix = RequestId.generate().value;
   var keySequence = 0;
   Future<Object?> cli(List<String> command) async {
@@ -329,10 +390,9 @@ Future<VmId> runVmHappyPath({
     return jsonDecode(output.toString());
   }
 
-  Future<Operation> mutate(
+  Future<({OperationId operationId, ResourceId resourceId})> accept(
     List<String> command,
-    ResourceType type,
-    String operationType, {
+    ResourceType type, {
     ResourceId? target,
   }) async {
     final body = await cli([
@@ -355,11 +415,19 @@ Future<VmId> runVmHappyPath({
         : VmId(body['resource_id'] as String);
     if (target != null && target != resource)
       throw StateError('acceptance belongs to another resource');
+    return (operationId: operationId, resourceId: resource);
+  }
+
+  Future<Operation> completion(
+    ({OperationId operationId, ResourceId resourceId}) accepted,
+    ResourceType type,
+    String operationType,
+  ) async {
     final operation = Operation.fromJson(
-      await cli(['operation', 'wait', operationId.value]),
+      await cli(['operation', 'wait', accepted.operationId.value]),
     );
-    if (operation.id != operationId ||
-        operation.resourceId != resource ||
+    if (operation.id != accepted.operationId ||
+        operation.resourceId != accepted.resourceId ||
         operation.resourceType != type ||
         operation.type != operationType ||
         operation.state != OperationState.succeeded) {
@@ -367,6 +435,17 @@ Future<VmId> runVmHappyPath({
     }
     return operation;
   }
+
+  Future<Operation> mutate(
+    List<String> command,
+    ResourceType type,
+    String operationType, {
+    ResourceId? target,
+  }) async => completion(
+    await accept(command, type, target: target),
+    type,
+    operationType,
+  );
 
   Future<ImageId> importImage(String path, String type) async =>
       (await mutate(
@@ -408,35 +487,28 @@ Future<VmId> runVmHappyPath({
         ),
       ],
       networks: [SharedNetwork(id: 'net0')],
-      graphics: GraphicsConfig(enabled: true, width: 1280, height: 800),
+      graphics: multiVm
+          ? GraphicsConfig(enabled: false)
+          : GraphicsConfig(enabled: true, width: 1280, height: 800),
       serial: const SerialConfig(enabled: true, capture: true),
       guestAgent: GuestAgentConfig(enabled: false, requiredForReady: false),
       restartPolicy: RestartPolicy.never,
     ),
   );
-  final created = await mutate(
-    ['vm', 'create', '--body-json', jsonEncode(request.toJson())],
-    ResourceType.virtualMachine,
-    'vm.create',
-  );
-  final id = created.resourceId as VmId;
-
-  Future<Operation> action(String action) => mutate(
+  Future<Operation> action(String action, VmId id) => mutate(
     ['vm', action, id.value],
     ResourceType.virtualMachine,
     'vm.${action.replaceAll('-', '_')}',
     target: id,
   );
-  Future<VirtualMachine> vm() async {
+  Future<VirtualMachine> vm(VmId id) async {
     final result = VirtualMachine.fromJson(await cli(['vm', 'get', id.value]));
     if (result.metadata.id != id)
       throw StateError('VM status belongs to another VM');
     return result;
   }
 
-  Object? primaryFailure;
-  try {
-    await action('start');
+  Future<void> waitRunning(VmId id) async {
     final wait = await cli([
       'vm',
       'wait',
@@ -453,18 +525,93 @@ Future<VmId> runVmHappyPath({
         DateTime.tryParse(wait['observed_at'] as String) == null) {
       throw const FormatException('invalid runtime wait result');
     }
-    final running = await vm();
+  }
+
+  void requireRunning(VirtualMachine running) {
     if (running.status.phase != VmPhase.running ||
         running.status.desiredState != DesiredState.running ||
         running.status.driverGeneration < 1) {
       throw StateError('VM did not reach a running generation');
     }
+  }
+
+  final owned = <VmId>[];
+  Object? primaryFailure;
+  try {
+    for (var index = 0; index < (multiVm ? 3 : 1); index++) {
+      final created = await accept([
+        'vm',
+        'create',
+        '--body-json',
+        jsonEncode(
+          VmCreateRequest(
+            name: '${request.name}-$index',
+            spec: request.spec,
+          ).toJson(),
+        ),
+      ], ResourceType.virtualMachine);
+      final id = created.resourceId as VmId;
+      if (owned.contains(id))
+        throw StateError('VM creation reused another VM identity');
+      // Keep accepted resources owned even if their create completion fails.
+      owned.add(id);
+      await completion(created, ResourceType.virtualMachine, 'vm.create');
+    }
+    final id = owned.first;
+    if (multiVm) {
+      final starts = await Future.wait([
+        for (final target in owned.take(2))
+          accept(
+            ['vm', 'start', target.value],
+            ResourceType.virtualMachine,
+            target: target,
+          ),
+      ]);
+      if (starts.map((start) => start.operationId).toSet().length != 2)
+        throw StateError('independent starts share an Operation');
+      await Future.wait([
+        for (final start in starts)
+          completion(start, ResourceType.virtualMachine, 'vm.start'),
+      ]);
+      await Future.wait(owned.take(2).map(waitRunning));
+      final running = await Future.wait(owned.map(vm));
+      requireRunning(running[0]);
+      requireRunning(running[1]);
+      void requireNeverStarted(VirtualMachine stopped) {
+        if (stopped.status.phase != VmPhase.stopped ||
+            stopped.status.desiredState != DesiredState.stopped ||
+            stopped.status.driverGeneration != 0)
+          throw StateError('the third VM started a runtime');
+      }
+
+      requireNeverStarted(running[2]);
+      await inspectRuntimes!(running);
+      await action('stop', id);
+      final isolated = await Future.wait(owned.map(vm));
+      if (isolated[0].status.phase != VmPhase.stopped ||
+          isolated[0].status.desiredState != DesiredState.stopped)
+        throw StateError('owned VM stop did not complete');
+      requireRunning(isolated[1]);
+      if (isolated[1].status.driverGeneration !=
+              running[1].status.driverGeneration ||
+          isolated[1].spec != running[1].spec ||
+          isolated[1].status.observedGeneration !=
+              running[1].status.observedGeneration)
+        throw StateError('stopping VM-A changed VM-B lifetime');
+      requireNeverStarted(isolated[2]);
+      await inspectRuntimes(isolated);
+      return id;
+    }
+    await action('start', id);
+    await waitRunning(id);
+    final running = await vm(id);
+    requireRunning(running);
     for (final open in [true, false, true, false]) {
-      await action(open ? 'open-display' : 'close-display');
+      await action(open ? 'open-display' : 'close-display', id);
       final display = VmDisplayStatus.fromJson(
         await cli(['vm', 'display', id.value]),
       );
-      final current = await vm();
+      final current = await vm(id);
       if (display.vmId != id ||
           display.driverGeneration != running.status.driverGeneration ||
           display.state !=
@@ -483,17 +630,29 @@ Future<VmId> runVmHappyPath({
     primaryFailure = error;
     rethrow;
   } finally {
-    try {
-      await action('stop');
-      final stopped = await vm();
-      if (stopped.status.phase != VmPhase.stopped ||
-          stopped.status.desiredState != DesiredState.stopped) {
-        throw StateError('owned VM stop did not complete');
+    final cleanupErrors = <Object>[];
+    for (final id in owned) {
+      try {
+        await action('stop', id);
+        final stopped = await vm(id);
+        if (stopped.status.phase != VmPhase.stopped ||
+            stopped.status.desiredState != DesiredState.stopped) {
+          throw StateError('owned VM stop did not complete');
+        }
+      } catch (error) {
+        cleanupErrors.add('$id: $error');
       }
-    } catch (error) {
-      if (primaryFailure != null)
-        throw StateError('$primaryFailure; owned VM cleanup failed: $error');
-      rethrow;
     }
+    if (multiVm && owned.length == 3 && cleanupErrors.isEmpty) {
+      try {
+        await inspectRuntimes!(await Future.wait(owned.map(vm)));
+      } catch (error) {
+        cleanupErrors.add('native runtime cleanup unconfirmed: $error');
+      }
+    }
+    if (cleanupErrors.isNotEmpty)
+      throw StateError(
+        '${primaryFailure == null ? '' : '$primaryFailure; '}owned VM cleanup failed: ${cleanupErrors.join('; ')}',
+      );
   }
 }

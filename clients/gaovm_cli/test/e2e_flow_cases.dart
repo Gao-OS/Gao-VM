@@ -1,6 +1,257 @@
 part of 'public_api_cli_test.dart';
 
 void _e2eFlowTests() {
+  test('native multi-VM recipe rejects collateral VM stops', () async {
+    final api = _MultiVmApi(collateralStop: true);
+    await _withServer(api.router, (server) async {
+      await expectLater(
+        e2e.runVmHappyPath(
+          socketPath: server.socketPath,
+          kernelPath: '/fixture/kernel',
+          diskPath: '/fixture/root.raw',
+          multiVm: true,
+          inspectRuntimes: (_) async {},
+        ),
+        throwsA(
+          isA<StateError>().having(
+            (error) => error.message,
+            'diagnostic',
+            contains('running generation'),
+          ),
+        ),
+      );
+    });
+    expect(api.stops.toSet(), api.created.toSet());
+  });
+  test(
+    'native multi-VM recipe stops an accepted VM after its create completion mismatches',
+    () async {
+      final api = _MultiVmApi(mismatchCreateCompletion: true);
+      await _withServer(api.router, (server) async {
+        await expectLater(
+          e2e.runVmHappyPath(
+            socketPath: server.socketPath,
+            kernelPath: '/fixture/kernel',
+            diskPath: '/fixture/root.raw',
+            multiVm: true,
+            inspectRuntimes: (_) async {},
+          ),
+          throwsA(
+            isA<StateError>().having(
+              (error) => error.message,
+              'diagnostic',
+              contains('completion does not match'),
+            ),
+          ),
+        );
+      });
+      expect(api.created, hasLength(2));
+      expect(api.starts, isEmpty);
+      expect(api.stops.toSet(), api.created.toSet());
+    },
+  );
+  test(
+    'native multi-VM recipe joins sibling cleanup after one stop is refused',
+    () async {
+      final api = _MultiVmApi(rejectFirstStop: true);
+      await _withServer(api.router, (server) async {
+        await expectLater(
+          e2e.runVmHappyPath(
+            socketPath: server.socketPath,
+            kernelPath: '/fixture/kernel',
+            diskPath: '/fixture/root.raw',
+            multiVm: true,
+            inspectRuntimes: (_) async {},
+          ),
+          throwsA(
+            isA<StateError>().having(
+              (error) => error.message,
+              'diagnostic',
+              allOf(
+                contains('cleanup refused'),
+                contains('owned VM cleanup failed'),
+              ),
+            ),
+          ),
+        );
+      });
+      expect(api.stops.toSet(), api.created.toSet());
+      expect(api.phases[api.created.first], VmPhase.running);
+      expect(
+        api.created.skip(1).map((id) => api.phases[id]),
+        everyElement(VmPhase.stopped),
+      );
+    },
+  );
+  test(
+    'native custom state rejects oversized driver sockets before native work',
+    () async {
+      final parent = await Directory.systemTemp.createTemp('gvm-long-');
+      final state = '${parent.path}/${List.filled(80, 's').join()}';
+      try {
+        await expectLater(
+          e2e.createSmokeState(requested: state),
+          throwsA(
+            isA<FormatException>().having(
+              (error) => error.message,
+              'diagnostic',
+              contains('driver socket'),
+            ),
+          ),
+        );
+      } finally {
+        await parent.delete(recursive: true);
+      }
+    },
+  );
+  test('native default state fits the driver Unix socket path limit', () async {
+    final state = await e2e.createSmokeState();
+    try {
+      final paths = DriverRuntimeLayout('${state.path}/run').paths(
+        DriverCorrelation(
+          vmId: VmId.generate(),
+          driverGeneration: 1,
+          operationId: null,
+        ),
+      );
+      expect(utf8.encode(paths.socketPath).length, lessThan(104));
+    } finally {
+      await state.delete(recursive: true);
+    }
+  });
+  for (final mode in ['missing', 'matching', 'duplicate', 'unresolved']) {
+    test(
+      'native runtime inspection requires distinct live bindings: $mode',
+      () async {
+        final directory =
+            await (Platform.isMacOS
+                    ? Directory('/private/tmp')
+                    : Directory.systemTemp)
+                .createTemp('gvm-inspect-');
+        imageFileMode(directory.path, 0x1c0);
+        final state = Directory(await directory.resolveSymbolicLinks());
+        final executable = await File(
+          '${state.path}/driver',
+        ).writeAsString('fixture only');
+        var observed = <DriverProcessIdentity>[];
+        final identities = <VmId, DriverProcessIdentity>{};
+        final boundCounts = <int>[];
+        final inspection = await native.NativeVmRuntimeInspection.open(
+          stateDirectory: state,
+          executable: executable.path,
+          observe: () async => DriverInventorySnapshot(
+            processes: mode == 'missing' ? [] : observed,
+            unresolvedProcessIds: mode == 'unresolved' ? [300] : [],
+          ),
+        );
+        var initialized = false;
+        try {
+          final api = _MultiVmApi();
+          await _withServer(api.router, (server) async {
+            final workflow = e2e.runVmHappyPath(
+              socketPath: server.socketPath,
+              kernelPath: '/fixture/kernel',
+              diskPath: '/fixture/root.raw',
+              multiVm: true,
+              inspectRuntimes: (vms) async {
+                final layout = DriverRuntimeLayout('${state.path}/run');
+                for (final vm in vms.where(
+                  (vm) => !initialized && vm.status.phase == VmPhase.running,
+                )) {
+                  final correlation = DriverCorrelation(
+                    vmId: vm.metadata.id,
+                    driverGeneration: vm.status.driverGeneration,
+                    operationId: null,
+                  );
+                  final paths = await layout.create(correlation);
+                  final identity = DriverProcessIdentity(
+                    pid: 200 + (mode == 'duplicate' ? 0 : vms.indexOf(vm)),
+                    uid: 501,
+                    executablePath: executable.path,
+                    startedAtMicroseconds: 1000,
+                    pidVersion: 1,
+                  );
+                  identities[vm.metadata.id] = identity;
+                  await layout.writeMetadata(
+                    paths,
+                    correlation: correlation,
+                    pid: identity.pid,
+                    executable: executable.path,
+                    bundlePath:
+                        '${state.path}/vms/${vm.metadata.id.value}.gaovm',
+                    createdAt: DateTime.now(),
+                    processIdentity: identity,
+                  );
+                }
+                initialized = true;
+                observed = [
+                  for (final vm in vms.where(
+                    (vm) => vm.status.phase == VmPhase.running,
+                  ))
+                    identities[vm.metadata.id]!,
+                ];
+                boundCounts.add((await inspection.check(vms)).length);
+              },
+            );
+            if (mode == 'matching') {
+              await workflow;
+              expect(boundCounts, [2, 1, 0]);
+            } else {
+              await expectLater(
+                workflow,
+                throwsA(
+                  isA<StateError>().having(
+                    (error) => error.message,
+                    'diagnostic',
+                    contains('live driver inventory'),
+                  ),
+                ),
+              );
+            }
+          });
+        } finally {
+          inspection.close();
+          await state.delete(recursive: true);
+        }
+      },
+    );
+  }
+  test(
+    'native multi-VM recipe starts two VMs before waiting and stops them independently',
+    () async {
+      final api = _MultiVmApi();
+      final observations = <List<VirtualMachine>>[];
+      await _withServer(api.router, (server) async {
+        await e2e.runVmHappyPath(
+          socketPath: server.socketPath,
+          kernelPath: '/fixture/kernel',
+          diskPath: '/fixture/root.raw',
+          multiVm: true,
+          inspectRuntimes: (vms) async => observations.add(vms),
+        );
+      });
+      expect(api.created, hasLength(3));
+      expect(api.starts, api.created.take(2).toList());
+      expect(api.startsAtWait, [2, 2]);
+      expect(observations, hasLength(3));
+      expect(observations.first.map((vm) => vm.status.phase), [
+        VmPhase.running,
+        VmPhase.running,
+        VmPhase.stopped,
+      ]);
+      expect(observations[1].map((vm) => vm.status.phase), [
+        VmPhase.stopped,
+        VmPhase.running,
+        VmPhase.stopped,
+      ]);
+      expect(
+        observations.last.map((vm) => vm.status.phase),
+        everyElement(VmPhase.stopped),
+      );
+      expect(observations.first.last.status.driverGeneration, 0);
+      expect(api.phases.values, everyElement(VmPhase.stopped));
+    },
+  );
   test(
     'native harness cannot report success after a nonzero daemon shutdown',
     () async {
@@ -52,21 +303,26 @@ void _e2eFlowTests() {
       );
       try {
         final state = '${directory.path}/must-not-exist';
-        final result = await Process.run(
-          '/bin/bash',
-          ['../../scripts/e2e_macos14_happy_path.sh'],
-          includeParentEnvironment: false,
-          environment: {
-            'DART_BIN': Platform.resolvedExecutable,
-            'PATH': '/usr/bin:/bin',
-            'STATE_DIR': state,
-            'KERNEL_PATH': '/missing/kernel',
-            'DISK_PATH': '/missing/disk',
-          },
-        );
-        expect(result.exitCode, 2, reason: '${result.stderr}');
-        expect(result.stderr, contains('requires Apple Silicon macOS 14+'));
-        expect(await Directory(state).exists(), isFalse);
+        for (final args in [
+          <String>[],
+          ['--multi-vm'],
+        ]) {
+          final result = await Process.run(
+            '/bin/bash',
+            ['../../scripts/e2e_macos14_happy_path.sh', ...args],
+            includeParentEnvironment: false,
+            environment: {
+              'DART_BIN': Platform.resolvedExecutable,
+              'PATH': '/usr/bin:/bin',
+              'STATE_DIR': state,
+              'KERNEL_PATH': '/missing/kernel',
+              'DISK_PATH': '/missing/disk',
+            },
+          );
+          expect(result.exitCode, 2, reason: '${result.stderr}');
+          expect(result.stderr, contains('requires Apple Silicon macOS 14+'));
+          expect(await Directory(state).exists(), isFalse);
+        }
       } finally {
         await directory.delete(recursive: true);
       }
@@ -88,6 +344,7 @@ void _e2eFlowTests() {
       expect(result.stdout, contains('KERNEL_PATH'));
       expect(result.stdout, contains('DISK_PATH'));
       expect(result.stdout, contains('Apple Silicon'));
+      expect(result.stdout, contains('--multi-vm'));
       expect(result.stderr, isEmpty);
     },
   );
@@ -223,6 +480,169 @@ void _e2eFlowTests() {
         ]);
       });
     },
+  );
+}
+
+// External API boundary: real UDS/CLI traffic, not native VZ evidence.
+final class _MultiVmApi {
+  _MultiVmApi({
+    this.collateralStop = false,
+    this.mismatchCreateCompletion = false,
+    this.rejectFirstStop = false,
+  }) {
+    router
+      ..add(
+        'POST',
+        '/v1/images/import',
+        (request) async => accept(
+          request,
+          ImageId.generate(),
+          ResourceType.image,
+          'image.import',
+        ),
+      )
+      ..add('POST', '/v1/vms', (request) async {
+        final id = VmId.generate();
+        specs[id] = VmCreateRequest.fromJson(request.jsonBody!.toJson());
+        created.add(id);
+        phases[id] = VmPhase.stopped;
+        generations[id] = 0;
+        return accept(request, id, ResourceType.virtualMachine, 'vm.create');
+      })
+      ..add(
+        'GET',
+        '/v1/vms/{vm_id}',
+        (request) async => PublicApiResponse.json(
+          status: 200,
+          body: vm(VmId(request.pathParameters['vm_id']!)).toJson(),
+        ),
+      )
+      ..add(
+        'POST',
+        '/v1/vms/{vm_id}/wait',
+        (request) async => PublicApiResponse.json(
+          status: 200,
+          body: {
+            'vm_id': request.pathParameters['vm_id'],
+            'condition': 'runtime_running',
+            'reached': true,
+            'observed_at': now.toIso8601String(),
+          },
+        ),
+      )
+      ..add('POST', '/v1/operations/{operation_id}/wait', (request) async {
+        final operation =
+            operations[OperationId(request.pathParameters['operation_id']!)]!;
+        if (operation.type == 'vm.start') startsAtWait.add(starts.length);
+        if (mismatchCreateCompletion &&
+            operation.type == 'vm.create' &&
+            created.length == 2 &&
+            operation.resourceId == created.last)
+          return PublicApiResponse.json(
+            status: 200,
+            body: {...operation.toJson(), 'type': 'vm.start'},
+          );
+        return PublicApiResponse.json(status: 200, body: operation.toJson());
+      });
+    for (final action in ['start', 'stop']) {
+      router.add('POST', '/v1/vms/{vm_id}/actions/$action', (request) async {
+        final id = VmId(request.pathParameters['vm_id']!);
+        if (action == 'start') {
+          starts.add(id);
+          phases[id] = VmPhase.running;
+          generations[id] = 1;
+        }
+        if (action == 'stop') {
+          stops.add(id);
+          if (rejectFirstStop && id == created.first)
+            return PublicApiResponse.problem(
+              status: 409,
+              code: ErrorCode.vmOperationConflict,
+              type: 'vm-operation-conflict',
+              title: 'cleanup refused',
+              detail: 'cleanup refused',
+              retryable: false,
+            );
+          phases[id] = VmPhase.stopped;
+          if (collateralStop) {
+            for (final target in created) phases[target] = VmPhase.stopped;
+          }
+        }
+        return accept(
+          request,
+          id,
+          ResourceType.virtualMachine,
+          'vm.${action.replaceAll('-', '_')}',
+        );
+      });
+    }
+  }
+  final bool collateralStop;
+  final bool mismatchCreateCompletion;
+  final bool rejectFirstStop;
+  final router = PublicApiRouter();
+  final now = DateTime.now().toUtc();
+  final created = <VmId>[];
+  final starts = <VmId>[];
+  final stops = <VmId>[];
+  final startsAtWait = <int>[];
+  final specs = <VmId, VmCreateRequest>{};
+  final phases = <VmId, VmPhase>{};
+  final generations = <VmId, int>{};
+  final operations = <OperationId, Operation>{};
+  PublicApiResponse accept(
+    PublicApiRequest request,
+    ResourceId id,
+    ResourceType type,
+    String action,
+  ) {
+    expect(request.headers['idempotency-key']?.single, isNotEmpty);
+    final operation = OperationId.generate();
+    operations[operation] = Operation(
+      id: operation,
+      type: action,
+      resourceType: type,
+      resourceId: id,
+      state: OperationState.succeeded,
+      requestId: request.requestId,
+      cancellable: false,
+      request: request.jsonBody ?? JsonObjectValue.empty,
+      createdAt: now,
+      completedAt: now,
+    );
+    return PublicApiResponse.json(
+      status: 202,
+      body: {
+        'operation_id': operation.value,
+        'resource_id': id.value,
+        'resource_type': type == ResourceType.image
+            ? 'image'
+            : 'virtual_machine',
+        'state': 'pending',
+      },
+    );
+  }
+
+  VirtualMachine vm(VmId id) => VirtualMachine(
+    metadata: VmMetadata(
+      id: id,
+      name: specs[id]!.name,
+      revision: 1,
+      createdAt: now,
+      updatedAt: now,
+    ),
+    spec: specs[id]!.spec,
+    status: VmStatus(
+      desiredState: phases[id] == VmPhase.running
+          ? DesiredState.running
+          : DesiredState.stopped,
+      phase: phases[id]!,
+      specGeneration: 1,
+      observedGeneration: generations[id]!,
+      driverGeneration: generations[id]!,
+      guestAgent: GuestAgentState.disabled,
+      lastTransitionAt: now,
+    ),
   );
 }
 

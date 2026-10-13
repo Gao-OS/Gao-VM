@@ -551,6 +551,9 @@ optional initrd and an existing raw disk, creates a VM with a managed writable
 disk, waits for durable start/display/stop Operations, checks display state and
 unchanged VM generation, then confirms its owned daemon exits. It does not use
 prototype RPC commands, fixed startup sleeps, an implicit VM, or launchd.
+With `--multi-vm`, it instead creates three VMs, starts two concurrently and
+checks independent stop behavior plus distinct native PID/socket bindings and
+final zero-driver cleanup. The third VM must remain never started.
 Run it only on Apple Silicon macOS 14+ with prepared, quiescent ARM64 inputs;
 the source images and original driver are not modified. Fresh private run state
 is retained, including on failure. See [native smoke setup and limits](docs/NATIVE_VM_SMOKE.md).
@@ -565,7 +568,8 @@ mise exec dart@3.9.0 -- bash scripts/e2e_macos14_happy_path.sh
 ```
 
 The public-API recipe, owned-process handling, help and unsupported-host guard
-have fixture coverage. The actual build/sign/boot/display branch has not been
+have fixture coverage, including the multi-VM scenario with an injected native
+inventory. The actual build/sign/boot/display or multi-VM branch has not been
 run on this Intel host. Framebuffer/input, GaoOS guest survival/exec/TestRun,
 multi-VM fault isolation, installed service, upgrade and distribution remain
 separate required gates.

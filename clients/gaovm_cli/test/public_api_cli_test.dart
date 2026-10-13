@@ -9,6 +9,7 @@ import 'package:gaovmd/src/image_filesystem.dart' show imageFileMode;
 import 'package:test/test.dart';
 
 import '../tool/e2e_macos.dart' as e2e;
+import '../tool/e2e_runtime_inspection.dart' as native;
 
 part 'artifact_download_cases.dart';
 part 'display_cases.dart';
