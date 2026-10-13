@@ -175,12 +175,24 @@ final class SqliteIdempotencyRepository {
   }
 
   /// Expiry ends the replay guarantee. Never removes unresolved reservations.
-  Future<int> cleanupExpired() => _database.transaction((connection) {
-    connection.execute(
-      '''DELETE FROM idempotency_keys
-         WHERE response_json IS NOT NULL AND expires_at <= ?''',
-      [formatPersistenceTimestamp(_now().toUtc())],
-    );
-    return connection.updatedRows;
-  });
+  /// A bounded maintenance pass leaves further expired keys for a later pass.
+  Future<int> cleanupExpired({int? limit}) {
+    if (limit != null && (limit < 1 || limit > 1000)) {
+      throw ArgumentError.value(limit, 'limit', 'must be between 1 and 1000');
+    }
+    return _database.transaction((connection) {
+      connection.execute(
+        limit == null
+            ? '''DELETE FROM idempotency_keys
+                 WHERE response_json IS NOT NULL AND expires_at <= ?'''
+            : '''DELETE FROM idempotency_keys WHERE rowid IN (
+                 SELECT rowid FROM idempotency_keys
+                 WHERE response_json IS NOT NULL AND expires_at <= ?
+                 ORDER BY expires_at, scope, key LIMIT ?
+               )''',
+        [formatPersistenceTimestamp(_now().toUtc()), if (limit != null) limit],
+      );
+      return connection.updatedRows;
+    });
+  }
 }

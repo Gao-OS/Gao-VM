@@ -389,6 +389,55 @@ void main() {
   );
 
   test(
+    'bounded cleanup leaves expired completions for subsequent passes',
+    () async {
+      for (var index = 0; index < 5; index++) {
+        await execute(scope: 'batch-$index');
+      }
+      now = now.add(const Duration(hours: 1));
+
+      expect(await repository.cleanupExpired(limit: 2), 2);
+      expect(await repository.cleanupExpired(limit: 2), 2);
+      expect(await repository.cleanupExpired(limit: 2), 1);
+      expect(await repository.cleanupExpired(limit: 2), 0);
+      expect(calls, 5);
+    },
+  );
+
+  test(
+    'bounded cleanup preserves unfinished reservations and live responses',
+    () async {
+      await execute(scope: 'expired');
+      now = now.add(const Duration(hours: 1));
+      final live = await execute(scope: 'live');
+      await database.transaction((connection) {
+        connection.execute(
+          '''INSERT INTO idempotency_keys
+          (scope,key,request_hash,created_at,expires_at) VALUES(?,?,?,?,?)''',
+          [
+            'unfinished',
+            'retry-key',
+            SqliteIdempotencyRepository.requestHash(body),
+            '2020-01-01T00:00:00.000000Z',
+            '2020-01-01T01:00:00.000000Z',
+          ],
+        );
+      });
+
+      expect(await repository.cleanupExpired(limit: 100), 1);
+      expect(await repository.cleanupExpired(limit: 100), 0);
+      await expectLater(
+        execute(scope: 'unfinished'),
+        throwsA(isA<IdempotencyInProgressException>()),
+      );
+      expect((await execute(scope: 'live')).response, live.response);
+      expect(calls, 2);
+      expect(() => repository.cleanupExpired(limit: 0), throwsArgumentError);
+      expect(() => repository.cleanupExpired(limit: 1001), throwsArgumentError);
+    },
+  );
+
+  test(
     'retention starts at completed acceptance and retry never extends it',
     () async {
       await execute(

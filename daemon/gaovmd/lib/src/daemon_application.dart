@@ -21,6 +21,8 @@ import 'host_guest_artifacts.dart';
 import 'host_lease_repository.dart';
 import 'host_scheduler.dart';
 import 'host_scheduler_models.dart';
+import 'idempotency_repository.dart';
+import 'idempotency_retention_loop.dart';
 import 'image_filesystem.dart';
 import 'image_api_handlers.dart';
 import 'image_application_service.dart';
@@ -297,6 +299,11 @@ final class DaemonApplication {
       }
 
       final workerOwner = RequestId.generate().value;
+      const retention = Duration(days: 1);
+      final idempotencyRetention = IdempotencyRetentionLoop(
+        repository: SqliteIdempotencyRepository(database, retention: retention),
+        onError: (error, _) => report('idempotency_retention', error),
+      );
       final artifactRetention = ArtifactRetentionLoop(
         artifacts: artifactService,
         onError: (error, _) => report('artifact_retention', error),
@@ -360,7 +367,6 @@ final class DaemonApplication {
           driverGeneration: correlation.driverGeneration,
         ),
       );
-      const retention = Duration(days: 1);
       final guestExecService = GuestExecApplicationService(
         database: database,
         resolveController: registry.get,
@@ -575,6 +581,7 @@ final class DaemonApplication {
         // cancellation can unblock delivery already in flight. Drain all of
         // them before closing their shared catalog and filesystem roots.
         await Future.wait([
+          idempotencyRetention.close(),
           artifactRetention.close(),
           guestReconcile.close(),
           guestExec.close(),
@@ -623,6 +630,7 @@ final class DaemonApplication {
         ),
       );
       await ownership.verify();
+      idempotencyRetention.start();
       artifactRetention.start();
       guestExec.start();
       commands.start();

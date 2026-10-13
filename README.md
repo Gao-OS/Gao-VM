@@ -268,6 +268,12 @@ All output is JSON; `--json` selects compact output for ordinary results and dia
 
 Requests default to a 30-second local deadline; waits require an explicit `--timeout-seconds` and allow five additional seconds for transport. Mutations return accepted Operations without waiting for completion. Use `--idempotency-key KEY` and reuse it for explicit retries; the client does not automatically retry writes. Patch also requires an explicit revision/ETag through `--if-match`.
 
+Committed idempotency acceptance responses have a one-day replay window, measured
+from acceptance completion; replay does not extend it. After startup recovery,
+the daemon removes up to 100 expired response envelopes per minute. Unfinished
+reservations are never made repeatable by age or removed by this collector.
+Expiry ends the replay guarantee, not the durable Operation or resource lifetime.
+
 See [event streaming and recovery](docs/EVENTS.md) for numeric cursor handling,
 slow-subscriber isolation, and reconnection after a partial frame or deadline.
 
