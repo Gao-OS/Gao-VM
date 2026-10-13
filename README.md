@@ -235,7 +235,7 @@ Implemented commands at this checkpoint:
 - `events [--after-sequence N] [--vm-id VM_ID] [--operation-id OP_ID] [--test-run-id TR_ID]`
 - `doctor [--timeout-seconds N]`
 - `schema [--timeout-seconds N]`
-- `capabilities [--timeout-seconds N]` (CLI implemented; daemon endpoint pending catalog-limit policy)
+- `capabilities [--timeout-seconds N]` (public backend/guest advertisements and enforced catalog/runtime limits)
 
 `vm list` accepts `--label-selector`, `--sort`, `--limit`, and `--cursor`.
 `image list` accepts `--label-selector`, `--limit`, and `--cursor`.
@@ -317,11 +317,12 @@ discovery describes the contract, not runtime or guest readiness. See
 `capabilities` reads the frozen `GET /v1/system/capabilities` contract and prints
 the daemon's public backend/guest advertisements and limits. It validates the
 complete response and preserves empty guest capabilities; it neither queries a
-driver nor proves host/VM/guest readiness. The current daemon does not yet register
-this endpoint: its required positive `max_defined_vms` needs an accepted, enforced
-catalog ceiling, while VM creation currently has no such ceiling. Until that
-policy is resolved, the daemon returns its normal not-found Problem; the CLI does
-not invent local defaults or infer guest capabilities from implemented handlers.
+driver nor proves host/VM/guest readiness. The daemon registers this endpoint and
+enforces `max_defined_vms: 128` atomically with VM creation acceptance. Deleting
+VMs still occupy a slot until their tombstone commits. Running/boot limits come
+from the host scheduler; the guest advertisement remains empty while native
+Guest transport is disabled. The CLI does not invent local defaults or infer
+guest capabilities from implemented handlers.
 
 `test run` takes the public `TestRunCreateRequest`: image source, readiness wait,
 ordered steps, cleanup policy, and `retain_on_failure`, with optional VM overrides
