@@ -422,6 +422,8 @@ M0 冻结以下 scope 解释：Guest protocol v1 的 `hello/capabilities`、heal
 | TST-011 | P1 | 支持 matrix 测试多个 GaoOS 版本。 |
 | TST-012 | P1 | 支持结果 comparison/report。 |
 
+失败时，`retain_on_failure: true` 优先于 `always_delete`，保留 VM 的当前状态供排查，不强制停止或重启。该覆盖仅适用于失败结果；成功和取消仍执行所选 cleanup policy。
+
 ## 8.10 Scheduler
 
 | ID | 优先级 | 需求 |

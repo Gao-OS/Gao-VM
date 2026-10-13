@@ -278,15 +278,12 @@ final class TestRunCleanupWorker {
           parent.resourceId != id ||
           parent.state != OperationState.running)
         throw StateError('TestRun cleanup operation is not active');
-      // Failure retention is explicit in UC-03. The always-delete override
-      // conflict still needs an accepted policy decision and is left pending.
-      if (outcome == TestRunState.failed &&
-          run.spec.cleanup == CleanupPolicy.alwaysDelete &&
-          run.spec.retainOnFailure)
-        return result(_CleanupProgress.deferred);
+      // Failure retention takes precedence over always-delete. It does not
+      // change the cleanup policy for successful or cancelled runs.
       final keepFailed =
           outcome == TestRunState.failed &&
-          run.spec.cleanup != CleanupPolicy.alwaysDelete;
+          (run.spec.retainOnFailure ||
+              run.spec.cleanup != CleanupPolicy.alwaysDelete);
       decision =
           keepFailed ||
               run.spec.cleanup == CleanupPolicy.retain ||

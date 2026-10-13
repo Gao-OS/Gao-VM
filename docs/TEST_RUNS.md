@@ -140,7 +140,8 @@ does not change VM-free completion or public response fields. Existing unrelated
 ## Retaining a failed VM
 
 PRD UC-03 requires a failed test VM to remain running for manual debugging.
-For a failed outcome, neither `retain` nor `delete_on_success` requests deletion.
+For a failed outcome, `retain_on_failure: true` overrides `always_delete`;
+neither `retain` nor `delete_on_success` requests deletion regardless of that flag.
 After committed collection, the cleanup worker verifies the exact provisioning
 ownership, its settled `vm.create` child, and any existing start VM binding. One
 transaction records `cleanup_decision: retain`, completes the failed TestRun and
@@ -184,11 +185,13 @@ After collection, the selected actions are:
 | Cancelled | `retain` or `delete_on_success` | Stop and retain the bundle |
 | Failed | `always_delete`, `retain_on_failure: false` | Delete through the normal VM lifecycle |
 | Failed | `retain` or `delete_on_success` | Preserve the current runtime for manual debugging, as described above |
-| Failed | `always_delete`, `retain_on_failure: true` | Defer pending an accepted precedence decision |
+| Failed | `always_delete`, `retain_on_failure: true` | Preserve the current runtime for manual debugging; failure retention takes precedence |
 
-The last combination remains unresolved; no policy precedence is invented.
-Successful-artifact 7-day retention and retention-aware garbage collection also
-remain unfinished.
+The failure-retention override applies only to failed outcomes, not success or
+cancellation. [Artifact retention](ARTIFACTS.md) starts at TestRun completion:
+successful runs whose temporary VM is deleted receive 7 days; failed, cancelled,
+or retained-environment runs receive 30 days. References continue to protect
+artifacts from expiry collection.
 
 Stop/delete acceptance runs under the existing per-VM controller gate. One SQLite
 transaction records `cleaning_up`, the selected decision, the child operation and
@@ -227,7 +230,7 @@ These workers are not activated by status requests or client polling.
 | TST-004/005 | Durable ordered child acceptance/results, deadline/cancel and original-generation recovery tests | Real GaoOS ordered guest execution |
 | TST-006 | Host log/result bytes, authenticated guest output/system-info publication, stable replay and corruption tests | Real native vsock/GaoOS collection |
 | TST-009, OP-002/004/006 | Pre-allocation completion, active-step cancellation, retained-VM stop, rollback/reopen and background dispatch tests | Full native guest-to-cleanup transactions |
-| TST-007/008, UC-03 | Retention/cleanup children, independent artifact survival, 7/30-day completion policy, reference-protected expiry and recovery tests | Accepted failure-override precedence, full native policy/fault matrix and GaoOS failure retention |
+| TST-007/008, UC-03 | Failure retention overriding always-delete, retention/cleanup children, independent artifact survival, 7/30-day completion policy, reference-protected expiry and recovery tests | Full native policy/fault matrix and GaoOS failure retention |
 
 Focused validation:
 
