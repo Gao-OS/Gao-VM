@@ -46,6 +46,12 @@ Future<int> runCli(
             'vm stop VM_ID',
             'vm restart VM_ID',
             'vm kill VM_ID',
+            'vm open-display VM_ID',
+            'vm close-display VM_ID',
+            'vm display VM_ID',
+            'vm logs VM_ID',
+            'vm artifacts VM_ID',
+            'vm download VM_ID ART_ID --output-dir DIRECTORY',
             'vm wait VM_ID',
             'image import',
             'image list',
@@ -64,6 +70,7 @@ Future<int> runCli(
             'events',
             'doctor',
             'schema',
+            'capabilities',
           ],
           'options': {
             '--after-sequence N':
@@ -76,9 +83,9 @@ Future<int> runCli(
             '--sort FIELD':
                 'vm list: created_at, name, id; prefix - to descend',
             '--limit N':
-                'vm/image/operation list and test artifacts: 1-200 items per page',
+                'vm/image/operation list and vm/test artifacts: 1-200 items per page',
             '--cursor CURSOR':
-                'vm/image/operation list and test artifacts: unchanged next_cursor value',
+                'vm/image/operation list and vm/test artifacts: unchanged next_cursor value',
             '--resource-type TYPE': 'operation list: resource type filter',
             '--resource-id ID': 'operation list: resource ID filter',
             '--state STATE': 'operation list: operation state filter',
@@ -91,7 +98,8 @@ Future<int> runCli(
             '--idempotency-key KEY':
                 'reuse the same key when retrying a mutation',
             '--output-dir DIRECTORY':
-                'test download: existing local directory; creates a private child',
+                'vm/test download: existing local directory; creates a private child',
+            '--kind KIND': 'vm logs: driver, serial, or guest',
           },
         }),
       );
@@ -99,12 +107,16 @@ Future<int> runCli(
     }
     final client = GaoVmApiClient(socketPath: options.socket);
     if (options.command.length == 4 &&
-        options.command[0] == 'test' &&
+        const {'test', 'vm'}.contains(options.command[0]) &&
         options.command[1] == 'download') {
       if (options.outputDirectory == null) {
-        throw const FormatException('test download requires --output-dir');
+        throw FormatException(
+          '${options.command[0]} download requires --output-dir',
+        );
       }
-      final owner = TestRunId(_id(options.command[2], 'tr_'));
+      final owner = options.command[0] == 'vm'
+          ? VmId(_id(options.command[2], 'vm_'))
+          : TestRunId(_id(options.command[2], 'tr_'));
       final id = ArtifactId(_id(options.command[3], 'art_'));
       final cancellation = ApiRequestCancellation();
       ProcessSignal? interrupted;
@@ -118,7 +130,7 @@ Future<int> runCli(
             }),
           );
         }
-        final download = await _downloadTestArtifact(
+        final download = await _downloadOwnedArtifact(
           client,
           owner,
           id,
@@ -193,6 +205,34 @@ Future<int> runCli(
       return 0;
     }
     final route = _route(options);
+    if (options.command.length == 3 && options.command[0] == 'vm') {
+      final action = options.command[1];
+      if (action == 'open-display' || action == 'close-display') {
+        final vmId = VmId(options.command[2]);
+        final key = options.idempotencyKey ?? _newKey();
+        final accepted = action == 'open-display'
+            ? await client.openDisplay(
+                vmId,
+                idempotencyKey: key,
+                timeout: options.timeout,
+              )
+            : await client.closeDisplay(
+                vmId,
+                idempotencyKey: key,
+                timeout: options.timeout,
+              );
+        write(encode(accepted.toJson()));
+        return 0;
+      }
+      if (action == 'display') {
+        final status = await client.displayStatus(
+          VmId(options.command[2]),
+          timeout: options.timeout,
+        );
+        write(encode(status.toJson()));
+        return 0;
+      }
+    }
     final response = await client.request(
       route.method,
       route.path,
@@ -243,6 +283,64 @@ Future<int> runCli(
           components['schemas'] is! Map) {
         throw const ApiProtocolException('invalid OpenAPI 3.1 response');
       }
+    }
+    if (route.path == '/v1/system/capabilities') {
+      if (response.status != HttpStatus.ok) {
+        throw const ApiProtocolException(
+          'invalid capabilities response status',
+        );
+      }
+      final PublicCapabilities capabilities;
+      try {
+        capabilities = PublicCapabilities.fromJson(response.body.toJson());
+      } on FormatException {
+        throw const ApiProtocolException('invalid capabilities response');
+      } on ArgumentError {
+        throw const ApiProtocolException('invalid capabilities response');
+      }
+      write(encode(capabilities.toJson()));
+      return 0;
+    }
+    if (options.command.length == 3 &&
+        options.command[0] == 'vm' &&
+        options.command[1] == 'logs') {
+      final body = response.body.toJson();
+      final items = body['items'];
+      if (response.status != HttpStatus.ok ||
+          body.length != 1 ||
+          items is! List) {
+        throw const ApiProtocolException('invalid VM log response');
+      }
+      try {
+        for (final item in items) {
+          final reference = LogReference.fromJson(item);
+          if (reference.vmId.value != options.command[2] ||
+              (options.query['kind'] != null &&
+                  reference.kind.name != options.query['kind'])) {
+            throw const ApiProtocolException('VM log response target mismatch');
+          }
+        }
+      } on FormatException {
+        throw const ApiProtocolException('invalid VM log response');
+      } on ArgumentError {
+        throw const ApiProtocolException('invalid VM log response');
+      }
+      write(encode(body));
+      return 0;
+    }
+    if (options.command.length == 3 &&
+        const {'vm', 'test'}.contains(options.command[0]) &&
+        options.command[1] == 'artifacts') {
+      final owner = options.command[0] == 'vm'
+          ? VmId(options.command[2])
+          : TestRunId(options.command[2]);
+      _decodeArtifactPage(
+        response,
+        owner,
+        limit: int.parse(options.query['limit'] ?? '50'),
+      );
+      write(encode(response.body.toJson()));
+      return 0;
     }
     if (route.path == '/v1/system/doctor') {
       final DoctorResult report;
@@ -392,6 +490,9 @@ _Request _route(_Options options) {
   if (command.length == 1 && command.single == 'schema') {
     return _Request('GET', '/v1/openapi.json');
   }
+  if (command.length == 1 && command.single == 'capabilities') {
+    return _Request('GET', '/v1/system/capabilities');
+  }
   if (command.length == 1 && command.single == 'doctor') {
     return _Request('GET', '/v1/system/doctor');
   }
@@ -443,6 +544,13 @@ _Request _route(_Options options) {
       query: options.query,
     );
   }
+  if (command.length == 3 && command[0] == 'vm' && command[1] == 'artifacts') {
+    return _Request(
+      'GET',
+      '/v1/vms/${_id(command[2], 'vm_')}/artifacts',
+      query: options.query,
+    );
+  }
   if (command.length == 2 && command[0] == 'image' && command[1] == 'import') {
     if (options.bodyJson == null)
       throw const FormatException('image import requires --body-json');
@@ -471,6 +579,8 @@ _Request _route(_Options options) {
         'stop',
         'restart',
         'kill',
+        'open-display',
+        'close-display',
         'delete',
       }.contains(command[1])) {
     late VmId id;
@@ -485,6 +595,16 @@ _Request _route(_Options options) {
           ? '/v1/vms/${id.value}'
           : '/v1/vms/${id.value}/actions/${command[1]}',
       body: JsonObjectValue.empty,
+    );
+  }
+  if (command.length == 3 && command[0] == 'vm' && command[1] == 'display') {
+    return _Request('GET', '/v1/vms/${_id(command[2], 'vm_')}/display');
+  }
+  if (command.length == 3 && command[0] == 'vm' && command[1] == 'logs') {
+    return _Request(
+      'GET',
+      '/v1/vms/${_id(command[2], 'vm_')}/logs',
+      query: options.query,
     );
   }
   if (command.length == 3 && command[0] == 'vm' && command[1] == 'patch') {
@@ -674,6 +794,7 @@ final class _Options {
             '--sort' ||
             '--resource-type' ||
             '--resource-id' ||
+            '--kind' ||
             '--state':
           final key = args[i].substring(2).replaceAll('-', '_');
           query[key] = value();
@@ -709,8 +830,10 @@ final class _Options {
         'test_run_id',
       },
       'vm list' => const {'label_selector', 'limit', 'cursor', 'sort'},
+      'vm logs' => const {'kind'},
       'image list' => const {'label_selector', 'limit', 'cursor'},
       'test artifacts' => const {'limit', 'cursor'},
+      'vm artifacts' => const {'limit', 'cursor'},
       'operation list' => const {
         'limit',
         'cursor',
@@ -725,6 +848,9 @@ final class _Options {
         throw FormatException(
           '--${key.replaceAll('_', '-')} not supported by $verb',
         );
+    }
+    if (query['kind'] case final value?) {
+      LogKind.parse(value);
     }
     if (query['after_sequence'] case final value?) {
       if (!RegExp(r'^[0-9]+$').hasMatch(value) || int.tryParse(value) == null) {
@@ -766,7 +892,9 @@ final class _Options {
       if (ifMatch != null && verb != 'vm patch') '--if-match',
       if (condition != null && verb != 'vm wait') '--condition',
       if (serviceName != null && verb != 'vm wait') '--service-name',
-      if (outputDirectory != null && verb != 'test download') '--output-dir',
+      if (outputDirectory != null &&
+          !const {'test download', 'vm download'}.contains(verb))
+        '--output-dir',
       if (idempotencyKey != null &&
           !const {
             'vm create',
@@ -775,6 +903,8 @@ final class _Options {
             'vm stop',
             'vm restart',
             'vm kill',
+            'vm open-display',
+            'vm close-display',
             'vm delete',
             'image import',
             'image delete',

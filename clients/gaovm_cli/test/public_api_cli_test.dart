@@ -8,9 +8,15 @@ import 'package:gaovmd/gaovmd.dart';
 import 'package:gaovmd/src/image_filesystem.dart' show imageFileMode;
 import 'package:test/test.dart';
 
+import '../tool/e2e_macos.dart' as e2e;
+
 part 'artifact_download_cases.dart';
+part 'display_cases.dart';
+part 'e2e_flow_cases.dart';
 
 void main() {
+  _e2eFlowTests();
+  _displayCliTests();
   _artifactDownloadCliTests();
   test(
     'VM delete uses DELETE with an explicit target and idempotency key',

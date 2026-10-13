@@ -5,9 +5,10 @@ const _downloadId = 'art_01J00000000000000000000000';
 const _downloadHex =
     'e9727bb930785755a576b86607683d312501e2dee6d360136f52b4ab71ecef51';
 
-Artifact _downloadMetadata() => Artifact(
+Artifact _downloadMetadata({VmId? vmOwner}) => Artifact(
   id: ArtifactId(_downloadId),
-  testRunId: TestRunId(_downloadOwner),
+  vmId: vmOwner,
+  testRunId: vmOwner == null ? TestRunId(_downloadOwner) : null,
   kind: ArtifactKind.stdout,
   contentType: 'text/plain; charset=utf-8',
   sizeBytes: 22,
@@ -22,186 +23,314 @@ Map<String, String> _downloadHeaders() => {
       'sha-256=${base64.encode(List.generate(32, (index) => int.parse(_downloadHex.substring(index * 2, index * 2 + 2), radix: 16)))}',
 };
 
-List<String> _downloadArgs(Directory output) => [
-  'test',
+List<String> _downloadArgs(Directory output, {VmId? vmOwner}) => [
+  vmOwner == null ? 'test' : 'vm',
   'download',
-  _downloadOwner,
+  vmOwner?.value ?? _downloadOwner,
   _downloadId,
   '--output-dir',
   output.path,
 ];
 
 void _artifactDownloadCliTests() {
-  test(
-    'artifact download shares one deadline across metadata and streamed bytes',
-    () async {
-      final output = await Directory.systemTemp.createTemp('cli-artifact-');
-      addTearDown(() => output.delete(recursive: true));
-      final cancelled = Completer<void>();
-      var stalling = false;
-      var started = false;
-      var byteRequests = 0;
-      late StreamController<List<int>> body;
-      body = StreamController<List<int>>(
-        onListen: () {
-          started = true;
-          body.add(utf8.encode('GaoOS'));
-        },
-        onCancel: () {
-          if (!cancelled.isCompleted) cancelled.complete();
-        },
-      );
-      addTearDown(() async {
-        // A failure before byte streaming must not leave an unconsumed
-        // single-subscription controller whose close future cannot finish.
-        if (!started) {
-          final subscription = body.stream.listen((_) {});
-          await body.close();
-          await subscription.cancel();
-        } else {
-          await body.close();
-        }
-      });
-      final router = PublicApiRouter()
-        ..add('GET', '/v1/test-runs/{test_run_id}/artifacts', (_) async {
-          if (stalling)
-            await Future<void>.delayed(const Duration(milliseconds: 600));
-          return PublicApiResponse.json(
-            status: 200,
-            body: {
-              'items': [_downloadMetadata().toJson()],
-              'next_cursor': null,
-            },
-          );
-        })
-        ..add('GET', '/v1/artifacts/{artifact_id}', (_) async {
-          if (stalling) byteRequests++;
-          return PublicApiResponse.stream(
-            body: stalling
-                ? body.stream
-                : Stream.value(utf8.encode('GaoOS artifact output\n')),
-            contentType: ContentType('application', 'octet-stream'),
-            headers: _downloadHeaders(),
-          );
-        });
-      await _withServer(router, (server) async {
-        // Warm the real JIT/HTTP/file path before measuring a deliberately
-        // short budget. The timed run must still enter the byte phase and EOF.
-        final warmup = await _invoke(server, _downloadArgs(output));
-        expect(warmup.code, 0, reason: warmup.error);
-        final completed = File(
-          jsonDecode(warmup.output)['output_path'] as String,
-        );
-        expect(
-          completed.parent.parent.path,
-          await output.resolveSymbolicLinks(),
-        );
-        await completed.parent.delete(recursive: true);
-        stalling = true;
-        final elapsed = Stopwatch()..start();
-        final result = await _invoke(server, [
-          ..._downloadArgs(output),
-          '--timeout-seconds',
-          '1',
-        ]);
-        expect(result.code, 124, reason: result.error);
-        expect(result.output, isEmpty);
-        expect(jsonDecode(result.error)['code'], 'CLI_TIMEOUT');
-        expect(elapsed.elapsed, lessThan(const Duration(milliseconds: 1400)));
-        expect(
-          byteRequests,
-          1,
-          reason:
-              'The measured deadline must include byte transfer, not only metadata.',
-        );
-        expect(
-          started,
-          isTrue,
-          reason:
-              'The byte source must be consumed before requiring cancellation.',
-        );
-        expect(await output.list().toList(), isEmpty);
-        await cancelled.future.timeout(const Duration(seconds: 3));
-      });
-    },
-  );
-
-  for (final (signal, code) in [
-    (ProcessSignal.sigint, 130),
-    (ProcessSignal.sigterm, 143),
-  ]) {
+  for (final vmOwner in <VmId?>[null, VmId('vm_01J00000000000000000000006')]) {
     test(
-      'artifact download source CLI handles $signal and cleans its partial file',
+      '${vmOwner == null ? 'TestRun' : 'VM'} artifact download shares one deadline across metadata and streamed bytes',
       () async {
         final output = await Directory.systemTemp.createTemp('cli-artifact-');
         addTearDown(() => output.delete(recursive: true));
-        final arrived = Completer<void>(), cancelled = Completer<void>();
+        final cancelled = Completer<void>();
+        var stalling = false;
+        var started = false;
+        var byteRequests = 0;
         late StreamController<List<int>> body;
         body = StreamController<List<int>>(
           onListen: () {
+            started = true;
             body.add(utf8.encode('GaoOS'));
-            arrived.complete();
           },
           onCancel: () {
             if (!cancelled.isCompleted) cancelled.complete();
           },
         );
-        addTearDown(body.close);
+        addTearDown(() async {
+          // A failure before byte streaming must not leave an unconsumed
+          // single-subscription controller whose close future cannot finish.
+          if (!started) {
+            final subscription = body.stream.listen((_) {});
+            await body.close();
+            await subscription.cancel();
+          } else {
+            await body.close();
+          }
+        });
         final router = PublicApiRouter()
           ..add(
             'GET',
-            '/v1/test-runs/{test_run_id}/artifacts',
-            (_) async => PublicApiResponse.json(
-              status: 200,
-              body: {
-                'items': [_downloadMetadata().toJson()],
-                'next_cursor': null,
-              },
-            ),
+            vmOwner == null
+                ? '/v1/test-runs/{test_run_id}/artifacts'
+                : '/v1/vms/{vm_id}/artifacts',
+            (_) async {
+              if (stalling)
+                await Future<void>.delayed(const Duration(milliseconds: 600));
+              return PublicApiResponse.json(
+                status: 200,
+                body: {
+                  'items': [_downloadMetadata(vmOwner: vmOwner).toJson()],
+                  'next_cursor': null,
+                },
+              );
+            },
           )
-          ..add(
-            'GET',
-            '/v1/artifacts/{artifact_id}',
-            (_) async => PublicApiResponse.stream(
-              body: body.stream,
+          ..add('GET', '/v1/artifacts/{artifact_id}', (_) async {
+            if (stalling) byteRequests++;
+            return PublicApiResponse.stream(
+              body: stalling
+                  ? body.stream
+                  : Stream.value(utf8.encode('GaoOS artifact output\n')),
               contentType: ContentType('application', 'octet-stream'),
               headers: _downloadHeaders(),
-            ),
-          );
+            );
+          });
         await _withServer(router, (server) async {
-          final process = await Process.start(Platform.resolvedExecutable, [
-            '--packages=${Directory.current.path}/.dart_tool/package_config.json',
-            '${Directory.current.path}/bin/gaovm_cli.dart',
-            '--socket-path',
-            server.socketPath,
-            ..._downloadArgs(output),
-            '--json',
+          // Warm the real JIT/HTTP/file path before measuring a deliberately
+          // short budget. The timed run must still enter the byte phase and EOF.
+          final warmup = await _invoke(
+            server,
+            _downloadArgs(output, vmOwner: vmOwner),
+          );
+          expect(warmup.code, 0, reason: warmup.error);
+          final completed = File(
+            jsonDecode(warmup.output)['output_path'] as String,
+          );
+          expect(
+            completed.parent.parent.path,
+            await output.resolveSymbolicLinks(),
+          );
+          await completed.parent.delete(recursive: true);
+          stalling = true;
+          final elapsed = Stopwatch()..start();
+          final result = await _invoke(server, [
+            ..._downloadArgs(output, vmOwner: vmOwner),
+            '--timeout-seconds',
+            '1',
           ]);
-          final exited = process.exitCode;
-          var exitConfirmed = false;
-          final stdout = utf8.decoder.bind(process.stdout).join();
-          final stderr = utf8.decoder.bind(process.stderr).join();
-          try {
-            await arrived.future.timeout(const Duration(seconds: 15));
-            expect(process.kill(signal), isTrue);
-            final actual = await exited.timeout(const Duration(seconds: 5));
-            exitConfirmed = true;
-            expect(actual, code, reason: await stderr);
-            expect(await stdout, isEmpty);
-            expect(jsonDecode(await stderr)['code'], 'CLI_INTERRUPTED');
-            expect(await output.list().toList(), isEmpty);
-            await cancelled.future.timeout(const Duration(seconds: 3));
-          } finally {
-            if (!exitConfirmed) {
-              process.kill(ProcessSignal.sigkill);
-              await exited.timeout(const Duration(seconds: 5));
-            }
-          }
+          expect(result.code, 124, reason: result.error);
+          expect(result.output, isEmpty);
+          expect(jsonDecode(result.error)['code'], 'CLI_TIMEOUT');
+          expect(elapsed.elapsed, lessThan(const Duration(milliseconds: 1400)));
+          expect(
+            byteRequests,
+            1,
+            reason:
+                'The measured deadline must include byte transfer, not only metadata.',
+          );
+          expect(
+            started,
+            isTrue,
+            reason:
+                'The byte source must be consumed before requiring cancellation.',
+          );
+          expect(await output.list().toList(), isEmpty);
+          await cancelled.future.timeout(const Duration(seconds: 3));
         });
       },
     );
-  }
 
+    for (final (signal, code) in [
+      (ProcessSignal.sigint, 130),
+      (ProcessSignal.sigterm, 143),
+    ]) {
+      test(
+        '${vmOwner == null ? 'TestRun' : 'VM'} artifact download source CLI handles $signal and cleans its partial file',
+        () async {
+          final output = await Directory.systemTemp.createTemp('cli-artifact-');
+          addTearDown(() => output.delete(recursive: true));
+          final arrived = Completer<void>(), cancelled = Completer<void>();
+          late StreamController<List<int>> body;
+          body = StreamController<List<int>>(
+            onListen: () {
+              body.add(utf8.encode('GaoOS'));
+              arrived.complete();
+            },
+            onCancel: () {
+              if (!cancelled.isCompleted) cancelled.complete();
+            },
+          );
+          addTearDown(body.close);
+          final router = PublicApiRouter()
+            ..add(
+              'GET',
+              vmOwner == null
+                  ? '/v1/test-runs/{test_run_id}/artifacts'
+                  : '/v1/vms/{vm_id}/artifacts',
+              (_) async => PublicApiResponse.json(
+                status: 200,
+                body: {
+                  'items': [_downloadMetadata(vmOwner: vmOwner).toJson()],
+                  'next_cursor': null,
+                },
+              ),
+            )
+            ..add(
+              'GET',
+              '/v1/artifacts/{artifact_id}',
+              (_) async => PublicApiResponse.stream(
+                body: body.stream,
+                contentType: ContentType('application', 'octet-stream'),
+                headers: _downloadHeaders(),
+              ),
+            );
+          await _withServer(router, (server) async {
+            final process = await Process.start(Platform.resolvedExecutable, [
+              '--packages=${Directory.current.path}/.dart_tool/package_config.json',
+              '${Directory.current.path}/bin/gaovm_cli.dart',
+              '--socket-path',
+              server.socketPath,
+              ..._downloadArgs(output, vmOwner: vmOwner),
+              '--json',
+            ]);
+            final exited = process.exitCode;
+            var exitConfirmed = false;
+            final stdout = utf8.decoder.bind(process.stdout).join();
+            final stderr = utf8.decoder.bind(process.stderr).join();
+            try {
+              await arrived.future.timeout(const Duration(seconds: 15));
+              expect(process.kill(signal), isTrue);
+              final actual = await exited.timeout(const Duration(seconds: 5));
+              exitConfirmed = true;
+              expect(actual, code, reason: await stderr);
+              expect(await stdout, isEmpty);
+              expect(jsonDecode(await stderr)['code'], 'CLI_INTERRUPTED');
+              expect(await output.list().toList(), isEmpty);
+              await cancelled.future.timeout(const Duration(seconds: 3));
+            } finally {
+              if (!exitConfirmed) {
+                process.kill(ProcessSignal.sigkill);
+                await exited.timeout(const Duration(seconds: 5));
+              }
+            }
+          });
+        },
+      );
+    }
+  }
+  test(
+    'VM artifact download walks full public pages before fetching its exact URL',
+    () async {
+      final vm = VmId.generate();
+      final output = await Directory.systemTemp.createTemp('cli-vmart-walk-');
+      addTearDown(() => output.delete(recursive: true));
+      final selected = _downloadMetadata(vmOwner: vm);
+      final firstPage = List.generate(200, (_) {
+        final id = ArtifactId.generate();
+        return {
+          ...selected.toJson(),
+          'id': id.value,
+          'download_url': '/v1/artifacts/${id.value}',
+        };
+      });
+      final calls = <String>[];
+      final router = PublicApiRouter()
+        ..add('GET', '/v1/vms/{vm_id}/artifacts', (request) async {
+          calls.add(request.uri.toString());
+          expect(request.pathParameters['vm_id'], vm.value);
+          expect(request.uri.queryParameters['limit'], '200');
+          expect(request.bodyBytes, isEmpty);
+          expect(request.headers['idempotency-key'], isNull);
+          expect(request.headers['if-match'], isNull);
+          return PublicApiResponse.json(
+            status: 200,
+            body: {
+              'items': request.uri.queryParameters['cursor'] == null
+                  ? firstPage
+                  : [selected.toJson()],
+              'next_cursor': request.uri.queryParameters['cursor'] == null
+                  ? 'opaque & cursor'
+                  : null,
+            },
+          );
+        })
+        ..add('GET', '/v1/artifacts/{artifact_id}', (request) async {
+          calls.add(request.uri.toString());
+          expect(request.pathParameters['artifact_id'], _downloadId);
+          return PublicApiResponse.stream(
+            body: Stream.value(utf8.encode('GaoOS artifact output\n')),
+            contentType: ContentType('application', 'octet-stream'),
+            headers: _downloadHeaders(),
+          );
+        });
+      await _withServer(router, (server) async {
+        final result = await _invoke(
+          server,
+          _downloadArgs(output, vmOwner: vm),
+        );
+        expect(result.code, 0, reason: result.error);
+        expect(calls, hasLength(3));
+        expect(
+          Uri.parse(calls[1]).queryParameters['cursor'],
+          'opaque & cursor',
+        );
+        expect(calls.last, '/v1/artifacts/$_downloadId');
+        final receipt = jsonDecode(result.output);
+        expect(receipt['artifact']['vm_id'], vm.value);
+        expect(
+          await File(receipt['output_path'] as String).readAsString(),
+          'GaoOS artifact output\n',
+        );
+      });
+    },
+  );
+  test(
+    'VM artifact download validates the entire page before fetching selected bytes',
+    () async {
+      final vm = VmId.generate();
+      final output = await Directory.systemTemp.createTemp('cli-vmart-fence-');
+      addTearDown(() => output.delete(recursive: true));
+      final selected = _downloadMetadata(vmOwner: vm);
+      final id = ArtifactId.generate();
+      var byteRequests = 0;
+      final router = PublicApiRouter()
+        ..add(
+          'GET',
+          '/v1/vms/{vm_id}/artifacts',
+          (_) async => PublicApiResponse.json(
+            status: 200,
+            body: {
+              'items': [
+                selected.toJson(),
+                {
+                  ...selected.toJson(),
+                  'id': id.value,
+                  'vm_id': VmId.generate().value,
+                  'download_url': '/v1/artifacts/${id.value}',
+                },
+              ],
+              'next_cursor': null,
+            },
+          ),
+        )
+        ..add('GET', '/v1/artifacts/{artifact_id}', (_) async {
+          byteRequests++;
+          return PublicApiResponse.stream(
+            body: Stream.value(utf8.encode('GaoOS artifact output\n')),
+            contentType: ContentType('application', 'octet-stream'),
+            headers: _downloadHeaders(),
+          );
+        });
+      await _withServer(router, (server) async {
+        final result = await _invoke(
+          server,
+          _downloadArgs(output, vmOwner: vm),
+        );
+        expect(result.code, 4);
+        expect(result.output, isEmpty);
+        expect(jsonDecode(result.error)['code'], 'CLI_PROTOCOL');
+        expect(byteRequests, 0);
+        expect(await output.list().toList(), isEmpty);
+      });
+    },
+  );
   test(
     'artifact download walks validated pages and consumes the exact public URL',
     () async {
