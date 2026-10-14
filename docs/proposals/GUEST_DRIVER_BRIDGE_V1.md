@@ -346,7 +346,10 @@ They do not establish native guest readiness or installed-service acceptance.
 Automatic health/reconnect and observation retry, [durable guest execution](../GUEST_EXEC_DURABILITY.md)
 and [host publication before ACK](../GUEST_ARTIFACT_PUBLICATION.md) are now composed
 in the daemon, including [TestRun diagnostics](../TEST_RUN_ARTIFACTS.md). An initial
-probe or local readiness observation is not native-service acceptance. `DriverSessionV2` still
-offers only runtime capabilities: do not advertise `guest.status` based on Unix
-fixture success. No native forwarding, peer CID, guest readiness, durable host
+probe or local readiness observation is not native-service acceptance. The user
+accepted an explicit [default-off development entry](../GUEST_DEVELOPMENT_ACCEPTANCE.md)
+on 2026-10-14: only that opt-in offers optional `guest.status`, with unchanged
+mutual hello, UID/token, capability and generation guards. Ordinary launches do
+not offer it. This development exception is not release/native acceptance from
+Unix fixtures. No native forwarding, peer CID, guest readiness, durable host
 artifact publication through the native stack or installed-service acceptance is proved by these tests.

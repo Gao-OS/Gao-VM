@@ -2,9 +2,10 @@
 
 Checked against [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md),
 [PRD.md](PRD.md) and [ARCHITECTURE.md](ARCHITECTURE.md) on 2026-10-13.
-The implementation baseline is `b75b5a1` on local `main`, including failed-VM
+The ordinary local matrix baseline is `b75b5a1` on local `main`, including failed-VM
 retention, the `83bdc80` multi-VM smoke recipe and the independently bounded
-host-guard and artifact-recovery scenarios. Earlier checkpoints remain below.
+host-guard and artifact-recovery scenarios. The Guest development entry was
+accepted and updated after `c605e51` on 2026-10-14. Earlier checkpoints remain below.
 
 **The Multi-VM Agent Testing MVP is not release-ready.** This ledger distinguishes
 implementation/test entry points from proof that the product works. A file,
@@ -19,15 +20,13 @@ release publication or remote push is authorized by this ledger.
 
 ## Known implementation and scope gaps
 
-1. **M6 native Guest composition is not available as an accepted product path.**
-   [DriverSessionV2](../drivers/vz_macos/Sources/vz_macos/DriverSession/DriverSessionV2.swift)
-   does not offer `guest.status`; the public
-   [capabilities handler](../daemon/gaovmd/lib/src/system_api_handlers.dart)
-   advertises an empty Guest set. Host/Rust/Swift bridge components exist, but
-   [TestRun's documented boundary](TEST_RUNS.md) still excludes native Guest
-   acceptance. An explicit development acceptance entry point is awaiting the
-   user's choice; it must not bypass hello, UID/token, capability or generation
-   checks, or be represented as completed GaoOS acceptance.
+1. **M6 native Guest acceptance remains unproved.** The user accepted a
+   [default-off development entry](GUEST_DEVELOPMENT_ACCEPTANCE.md) on 2026-10-14.
+   Explicit opt-in now connects the daemon launch policy, optional driver
+   `guest.status`, authenticated per-generation bridge and P0 public Guest
+   capability advertisement. Default launches remain Guest-disabled. Local
+   compiled-driver/Unix/HTTP checks are not Apple Silicon/GaoOS acceptance;
+   hello, UID/token, capability, generation and census guards remain mandatory.
 2. **PR015 transitional CLI compatibility is unfinished and its scope conflicts.**
    M4.7 is conditional, whereas development-plan section 10, architecture
    section 21 and [the migration checkpoint](LEGACY_VM_MIGRATION.md) still require
@@ -48,8 +47,8 @@ release publication or remote push is authorized by this ledger.
    work packages remain unimplemented, not waived by the proposal.
 
 These are not all interchangeable with “tests not run”. In particular, a green
-native boot would not itself resolve the missing Guest advertisement, legacy
-scope decision or installed upgrade implementation.
+native boot would not itself complete Guest/TestRun acceptance, resolve the legacy
+scope decision or implement installed upgrade/rollback.
 
 ## P0 traceability index
 
@@ -193,7 +192,7 @@ Entry points:
 | M3 driver split, hello/auth, VZ queue/lane, delegate/display/serial/stop | Swift runtime/protocol/log/display components present | Native VZ queue behavior, boot/display/serial and stop escalation |
 | M4 API, Operations, SSE, idempotency, OCC, conditional adapter | Public HTTP/UDS/application-service path present | Full installed path; unresolved M4.7 compatibility scope |
 | M5 manifests/import/bundles/clone/reference/GaoOS profile | Managed publication/provisioning components present | Real GaoOS image and native isolated writable disks |
-| M6 Guest protocol/daemon/session/waits/exec/TestRun/artifacts/E2E | Host/guest workers and transport fixtures present | Known Guest advertisement gap and GaoOS AC-05/06/07 |
+| M6 Guest protocol/daemon/session/waits/exec/TestRun/artifacts/E2E | Host/guest workers, transport fixtures and default-off development entry present | Native development path and GaoOS AC-05/06/07 |
 | M7 public CLI | Source/compiled public-client tests present | Native Guest/TestRun transactions through CLI |
 | M8 CI/app/plist/signing/upgrade/chaos/docs/release | Ordinary CI workflow, assembly/helper and smoke recipes present | Apple self-hosted execution, installed upgrade/rollback and first MVP release |
 
@@ -331,7 +330,30 @@ acceptance or notarized release evidence. Before release, rerun all ordinary
 gates at the release revision, without hiding required checks, and attach their
 complete outputs together with the native evidence.
 
-Repeat the scoped current checks from the repository root:
+### 2026-10-14 Guest development entry
+
+The user accepted only the default-off Guest development entry, preserving all
+authentication and generation guards. The entry and documentation were implemented
+after `c605e51`; the legacy CLI and installed lifecycle choices remain open.
+
+Local checks passed for this slice:
+
+- 156 Dart tests across launch configuration, public system handlers, process
+  manager, bridge client, host Guest session and committed Guest readiness;
+  the manager test exercised the actual compiled Swift driver with opt-in on/off.
+- The full Swift driver component suite: 145 tests, zero failures, including
+  mutual hello, optional-capability rejection, wrong bridge token/generation,
+  original-control watchdog and endpoint teardown.
+- Dart formatting (254 files unchanged), analysis and daemon AOT compilation;
+  pinned Swift 6.2.3 strict formatting/lint.
+- 113 local Markdown links in the changed documentation resolved successfully.
+
+These are local component/compiled-process checks, not an unfiltered daemon
+matrix, installed launchd acceptance or native VZ/GaoOS evidence. The earlier
+native-census exclusions remain unrun; the development flag cannot bypass them.
+Apple Silicon/native closing evidence remains the user's separate test boundary.
+
+Repeat the earlier scoped matrix checks from the repository root:
 
 ```sh
 bash scripts/validate_contracts.sh
@@ -358,7 +380,7 @@ All ten PRD section 13 gates remain explicit:
 | 1 All P0 complete or approved scope changes | Not proven | Close the 94 entries, implementation gaps and compatibility decision above |
 | 2 OpenAPI/implementation contract alignment | Component validation only | Complete live handler/schema contract checks at the release revision |
 | 3 All Dart unit/integration tests pass | Not proven | Unfiltered green release-revision runs; excluded native/cleanup cases are not passes |
-| 4 Swift driver tests pass | Local component pass | 142 tests and strict lint passed; attach full pinned-toolchain output at the release revision |
+| 4 Swift driver tests pass | Local component pass | 145 tests and strict lint passed for the Guest entry; rerun at the release revision |
 | 5 Apple Silicon self-hosted E2E | Not run | Authorized host/runner execution; user owns current hardware testing |
 | 6 Multi-VM/crash/restart/guest/TestRun/idempotency/event scenarios | Partial component coverage | Native AC scenarios and downloadable Guest/TestRun results, not only acceptance receipts |
 | 7 Driver signing and virtualization entitlement | Assembly/static component coverage | Verify the actual executed native binary and its entitlements |
@@ -367,7 +389,7 @@ All ten PRD section 13 gates remain explicit:
 | 10 README/PRD/OpenAPI/VmSpec/driver versions agree | Needs release audit | Signed release artifact version/role compatibility and documentation/schema parity |
 
 Do not mark M6, M8 or the overall goal complete from this ledger. The next
-decisions are the explicit Guest development acceptance path, legacy CLI
-compatibility scope and cold versus automatic installed lifecycle interface.
+decisions are legacy CLI compatibility scope and cold versus automatic installed
+lifecycle interface; the Guest development entry was accepted on 2026-10-14.
 Installed upgrade implementation and native/release evidence remain separate
 required work, not silently waived deliverables.

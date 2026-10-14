@@ -7,8 +7,9 @@ and explicitly requested guest collections**.
 This is library coverage for M6 / PRD GST-006, not installed-daemon, complete
 TestRun or native GaoOS acceptance. The
 [guest-exec worker and public route](GUEST_EXEC_DURABILITY.md) now use this boundary
-in daemon composition; native capability advertisement and installed acceptance
-remain gated. No frozen public, driver or guest
+in daemon composition; native capability advertisement is default-off through the
+explicit [development entry](GUEST_DEVELOPMENT_ACCEPTANCE.md), and installed
+acceptance remains unproved. No frozen public, driver or guest
 control schema changes are introduced.
 
 Migration 20 adds diagnostic one-shot markers and collection receipt uniqueness.

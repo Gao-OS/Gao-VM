@@ -9,7 +9,8 @@ Future<void> main(List<String> args) async {
     stdout.writeln(
       'Usage: gaovmd [--state-dir PATH] [--socket-path PATH] '
       '[--driver-bin PATH] [--openapi-path PATH] '
-      '[--max-running-vms N] [--max-concurrent-boots N]',
+      '[--max-running-vms N] [--max-concurrent-boots N] '
+      '[--guest-development-acceptance true|false]',
     );
     return;
   }
@@ -29,6 +30,7 @@ Future<void> main(List<String> args) async {
       openApiDocument: openapi,
       maxRunningVms: config.maxRunning,
       maxConcurrentBoots: config.maxBoots,
+      guestDevelopmentAcceptance: config.guestDevelopmentAcceptance,
     );
   } catch (error) {
     stderr.writeln('gaovmd startup failed: $error');

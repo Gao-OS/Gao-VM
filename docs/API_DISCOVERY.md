@@ -62,7 +62,9 @@ their original acceptance even when the catalog is full. A new create at capacit
 returns `409 HOST_RESOURCE_EXHAUSTED` with `max_defined_vms` in Problem details.
 The running/boot limits come from the daemon's scheduler policy (defaults 8/2).
 Capabilities do not perform a host census or imply that a VM can currently start.
-The native guest transport remains disabled, so the guest advertisement is empty.
+The native guest transport is default-off, so ordinary launches advertise an empty
+Guest set. Explicit [development opt-in](GUEST_DEVELOPMENT_ACCEPTANCE.md) advertises
+only the four supported P0 names; this still does not establish Guest readiness.
 Bodies and query parameters are rejected. No public schema field was added.
 
 ## Canonical source and distribution

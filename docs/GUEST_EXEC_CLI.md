@@ -5,7 +5,8 @@ This is the client boundary for development-plan M7 and PRD `CLI-005`, `CLI-007`
 GaoOS acceptance. Daemon composition now registers the Guest exec endpoint with
 the [durable application service and worker](GUEST_EXEC_DURABILITY.md), including
 binary stdout/stderr publication. Installed/native GaoOS integration remains M6
-work; optional native Guest capability advertisement is still disabled.
+work; optional native Guest capability advertisement is default-off, with an
+explicit [development acceptance entry](GUEST_DEVELOPMENT_ACCEPTANCE.md).
 An unavailable route/agent is an API failure, never a
 reason to run a command on the host.
 

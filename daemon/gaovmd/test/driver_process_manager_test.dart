@@ -1197,6 +1197,67 @@ void main() {
     },
   );
 
+  test(
+    'manager explicitly gates Guest development in the compiled Swift driver',
+    () async {
+      final target = switch (Abi.current()) {
+        Abi.macosArm64 => 'arm64-apple-macosx',
+        Abi.macosX64 => 'x86_64-apple-macosx',
+        _ => null,
+      };
+      if (target == null) {
+        markTestSkipped('Swift driver integration requires macOS');
+        return;
+      }
+      final executable = File(
+        '${Directory.current.path}/../../drivers/vz_macos/.build/$target/debug/gaovm-driver-vz',
+      );
+      if (!await executable.exists()) {
+        markTestSkipped('build drivers/vz_macos before this integration');
+        return;
+      }
+      for (final enabled in [false, true]) {
+        final native = DriverProcessManager(
+          layout: DriverRuntimeLayout(
+            '${temporaryDirectory.path}/native-$enabled',
+          ),
+          resolveExecutable: (_) => DriverExecutable(
+            path: executable.absolute.path,
+            guestDevelopmentAcceptance: enabled,
+          ),
+          resolveBundlePath: (id) async {
+            final path = '${temporaryDirectory.path}/vms/${id.value}.gaovm';
+            await Directory('$path/logs').create(recursive: true);
+            return path;
+          },
+        );
+        addTearDown(native.close);
+        final correlation = _correlation(_vm1, enabled ? 2 : 1, _operation1);
+        final session = await native.spawn(
+          RuntimeDriverLaunch(correlation: correlation),
+        );
+        final capabilities = await session.connect(
+          DriverCapabilities.runtimeCore,
+        );
+        expect(capabilities.contains(DriverCapability.guestStatus), enabled);
+        if (enabled) {
+          final status = await session.execute(
+            GuestStatusCommand(correlation: correlation.withOperation(null)),
+          );
+          expect(status.status, RuntimeCommandStatus.succeeded);
+          expect(status.data!.toJson(), {
+            'bridge_protocol_version': 'gaovm.bridge.v1',
+            'available': false,
+            'vsock_port': null,
+          });
+        }
+        expect((await session.ping()).status, RuntimeCommandStatus.succeeded);
+        await native.close();
+        expect((await session.exited).exitCode, 0);
+      }
+    },
+  );
+
   test('Swift v2 driver stops and exits with no configured VZ VM', () async {
     final target = switch (Abi.current()) {
       Abi.macosArm64 => 'arm64-apple-macosx',

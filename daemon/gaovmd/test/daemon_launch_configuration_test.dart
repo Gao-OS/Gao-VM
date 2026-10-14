@@ -4,6 +4,55 @@ import 'package:gaovmd/src/daemon_launch_configuration.dart';
 import 'package:test/test.dart';
 
 void main() {
+  test('daemon accepts explicit Guest development opt-in', () {
+    final config = DaemonLaunchConfiguration.parse(
+      const ['--guest-development-acceptance', 'true'],
+      executablePath: '/sdk/bin/dart',
+      environment: const {},
+    );
+    expect(config.guestDevelopmentAcceptance, isTrue);
+  });
+
+  test(
+    'Guest development defaults off without inheriting environment flags',
+    () {
+      for (final args in [
+        <String>[],
+        ['--guest-development-acceptance', 'false'],
+      ]) {
+        final config = DaemonLaunchConfiguration.parse(
+          args,
+          executablePath: '/sdk/bin/dart',
+          environment: const {'GAOVM_GUEST_DEVELOPMENT_ACCEPTANCE': 'true'},
+        );
+        expect(config.guestDevelopmentAcceptance, isFalse);
+      }
+    },
+  );
+
+  test('Guest development rejects ambiguous or malformed options', () {
+    for (final args in [
+      ['--guest-development-acceptance'],
+      ['--guest-development-acceptance', '1'],
+      ['--guest-development-acceptance', ''],
+      [
+        '--guest-development-acceptance',
+        'true',
+        '--guest-development-acceptance',
+        'false',
+      ],
+    ]) {
+      expect(
+        () => DaemonLaunchConfiguration.parse(
+          args,
+          executablePath: '/sdk/bin/dart',
+          environment: const {},
+        ),
+        throwsFormatException,
+      );
+    }
+  });
+
   test('packaged daemon resolves state and assets without the source cwd', () {
     final config = DaemonLaunchConfiguration.parse(
       const [],

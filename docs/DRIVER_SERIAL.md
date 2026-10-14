@@ -26,7 +26,8 @@ silently treating the capture as successful.
 The driver offers the existing frozen v2 `console.status` as an optional
 capability. The required runtime-core capabilities are unchanged; runtime-only
 peers authenticate normally but cannot invoke an unnegotiated console command.
-`guest.status` remains unimplemented and unadvertised.
+`guest.status` is independently gated by the default-off
+[Guest development entry](GUEST_DEVELOPMENT_ACCEPTANCE.md), not by serial capture.
 
 `console.status` returns `ready` and `log_path` for the currently applied serial
 controller. It never opens a file or reads the staged restart-required serial

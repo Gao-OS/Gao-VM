@@ -35,8 +35,9 @@ Background workers currently implement:
    generation, intent, resource, and lease checks prove cleanup completed.
 
 Authenticated guest readiness and ordered execution have host implementations
-and socket-fixture coverage. Native guest capability advertisement remains disabled
-pending real acceptance; neither `waiting_ready` nor `running_steps` proves a
+and socket-fixture coverage. Native guest capability advertisement is default-off;
+the explicit [development entry](GUEST_DEVELOPMENT_ACCEPTANCE.md) enables it for
+acceptance work. Neither `waiting_ready` nor `running_steps` proves a
 successful guest test or GaoOS/native transport acceptance.
 
 ## Readiness observation

@@ -9,6 +9,21 @@ import 'package:test/test.dart';
 
 void main() {
   test(
+    'explicit Guest development advertises only the supported P0 API capabilities',
+    () async {
+      await _withDoctor((fixture) async {
+        final response = await fixture.request(path: '/v1/system/capabilities');
+        expect(response.status, HttpStatus.ok);
+        expect(PublicCapabilities.fromJson(response.body).guest, [
+          'health',
+          'system.info',
+          'exec',
+          'artifact.collect',
+        ]);
+      }, guestDevelopmentAcceptance: true);
+    },
+  );
+  test(
     'public capabilities reports enforced limits without native probes',
     () async {
       await _withDoctor((fixture) async {
@@ -573,6 +588,7 @@ void main() {
 Future<void> _withDoctor(
   Future<void> Function(_Fixture) action, {
   Duration timeout = const Duration(seconds: 8),
+  bool guestDevelopmentAcceptance = false,
 }) async {
   final temporary = await Directory.systemTemp.createTemp('gvm-doctor-');
   imageFileMode(temporary.path, 0x1c0);
@@ -618,7 +634,10 @@ Future<void> _withDoctor(
     ),
     timeout: timeout,
   );
-  SystemApiHandlers(doctor: doctor).register(router);
+  SystemApiHandlers(
+    doctor: doctor,
+    guestDevelopmentAcceptance: guestDevelopmentAcceptance,
+  ).register(router);
   final fixture = _Fixture(database, store, host, server, temporary, doctor);
   try {
     await server.start();

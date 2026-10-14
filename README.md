@@ -321,8 +321,10 @@ driver nor proves host/VM/guest readiness. The daemon registers this endpoint an
 enforces `max_defined_vms: 128` atomically with VM creation acceptance. Deleting
 VMs still occupy a slot until their tombstone commits. Running/boot limits come
 from the host scheduler; the guest advertisement remains empty while native
-Guest transport is disabled. The CLI does not invent local defaults or infer
-guest capabilities from implemented handlers.
+Guest transport is disabled by default. Explicit
+[Guest development opt-in](docs/GUEST_DEVELOPMENT_ACCEPTANCE.md) advertises the four
+supported P0 capabilities without claiming native acceptance. The CLI does not
+invent local defaults or infer guest capabilities from implemented handlers.
 
 `test run` takes the public `TestRunCreateRequest`: image source, readiness wait,
 ordered steps, cleanup policy, and `retain_on_failure`, with optional VM overrides

@@ -7,8 +7,12 @@ import 'system_doctor_service.dart';
 import 'vm_repository.dart';
 
 final class SystemApiHandlers {
-  const SystemApiHandlers({required this.doctor});
+  const SystemApiHandlers({
+    required this.doctor,
+    this.guestDevelopmentAcceptance = false,
+  });
   final SystemDoctorService doctor;
+  final bool guestDevelopmentAcceptance;
 
   void register(PublicApiRouter router) {
     router.add('GET', '/v1/system/capabilities', (request) async {
@@ -17,9 +21,11 @@ final class SystemApiHandlers {
         status: HttpStatus.ok,
         body: PublicCapabilities(
           backends: const ['vz'],
-          // Advertisements are not readiness. Native guest transport is not
-          // enabled, so do not expose its private negotiated capability names.
-          guest: const [],
+          // Development opt-in is support, not guest readiness or native acceptance.
+          // Keep private negotiated capability names out of the public response.
+          guest: guestDevelopmentAcceptance
+              ? const ['health', 'system.info', 'exec', 'artifact.collect']
+              : const [],
           maxDefinedVms: maxDefinedVms,
           maxRunningVms: doctor.limits.maxRunningVms,
           maxConcurrentBoots: doctor.limits.maxConcurrentBoots,

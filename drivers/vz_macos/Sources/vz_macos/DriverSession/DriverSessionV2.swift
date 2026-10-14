@@ -74,10 +74,14 @@ final class DriverSessionV2 {
   private static let requiredCapabilities: [DriverProtocolV2.Capability] = [
     .runtimeConfigure, .runtimeStart, .runtimeStop, .runtimeKill, .runtimeStatus,
   ]
-  private static let offeredCapabilities =
+  private static let runtimeCapabilities =
     requiredCapabilities + [
       DriverProtocolV2.Capability.displayOpen, .displayClose, .displayStatus, .consoleStatus,
     ]
+
+  private var offeredCapabilities: [DriverProtocolV2.Capability] {
+    Self.runtimeCapabilities + (config.guestDevelopmentAcceptance ? [.guestStatus] : [])
+  }
 
   init(config: Config, logger: RotatingLogger) {
     self.config = config
@@ -177,7 +181,7 @@ final class DriverSessionV2 {
       driverGeneration: config.generation,
       operationId: nil,
       authToken: config.authToken,
-      offeredCapabilities: Self.offeredCapabilities,
+      offeredCapabilities: offeredCapabilities,
       requiredCapabilities: Self.requiredCapabilities,
       implementation: .init(name: "gaovm-driver-vz", version: "0.1.0"))
   }
@@ -195,7 +199,7 @@ final class DriverSessionV2 {
         result.driverGeneration == config.generation,
         result.operationId == nil,
         Set(Self.requiredCapabilities).isSubset(of: Set(result.acceptedCapabilities)),
-        Set(result.acceptedCapabilities).isSubset(of: Set(Self.offeredCapabilities))
+        Set(result.acceptedCapabilities).isSubset(of: Set(offeredCapabilities))
       else {
         throw DriverError.handshakeFailed("daemon hello result mismatch")
       }
@@ -296,13 +300,18 @@ final class DriverSessionV2 {
 
   private var guestSessionActive: Bool {
     stateQueue.sync {
-      localHelloAccepted && remoteHelloAccepted && !guestBridgeFenced && fatalError == nil
+      config.guestDevelopmentAcceptance && localHelloAccepted && remoteHelloAccepted
+        && localAcceptedCapabilities?.contains(.guestStatus) == true
+        && remoteAcceptedCapabilities?.contains(.guestStatus) == true
+        && !guestBridgeFenced && fatalError == nil
         && DispatchTime.now() < authenticationDeadline
     }
   }
 
   private func enableGuestBridgeIfAuthenticated() {
-    guard guestSessionActive, stateQueue.sync(execute: { guestBridge == nil }) else { return }
+    guard config.guestDevelopmentAcceptance, guestSessionActive,
+      stateQueue.sync(execute: { guestBridge == nil })
+    else { return }
     let runtime = vmRuntime
     do {
       let bridge = try GuestBridgeListener(
@@ -420,7 +429,8 @@ final class DriverSessionV2 {
     case .consoleStatus:
       runtimeDispatcher.consoleStatus(completion: completion)
     case .guestStatus:
-      completion(.failure(DriverError.invalidArgs("capability not negotiated")))
+      vmRuntime.guestStatus(
+        bridgeAvailable: stateQueue.sync { guestBridge != nil }, completion: completion)
     }
   }
 

@@ -21,6 +21,7 @@ final class DriverExecutable {
     required this.path,
     this.prefixArguments = const [],
     this.environment = const {},
+    this.guestDevelopmentAcceptance = false,
   }) {
     if (!path.startsWith('/')) {
       throw ArgumentError.value(
@@ -34,6 +35,7 @@ final class DriverExecutable {
   final String path;
   final List<String> prefixArguments;
   final Map<String, String> environment;
+  final bool guestDevelopmentAcceptance;
 }
 
 typedef DriverExecutableResolver =
@@ -156,6 +158,10 @@ final class DriverProcessManager implements RuntimeDriverFactory {
         bundlePath,
         '--backend',
         'vz',
+        if (executable.guestDevelopmentAcceptance) ...[
+          '--guest-development-acceptance',
+          'true',
+        ],
       ];
       process = await Process.start(
         executablePath,

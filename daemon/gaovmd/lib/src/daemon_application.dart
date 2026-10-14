@@ -104,6 +104,7 @@ final class DaemonApplication {
     String? socketPath,
     int maxRunningVms = 8,
     int maxConcurrentBoots = 2,
+    bool guestDevelopmentAcceptance = false,
   }) async {
     if (!Platform.isMacOS) throw UnsupportedError('macOS daemon required');
     if (maxRunningVms < 1 || maxConcurrentBoots < 1) {
@@ -150,7 +151,10 @@ final class DaemonApplication {
       final inventory = MacOsDriverInventory(executablePath: driverPath);
       final manager = DriverProcessManager(
         layout: layout,
-        resolveExecutable: (_) => DriverExecutable(path: driverPath),
+        resolveExecutable: (_) => DriverExecutable(
+          path: driverPath,
+          guestDevelopmentAcceptance: guestDevelopmentAcceptance,
+        ),
         resolveBundlePath: (id) => '${bundles.path}/${id.value}.gaovm',
       );
       final catalog = SqliteVmRepository(database);
@@ -571,7 +575,10 @@ final class DaemonApplication {
           processes: inventory,
         ),
       );
-      SystemApiHandlers(doctor: doctor).register(router);
+      SystemApiHandlers(
+        doctor: doctor,
+        guestDevelopmentAcceptance: guestDevelopmentAcceptance,
+      ).register(router);
       final ownedDatabase = database;
       final ownedLock = ownership;
       application = DaemonApplication._(server, () async {

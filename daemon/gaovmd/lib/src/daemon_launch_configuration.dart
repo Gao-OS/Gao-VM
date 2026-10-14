@@ -9,6 +9,7 @@ final class DaemonLaunchConfiguration {
     this.openapi,
     this.maxRunning,
     this.maxBoots,
+    this.guestDevelopmentAcceptance,
   );
 
   final String state;
@@ -17,6 +18,7 @@ final class DaemonLaunchConfiguration {
   final String openapi;
   final int maxRunning;
   final int maxBoots;
+  final bool guestDevelopmentAcceptance;
 
   static DaemonLaunchConfiguration parse(
     List<String> args, {
@@ -31,10 +33,18 @@ final class DaemonLaunchConfiguration {
       '--openapi-path',
       '--max-running-vms',
       '--max-concurrent-boots',
+      '--guest-development-acceptance',
     };
     for (var i = 0; i < args.length; i += 2) {
       if (!allowed.contains(args[i]) || i + 1 >= args.length) {
         throw FormatException('unknown option or missing value: ${args[i]}');
+      }
+      if (args[i] == '--guest-development-acceptance' &&
+          (values.containsKey(args[i]) ||
+              !const {'true', 'false'}.contains(args[i + 1]))) {
+        throw const FormatException(
+          '--guest-development-acceptance requires one true/false value',
+        );
       }
       values[args[i]] = args[i + 1];
     }
@@ -70,6 +80,7 @@ final class DaemonLaunchConfiguration {
       ),
       int.parse(values['--max-running-vms'] ?? '8'),
       int.parse(values['--max-concurrent-boots'] ?? '2'),
+      values['--guest-development-acceptance'] == 'true',
     );
   }
 }

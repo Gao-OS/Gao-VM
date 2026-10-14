@@ -304,6 +304,30 @@ final class VzRuntime: RuntimeServicing {
     }
   }
 
+  /// A runtime-queue snapshot, not permission to open or an authenticated Guest-ready signal.
+  func guestStatus(bridgeAvailable: Bool, completion: @escaping RuntimeCompletion) {
+    vzRuntimeQueue.async {
+      var port = self.config?.guestAgent?.vsockPort
+      var available = false
+      #if canImport(Virtualization)
+        if let vm = self.virtualMachine {
+          // Report the applied device/port, never a newer pending configuration.
+          port = self.appliedGuestPort
+          available =
+            bridgeAvailable && !self.isTearingDown && !self.guestChannelsFenced
+            && port != nil && vm.state == .running
+            && vm.socketDevices.first is VZVirtioSocketDevice
+        }
+      #endif
+      completion(
+        .success([
+          "bridge_protocol_version": GuestBridgeProtocol.version,
+          "available": available,
+          "vsock_port": port.map { Int($0) } as Any? ?? NSNull(),
+        ]))
+    }
+  }
+
   /// An internal native channel attempt, never a public API or guest-ready signal.
   /// The caller must authenticate the bridge opening before reaching this entry.
   func openGuestChannel(

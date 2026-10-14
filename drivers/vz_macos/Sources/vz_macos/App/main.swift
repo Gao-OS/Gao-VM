@@ -51,6 +51,7 @@ func parseArgs(_ args: [String]) throws -> DriverLaunchMode {
   var socketPath: String?
   var bundlePath: String?
   var backend: String?
+  var guestDevelopmentAcceptance: Bool?
   var idx = 1
   while idx < args.count {
     let arg = args[idx]
@@ -88,9 +89,18 @@ func parseArgs(_ args: [String]) throws -> DriverLaunchMode {
       }
       // Driver v2 requires the token in the environment, never process arguments.
       throw DriverError.invalidArgs("--auth-token is not supported; set GAOVM_AUTH_TOKEN")
+    case "--guest-development-acceptance":
+      idx += 1
+      guard guestDevelopmentAcceptance == nil, idx < args.count,
+        args[idx] == "true" || args[idx] == "false"
+      else {
+        throw DriverError.invalidArgs(
+          "--guest-development-acceptance requires one true/false value")
+      }
+      guestDevelopmentAcceptance = args[idx] == "true"
     case "--help":
       print(
-        "Usage: gaovm-driver-vz --vm-id ID --generation N --socket-path PATH --bundle-path PATH --backend vz"
+        "Usage: gaovm-driver-vz --vm-id ID --generation N --socket-path PATH --bundle-path PATH --backend vz [--guest-development-acceptance true|false]"
       )
       print("Required env: GAOVM_AUTH_TOKEN")
       Foundation.exit(0)
@@ -125,7 +135,8 @@ func parseArgs(_ args: [String]) throws -> DriverLaunchMode {
       socketPath: socketPath,
       bundlePath: bundlePath,
       authToken: authToken,
-      logPath: logPath))
+      logPath: logPath,
+      guestDevelopmentAcceptance: guestDevelopmentAcceptance ?? false))
 }
 
 do {

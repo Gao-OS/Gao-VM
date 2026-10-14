@@ -12,6 +12,7 @@ struct Config {
   let bundlePath: String
   let authToken: String
   let logPath: String
+  var guestDevelopmentAcceptance = false
 }
 
 struct LegacyConfig {

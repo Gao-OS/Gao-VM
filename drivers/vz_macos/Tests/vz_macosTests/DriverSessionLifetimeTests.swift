@@ -7,6 +7,69 @@ import XCTest
 final class DriverSessionLifetimeTests: XCTestCase {
   private let token = "test-only-driver-lifetime-authentication"
 
+  func testGuestDevelopmentIsDisabledByDefault() throws {
+    try withDriver(privateGeneration: true) { process, exited, control, _ in
+      let connection = try connect(to: control.path)
+      defer { connection.close() }
+      let codec = DriverProtocolV2Codec()
+      let hello = try authenticate(connection, codec)
+      let correlation = DriverProtocolV2.Correlation(
+        vmId: hello.vmId, driverGeneration: hello.driverGeneration, operationId: nil)
+      let pingID = try DriverProtocolV2.JSONRPCID(string: "default-guest-disabled")
+      try write(.commandRequest(pingID, .sessionPing(correlation)), connection, codec)
+      guard case .commandSuccessResponse(let receivedID, _) = try read(connection, codec) else {
+        return XCTFail("disabled Guest development must preserve generic driver commands")
+      }
+      XCTAssertEqual(receivedID, pingID)
+      XCTAssertFalse(hello.offeredCapabilities.contains(.guestStatus))
+      XCTAssertFalse(
+        FileManager.default.fileExists(
+          atPath: control.deletingLastPathComponent().appendingPathComponent("guest.sock").path))
+      connection.close()
+      XCTAssertEqual(exited.wait(timeout: .now() + 5), .success)
+      XCTAssertEqual(process.terminationStatus, 0)
+    }
+  }
+
+  func testGuestDevelopmentOptInOffersAnOptionalCapability() throws {
+    try withDriver(privateGeneration: true, guestDevelopmentAcceptance: true) {
+      process, exited, control, _ in
+      let connection = try connect(to: control.path)
+      defer { connection.close() }
+      let hello = try authenticate(connection, DriverProtocolV2Codec())
+      XCTAssertTrue(hello.offeredCapabilities.contains(.guestStatus))
+      XCTAssertFalse(hello.requiredCapabilities.contains(.guestStatus))
+      connection.close()
+      XCTAssertEqual(exited.wait(timeout: .now() + 5), .success)
+      XCTAssertEqual(process.terminationStatus, 0)
+    }
+  }
+
+  func testGuestDevelopmentStatusDoesNotClaimUnconfiguredGuestReadiness() throws {
+    try withDriver(privateGeneration: true, guestDevelopmentAcceptance: true) {
+      process, exited, control, _ in
+      let connection = try connect(to: control.path)
+      defer { connection.close() }
+      let codec = DriverProtocolV2Codec()
+      let hello = try authenticate(connection, codec)
+      let correlation = DriverProtocolV2.Correlation(
+        vmId: hello.vmId, driverGeneration: hello.driverGeneration, operationId: nil)
+      let id = try DriverProtocolV2.JSONRPCID(string: "development-guest-status")
+      try write(.commandRequest(id, .guestStatus(correlation)), connection, codec)
+      guard case .commandSuccessResponse(let receivedID, let result) = try read(connection, codec)
+      else { return XCTFail("negotiated Guest development must implement guest.status") }
+      XCTAssertEqual(receivedID, id)
+      XCTAssertEqual(result.vmId, hello.vmId)
+      XCTAssertEqual(result.driverGeneration, hello.driverGeneration)
+      XCTAssertEqual(result.data?["bridge_protocol_version"], .string(GuestBridgeProtocol.version))
+      XCTAssertEqual(result.data?["available"], .bool(false))
+      XCTAssertEqual(result.data?["vsock_port"], .null)
+      connection.close()
+      XCTAssertEqual(exited.wait(timeout: .now() + 5), .success)
+      XCTAssertEqual(process.terminationStatus, 0)
+    }
+  }
+
   func testV2ConsoleStatusIsOptionalAndReportsNoCaptureWithoutStartingAVm() throws {
     try withDriver { process, exited, control, _ in
       let connection = try connect(to: control.path)
@@ -109,7 +172,8 @@ final class DriverSessionLifetimeTests: XCTestCase {
   }
 
   func testRuntimeOnlyPeerCanAuthenticateButCannotUseOptionalPeripheralCommands() throws {
-    try withDriver { process, exited, control, _ in
+    try withDriver(privateGeneration: true, guestDevelopmentAcceptance: true) {
+      process, exited, control, _ in
       let connection = try connect(to: control.path)
       defer { connection.close() }
       let codec = DriverProtocolV2Codec()
@@ -120,7 +184,7 @@ final class DriverSessionLifetimeTests: XCTestCase {
       let correlation = DriverProtocolV2.Correlation(
         vmId: hello.vmId, driverGeneration: hello.driverGeneration, operationId: nil)
       let peripheralCommands: [DriverProtocolV2.Command] = [
-        .displayStatus(correlation), .consoleStatus(correlation),
+        .displayStatus(correlation), .consoleStatus(correlation), .guestStatus(correlation),
       ]
       for (index, command) in peripheralCommands.enumerated() {
         let deniedID = try DriverProtocolV2.JSONRPCID(string: "unnegotiated-peripheral-\(index)")
@@ -139,6 +203,9 @@ final class DriverSessionLifetimeTests: XCTestCase {
       }
       XCTAssertEqual(receivedID, statusID)
       XCTAssertEqual(status.data?["state"], .string("not_created"))
+      XCTAssertFalse(
+        FileManager.default.fileExists(
+          atPath: control.deletingLastPathComponent().appendingPathComponent("guest.sock").path))
       connection.close()
       XCTAssertEqual(exited.wait(timeout: .now() + 5), .success)
       XCTAssertEqual(process.terminationStatus, 0)
@@ -147,7 +214,8 @@ final class DriverSessionLifetimeTests: XCTestCase {
 
   func testInconsistentOptionalCapabilitiesBetweenHelloDirectionsFailClosed() throws {
     for peerHelloFirst in [false, true] {
-      try withDriver(privateGeneration: true) { process, exited, control, _ in
+      try withDriver(privateGeneration: true, guestDevelopmentAcceptance: true) {
+        process, exited, control, _ in
         let connection = try connect(to: control.path)
         defer { connection.close() }
         let codec = DriverProtocolV2Codec()
@@ -188,7 +256,8 @@ final class DriverSessionLifetimeTests: XCTestCase {
   }
 
   func testGuestBridgeOpeningsCannotRefreshTheOriginalAuthenticationWatchdog() throws {
-    try withDriver(privateGeneration: true) { process, exited, control, log in
+    try withDriver(privateGeneration: true, guestDevelopmentAcceptance: true) {
+      process, exited, control, log in
       let connection = try connect(to: control.path)
       defer { connection.close() }
       let hello = try authenticate(connection, DriverProtocolV2Codec())
@@ -214,7 +283,8 @@ final class DriverSessionLifetimeTests: XCTestCase {
   }
 
   func testGuestBridgeRequiresMutualHelloAndClosesWithOriginalControlSession() throws {
-    try withDriver(privateGeneration: true) { process, exited, control, _ in
+    try withDriver(privateGeneration: true, guestDevelopmentAcceptance: true) {
+      process, exited, control, _ in
       let guestPath = control.deletingLastPathComponent().appendingPathComponent("guest.sock").path
       XCTAssertFalse(FileManager.default.fileExists(atPath: guestPath))
       let connection = try connect(to: control.path)
@@ -223,7 +293,7 @@ final class DriverSessionLifetimeTests: XCTestCase {
       guard case .helloRequest(let id, let hello) = try read(connection, codec) else {
         return XCTFail("expected driver hello")
       }
-      XCTAssertFalse(hello.offeredCapabilities.contains(.guestStatus))
+      XCTAssertTrue(hello.offeredCapabilities.contains(.guestStatus))
       try write(
         .helloSuccessResponse(
           id,
@@ -259,6 +329,19 @@ final class DriverSessionLifetimeTests: XCTestCase {
         object: nil)
       guard XCTWaiter.wait(for: [published], timeout: 2) == .completed else {
         return XCTFail("authenticated driver did not publish its owned guest bridge")
+      }
+      for (generation, credential) in [
+        (hello.driverGeneration, "wrong-" + token), (hello.driverGeneration + 1, token),
+      ] {
+        let rejected = try connect(to: guestPath)
+        defer { rejected.close() }
+        let stale = try GuestBridgeProtocol.Correlation(
+          vmId: hello.vmId.rawValue, driverGeneration: generation,
+          requestId: "req_01J00000000000000000000001", operationId: nil, streamKind: .control)
+        try rejected.writeAll(GuestBridgeFrameIO.encode(.open(stale, authToken: credential)))
+        XCTAssertThrowsError(
+          try GuestBridgeFrameIO.readResponse(
+            from: rejected, expecting: stale, deadline: .now() + 1))
       }
       let guest = try connect(to: guestPath)
       defer { guest.close() }
@@ -486,7 +569,8 @@ final class DriverSessionLifetimeTests: XCTestCase {
   }
 
   private func withDriver(
-    privateGeneration: Bool = false, _ body: (Process, DispatchGroup, URL, URL) throws -> Void
+    privateGeneration: Bool = false, guestDevelopmentAcceptance: Bool = false,
+    _ body: (Process, DispatchGroup, URL, URL) throws -> Void
   ) throws {
     var template = Array("/private/tmp/gvl.XXXXXX".utf8CString)
     guard let directory = Darwin.mkdtemp(&template) else {
@@ -517,6 +601,9 @@ final class DriverSessionLifetimeTests: XCTestCase {
       "--socket-path", control.path,
       "--bundle-path", root.appendingPathComponent("vm.gaovm").path, "--backend", "vz",
     ]
+    if guestDevelopmentAcceptance {
+      process.arguments! += ["--guest-development-acceptance", "true"]
+    }
     var environment = ProcessInfo.processInfo.environment
     environment["GAOVM_AUTH_TOKEN"] = token
     environment["GAOVM_DRIVER_LOG_PATH"] = log.path

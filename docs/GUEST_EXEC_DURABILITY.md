@@ -143,4 +143,5 @@ stalled-status cancellation, two-VM independence and original-owner recovery.
 They do not prove
 native vsock, Apple Silicon driver support, real GaoOS execution or spilled
 artifacts, installed API completion, or daemon-restart E2E. Optional native guest
-capability advertisement remains disabled pending that acceptance.
+capability advertisement remains disabled by default; the explicit
+[development entry](GUEST_DEVELOPMENT_ACCEPTANCE.md) does not waive that acceptance.
