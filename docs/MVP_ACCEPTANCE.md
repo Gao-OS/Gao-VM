@@ -353,6 +353,32 @@ matrix, installed launchd acceptance or native VZ/GaoOS evidence. The earlier
 native-census exclusions remain unrun; the development flag cannot bypass them.
 Apple Silicon/native closing evidence remains the user's separate test boundary.
 
+#### Expanded ordinary Dart regression at `ba663e1`
+
+After committing the Guest entry, all five ordinary Dart package suites were
+rerun with their default concurrency and timeouts on 2026-10-14:
+
+| Package | Passed tests | Scope |
+| --- | --- | --- |
+| gaovm_models | 101 | Full package suite; no skips/errors |
+| gaovm_rpc | 5 | Full package suite; no skips/errors |
+| gaovm_api_client | 87 | Full package suite; no skips/errors |
+| gaovm_cli | 155 | Full package suite; no skips/errors |
+| gaovmd | 1445 | Filtered suite; one Linux-only skip, no errors; the same three exclusions remain unrun |
+
+All five reports contain successful terminal receipts. The daemon run supplied
+the actual Rust `host_publication_fixture`; its integration checks were not
+skipped for a missing executable. The 156 targeted Guest-entry checks above are
+included in the 1445 daemon passes, not additional tests.
+
+A read-only `/bin/cat` inventory snapshot still reported incomplete census with
+five unresolved records and no matching executable. No unknown process was
+modified or accepted as exited. The positive daemon-startup cases and the unsafe
+executable-unlink case remain excluded as documented above. Reports are retained
+under `/private/tmp/gaovm-guest-regression.Cl3Cm6`. This checkpoint does not rerun
+native VZ/GaoOS, installed services or release checks, and does not accept either
+the legacy CLI or installed upgrade/rollback interface choice.
+
 Repeat the earlier scoped matrix checks from the repository root:
 
 ```sh
