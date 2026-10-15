@@ -62,6 +62,13 @@ unknown live-driver evidence or turn an unresolved crash into a clean shutdown.
 There is no built-in online whole-state snapshot or command that proves this
 barrier. Do not run this recipe against an active installation.
 
+An internal [guarded state snapshot component](MACOS_RELEASE_INSPECTION.md#guarded-persistent-state-snapshots)
+now composes the held cold checks and creates metadata-preserving state-only
+copies, with a durable boundary receipt and no original mutation. It is not an
+installed maintenance command, app/state pair, external-file backup or rollback
+transaction. Its fixture acceptance does not authorize this operator recipe
+against a live installation or replace the native lifecycle gates.
+
 ## Create and check a private archive
 
 The following is an operator recipe for macOS. Replace both placeholders with

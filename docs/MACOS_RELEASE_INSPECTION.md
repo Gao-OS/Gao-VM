@@ -300,9 +300,9 @@ Failure does not release the caller's state ownership, and explicit close
 releases only this inspection's readers. These checks provide neither a lasting
 writer/startup fence nor a complete cold boundary. Runtime observations below
 remain a separate prerequisite.
-Legacy handling, safe `run/` treatment, paired snapshots, publication, durable
-transaction recovery, activation/commit, whole-state rollback and uninstall still
-require the full M8 workflow.
+Legacy handling and state-only snapshot composition are covered below. Paired
+snapshots, publication, durable transaction recovery, activation/commit,
+whole-state rollback and uninstall still require the full M8 workflow.
 
 ## Runtime namespaces and retired executable observations
 
@@ -350,9 +350,10 @@ diagnostic evidence, not a recovery authority, and always reports
 `run_omission_authorized: false`.
 
 This component does not establish the complete cold boundary or a lasting
-startup/writer fence. Composition of legacy/external boundaries, paired snapshots,
-safe `run/` omission, publication, durable journal/recovery, activation/commit,
-whole-state rollback and uninstall still require the composed M8 workflow.
+startup/writer fence. The state-only snapshot consumer below composes these
+observations with the other cold checks. Paired app/state snapshots, publication,
+durable journal/recovery, activation/commit, whole-state rollback and uninstall
+still require the composed M8 workflow.
 Fixture process/service observations plus genuine local filesystem/socket/ACL
 checks do not prove installed lifecycle, ARM64, VZ or GaoOS acceptance.
 
@@ -406,6 +407,67 @@ Verification checks the original lease/catalog around input reads and native
 observations. Failure retains the caller's ownership; close releases only the
 inspection's readers. Exported JSON cannot replace the held inspection object.
 This is neither a migration success certificate nor a complete cold snapshot,
-external writer fence, safe `run/` omission or recovery authority. Complete
-composition, paired app/state snapshots, durable publication/recovery,
-activation/commit, whole-state rollback and uninstall remain unfinished.
+external writer fence or recovery authority. State-only composition is described
+below; paired app/state snapshots, durable publication/recovery, activation/
+commit, whole-state rollback and uninstall remain unfinished.
+
+## Guarded persistent-state snapshots
+
+The internal [`ColdStateSnapshot`](../daemon/gaovmd/lib/src/cold_state_snapshot.dart)
+combines the original caller-owned cold lease, private-copy catalog, managed
+assets, external references, legacy inputs and runtime observations. Its
+`prepare`/`verify` check those held boundaries; full persistent-tree checks run
+during the actual copy. No original database is opened with SQLite, no migration
+is invoked, and no service, VM, original path or desired state is changed.
+
+An existing catalog must be initialized, supported and quiescent; all earlier
+WAL, durable-work, provenance and generation guards remain in force. Pre-catalog
+legacy input is supported only while the database and all sidecars remain absent
+and root `run/` remains absent. A pre-catalog runtime, even an empty directory,
+requires independent investigation; it is not removed or presumed retired.
+Absence alone still does not prove exit: the original lease's independent native
+service/process/reference checks remain mandatory throughout.
+
+`snapshotTo` copies the entire persistent state, including database/sidecars,
+current writable disks/NVRAM, retained failed TestRun data and history, artifacts,
+logs, legacy backups, ownership records, unknown ordinary staging and empty
+directories. Only root `run/` is omitted, after and during the combined checks;
+nested directories named `run` are retained. Known runtime facts remain in the
+receipt and original runtime entries remain untouched. Ordinary `MaintenanceTree`
+snapshots still have no exclusions and reject sockets/special files. Its new
+fixed state-copy mechanism requires the coordinator's repeated boundary callback;
+that low-level callback mechanism is not independently a coldness verifier.
+
+All persistent entries require owned native metadata and safe permissions;
+links/special files, extra hardlinks and ACL grants refuse. The ACL restriction
+also covers unknown persistent data: same-user process observation cannot prove
+absence of writers granted access to other users. Nothing is chmod/ACL-normalized
+to pass. Existing traversal and metadata bounds apply.
+
+Storage must be private and outputs unused/disjoint from state, owning app and
+inspection inputs. The existing capacity check, descriptor-owned native copy,
+metadata preservation, fsync and atomic no-replace publication are reused.
+The payload is checked against the complete source manifest. Source/boundary
+checks run again before publication and afterward; payload/native metadata and
+exact receipt bytes are independently rechecked after the final callbacks, both
+before and after publication. Changes or unavailable native evidence refuse;
+after-publication failure retains the final output but never returns success.
+Failed partial/final outputs and originals are retained for inspection, not
+overwritten or cleaned on retry. Close releases readers, not the caller's lease.
+
+The persisted format is `gaovm.cold-state-snapshot.v1`, with fixed
+`omitted_paths: ["run"]`, a complete manifest/digest and the held component
+observations under `boundary`. This is snapshot-storage publication, **not**
+candidate app publication. External disks/EFI and active legacy dependencies
+are accounted at their canonical current bytes but are **not** backed up by
+this payload; back them up separately and validate them again before rollback.
+The matching signed app is not part of this state-only snapshot.
+
+The receipt explicitly reports `paired_app_snapshot: false`,
+`external_files_backed_up: false`, `candidate_publication_authorized: false` and
+`replacement_startup_fenced: false`. Copied lock bytes do not acquire kernel
+ownership, and neither JSON nor a successful copy is a transferable cold permit.
+Holding the original same-path lease does not fence a replacement tree after
+rename. Paired old-app snapshots, persistent publication/startup fencing, durable
+transaction recovery, activation/commit, fresh-cold whole-state rollback,
+uninstall and their crash/low-disk/native installed acceptance remain unfinished.

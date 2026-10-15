@@ -7,8 +7,9 @@ import 'image_filesystem.dart';
 
 /// Content binding and no-replace snapshots; never writes source entries.
 final class MaintenanceTree {
-  MaintenanceTree._(this._root);
+  MaintenanceTree._(this._root, [this._stateBoundary]);
   final OwnedImageDirectory _root;
+  final Future<Map<String, Object?>> Function()? _stateBoundary;
   String get path => _root.path;
 
   static Future<MaintenanceTree> open(Directory directory) async {
@@ -29,6 +30,7 @@ final class MaintenanceTree {
   }
 
   Future<Map<String, Object?>> capture({bool nativeMetadata = false}) async {
+    await _verifyStateBoundary();
     final result = <String, Object?>{};
     var count = 0;
     Future<void> visit(
@@ -71,6 +73,7 @@ final class MaintenanceTree {
         final name = entry.uri.pathSegments
             .where((part) => part.isNotEmpty)
             .last;
+        if (_stateBoundary != null && prefix.isEmpty && name == 'run') continue;
         final relative = prefix.isEmpty ? name : '$prefix/$name';
         final type = await FileSystemEntity.type(
           entry.path,
@@ -142,8 +145,40 @@ final class MaintenanceTree {
     }
 
     await visit(_root, '', 0);
+    if (_stateBoundary != null &&
+        (!nativeMetadata ||
+            result.values.any(
+              (entry) =>
+                  ((entry as Map)['metadata'] as Map)['has_acl'] != false,
+            ))) {
+      throw const FormatException(
+        'cold state requires native metadata without ACL grants',
+      );
+    }
+    await _verifyStateBoundary();
     return Map.unmodifiable(result);
   }
+
+  Future<Map<String, Object?>?> _verifyStateBoundary() async {
+    final verify = _stateBoundary;
+    if (verify == null) return null;
+    final evidence = await verify();
+    if (evidence['source_state'] != path) {
+      throw const FormatException('cold boundary belongs to another state');
+    }
+    await _root.verifyPathBinding();
+    return evidence;
+  }
+
+  /// Internal copy mechanism for ColdStateSnapshot, not a coldness verifier.
+  /// Its coordinator must verify all native/catalog/file boundaries each call.
+  /// Only root run/ is omitted; the receipt records that fixed exclusion and
+  /// the observations. Ordinary tree snapshots retain their no-exclusion policy.
+  Future<Map<String, Object?>> snapshotStateDataTo(
+    OwnedImageDirectory parent,
+    String name, {
+    required Future<Map<String, Object?>> Function() verifyBoundary,
+  }) => MaintenanceTree._(_root, verifyBoundary).snapshotTo(parent, name);
 
   Future<void> verify(
     Map<String, Object?> expected, {
@@ -219,10 +254,17 @@ final class MaintenanceTree {
     if (lock == null) throw StateError('snapshot storage already has an owner');
     OwnedImageDirectory? staging;
     try {
+      final boundary = await _verifyStateBoundary();
       final manifest = await capture(nativeMetadata: true);
       final payloadName = path.endsWith('.app') ? 'payload.app' : 'payload';
       final receipt = <String, Object?>{
-        'format': 'gaovm.tree-snapshot.v1',
+        'format': boundary == null
+            ? 'gaovm.tree-snapshot.v1'
+            : 'gaovm.cold-state-snapshot.v1',
+        if (boundary != null) ...{
+          'omitted_paths': ['run'],
+          'boundary': boundary,
+        },
         'source_path': path,
         'snapshot_path': destination,
         'payload_name': payloadName,
@@ -319,9 +361,24 @@ final class MaintenanceTree {
       await staging.verifyPathBinding();
       await parent.verifyPathBinding();
       lock.verifyPathBinding();
+      if (_stateBoundary != null) {
+        await verify(manifest, nativeMetadata: true);
+        await _verifyStateOutput(staging, payloadName, manifest, encoded);
+      }
       await parent.renameDirectoryNoReplace(stagingName, name);
       await parent.verifyPathBinding();
       lock.verifyPathBinding();
+      await _verifyStateBoundary();
+      if (_stateBoundary != null) {
+        final published = parent.directory(name);
+        try {
+          await _verifyStateOutput(published, payloadName, manifest, encoded);
+        } finally {
+          published.close();
+        }
+        await parent.verifyPathBinding();
+        lock.verifyPathBinding();
+      }
       return Map.unmodifiable(receipt);
     } catch (error) {
       if (staging != null) {
@@ -332,6 +389,43 @@ final class MaintenanceTree {
       staging?.close();
       lock.close();
     }
+  }
+
+  static Future<void> _verifyStateOutput(
+    OwnedImageDirectory snapshot,
+    String payloadName,
+    Map<String, Object?> manifest,
+    List<int> encoded,
+  ) async {
+    await snapshot.verifyPathBinding();
+    final payload = snapshot.directory(payloadName);
+    try {
+      await MaintenanceTree._(payload).verify(manifest, nativeMetadata: true);
+    } finally {
+      payload.close();
+    }
+    final receipt = snapshot.file('receipt.json');
+    try {
+      final before = receipt.stat();
+      if (before.size != encoded.length ||
+          before.linkCount != 1 ||
+          before.mode & 0xc12 != 0 ||
+          (await receipt.maintenanceMetadata())['has_acl'] != false ||
+          sha256
+                  .convert(await receipt.readBounded(encoded.length))
+                  .toString() !=
+              sha256.convert(encoded).toString()) {
+        throw const FormatException('state snapshot receipt changed');
+      }
+      await receipt.verifyPathBinding();
+      if (receipt.stat() != before)
+        throw const FormatException(
+          'state snapshot receipt changed during verification',
+        );
+    } finally {
+      receipt.close();
+    }
+    await snapshot.verifyPathBinding();
   }
 
   void close() => _root.close();

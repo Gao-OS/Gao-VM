@@ -20,6 +20,7 @@ part 'cold_file_references.dart';
 part 'cold_legacy_inspection.dart';
 part 'cold_managed_assets.dart';
 part 'cold_runtime_inspection.dart';
+part 'cold_state_snapshot.dart';
 
 /// Facts from a private catalog copy, not a full cold/upgrade certificate.
 /// Never pass the inspection copy to a restore operation: SQLite may change its

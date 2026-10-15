@@ -788,3 +788,55 @@ activation/commit, whole-state rollback and uninstall remain unfinished. Full
 daemon regression and installed lifecycle/hardware release gates are not made
 green by these component tests. No installed app/state, real service, remote ref,
 Apple Silicon/VZ or GaoOS runtime was changed; the full goal remains open.
+
+## 2026-10-15 guarded state snapshot checkpoint
+
+On top of `f2244ca`, [guarded state snapshots](MACOS_RELEASE_INSPECTION.md#guarded-persistent-state-snapshots)
+compose the original held cold lease with private-copy catalog, managed assets,
+external-file, legacy and runtime checks. The state-only payload preserves all
+persistent ordinary data/native metadata, including unknown staging and retained
+failed TestRun VM disks, EFI, diagnostics and terminal catalog history. It never
+migrates or opens the original catalog with SQLite. Pre-catalog legacy input is
+supported only with no database/sidecars or root runtime; otherwise it refuses
+without discarding unknown evidence.
+
+Only root `run/` is omitted under the repeated composed checks; nested `run`
+directories are retained. Real stale sockets remain unchanged at the source,
+while their facts are retained in the boundary receipt. Generic tree snapshots
+keep their full-tree/special-file refusal policy. Unknown persistent ACL grants
+also refuse rather than being normalized or treated as observable same-UID
+writers. Original caller ownership remains held after failure or reader close.
+
+Snapshot publication uses private unused storage, capacity checks, native byte/
+metadata copy, fsync and atomic no-replace rename. Payload and exact receipt bytes
+are independently verified after source/native callbacks before and after
+publication. Reproduced partial/final payload and receipt tampering cannot return
+success. A native observation failure after publication retains the final output
+and reports failure, not a valid snapshot or a successful installed upgrade.
+
+External disk/EFI paths and current bytes remain separately accounted, not copied
+or rewound. The receipt explicitly denies paired-app, external-backup, candidate
+publication and replacement-startup-fence authority. It cannot authorize restore
+or substitute for a fresh cold check, and copied ownership records do not transfer
+the original kernel lock.
+
+The **25 new tests** passed in the combined **397-test** run with **concurrency
+1**, zero failures/skips, across **31** files (166.209 seconds). This includes
+the prior 372-test group. The unsafe
+`unresolved native census rejects startup before legacy migration` case was
+explicitly excluded, not run or counted as a passing/skipped test. The terminal
+report is `focused.jsonl` under `/private/tmp/gaovm-state-snapshot.aIHzo2/`.
+
+Dart analysis, pinned formatting (**290** files, zero changes), JSON Schema/
+OpenAPI validation, scoped Markdown file links and staged `git diff --check`
+passed. The unrelated UI lockfile is unchanged and excluded. Full daemon
+regression was not rerun; these focused results do not supersede the earlier
+failed broad regressions. No new Swift, CI, installed lifecycle or hardware pass
+is claimed.
+
+Paired matching signed-app snapshots, persistent startup/writer fencing across
+replacement, durable transaction journal/recovery, explicit activation/commit,
+whole-state rollback, uninstall and full lifecycle crash/low-disk/native installed
+acceptance remain unfinished. No real app/state/service or remote ref was changed;
+Apple Silicon/VZ/GaoOS work remains assigned to the user. This component is not
+M8 completion or proof of the full PRD/development-plan goal.
