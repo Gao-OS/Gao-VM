@@ -9,8 +9,10 @@ assembled bundle is not evidence that those gates passed.
 
 The separate [cold operator publication command](MACOS_COLD_MAINTENANCE.md)
 composes fenced preparation/retirement/publication, not installation or a
-complete upgrade. It intentionally leaves ordinary startup blocked; activation,
-validation/commit, rollback and uninstall remain separate unfinished work.
+complete upgrade. Its separate explicit uninstall action retires only the exact
+proven-cold app while retaining all data and a startup fence. Activation,
+validation/commit, rollback, first install and native lifecycle acceptance remain
+unfinished work.
 
 ## Inputs and invocation
 

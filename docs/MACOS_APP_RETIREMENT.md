@@ -118,7 +118,9 @@ or full transaction recovery. Independent staged candidate publication and
 candidate fence-cooperation evidence now have a separate
 [implementation](MACOS_CANDIDATE_PUBLICATION.md). Activation/write isolation through
 explicit validation/commit, whole-state/app rollback with rewind acknowledgement,
-and data-preserving uninstall remain unfinished. Full
+and first install remain unfinished. The separate [cold uninstall action](MACOS_COLD_MAINTENANCE.md#data-preserving-cold-uninstall)
+now composes exact-app retirement with retained-data evidence and explicit
+recovery; native lifecycle acceptance is still unproved. Full
 process-crash/fsync/low-disk lifecycle and genuine signed installed-product
 acceptance are unproved. Apple Silicon/VZ/GaoOS execution remains assigned to
 the user; no M8/MVP or release-completion claim follows from this component.

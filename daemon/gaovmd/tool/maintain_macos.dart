@@ -14,8 +14,15 @@ const _usage = '''Usage:
     --work-dir PATH --inspection-dir PATH --bundle-id ID
     --old-version X.Y.Z --new-version X.Y.Z --team-id TEAMID
     --from preparation|retirement|publication --catalog-schema N
+  maintain_macos.dart uninstall-app --app PATH --state-dir PATH
+    --work-dir PATH --inspection-dir PATH --bundle-id ID
+    --version X.Y.Z --team-id TEAMID
+  maintain_macos.dart resume-uninstall --app PATH --state-dir PATH
+    --work-dir PATH --inspection-dir PATH --bundle-id ID
+    --version X.Y.Z --team-id TEAMID
+    --from preparation|retirement --catalog-schema N
 
-Explicit cold-operator candidate publication; does not activate, register, stop,
+Explicit cold-operator publication or data-preserving uninstall; does not activate, register, stop,
 migrate, commit, roll back, or remove retained files. Quiesce clients, services
 and VMs first. All paths are explicit canonical absolute paths. State, work and
 inspection are private; work and inspection are disjoint from all app inputs.
@@ -30,8 +37,17 @@ Future<void> main(List<String> arguments) async {
     stdout.write(_usage);
     return;
   }
+  final uninstall =
+      arguments.isNotEmpty &&
+      {'uninstall-app', 'resume-uninstall'}.contains(arguments.first);
   try {
-    stdout.writeln(jsonEncode(await runMacOsColdPublication(arguments)));
+    stdout.writeln(
+      jsonEncode(
+        await (uninstall
+            ? runMacOsColdUninstall(arguments)
+            : runMacOsColdPublication(arguments)),
+      ),
+    );
   } catch (error) {
     final cause = error is ColdPublicationFailure ? error.cause : error;
     final incompatible =
@@ -41,7 +57,9 @@ Future<void> main(List<String> arguments) async {
         cause is ReleaseInspectionFailure && cause.status == 'incompatible';
     stdout.writeln(
       jsonEncode({
-        'format': 'gaovm.cold-publication-command.v1',
+        'format': uninstall
+            ? 'gaovm.cold-uninstall-command.v1'
+            : 'gaovm.cold-publication-command.v1',
         'status': incompatible ? 'refused' : 'unverified',
         'stage': error is ColdPublicationFailure ? error.stage : 'inputs',
         'reason': switch (cause) {

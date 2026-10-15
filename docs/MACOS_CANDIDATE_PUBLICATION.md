@@ -114,8 +114,10 @@ the actual source daemon, not the ARM64 header fixture. Neither is a genuine
 signed installed-product acceptance result.
 
 The accepted [cold operator workflow](proposals/MACOS_UPGRADE_ROLLBACK.md) still
-needs activation/write isolation through
-validation/commit, fresh-cold whole-state/app rollback with rewind acknowledgement,
-and data-preserving uninstall. Full process-crash/fsync/low-disk lifecycle and
+needs activation/write isolation through validation/commit, fresh-cold
+whole-state/app rollback with rewind acknowledgement and first install.
+A separate [cold uninstall action](MACOS_COLD_MAINTENANCE.md#data-preserving-cold-uninstall)
+composes exact-app retirement, retained-data evidence and explicit recovery.
+Full process-crash/fsync/low-disk lifecycle and
 genuine installed-product acceptance remain unproved. Apple Silicon/VZ/GaoOS
 execution remains assigned to the user; this phase does not complete M8/MVP.

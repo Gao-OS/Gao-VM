@@ -25,6 +25,7 @@ part 'cold_runtime_inspection.dart';
 part 'cold_state_snapshot.dart';
 part 'cold_upgrade_snapshot.dart';
 part 'cold_upgrade_preparation.dart';
+part 'cold_uninstall_preparation.dart';
 
 /// Facts from a private catalog copy, not a full cold/upgrade certificate.
 /// Never pass the inspection copy to a restore operation: SQLite may change its

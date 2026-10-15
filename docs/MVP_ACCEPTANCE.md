@@ -55,9 +55,12 @@ release publication or remote push is authorized by this ledger.
    [managed asset checks](MACOS_RELEASE_INSPECTION.md#managed-images-bundle-provenance-and-current-writable-bytes)
    and [retained runtime observations](MACOS_RELEASE_INSPECTION.md#runtime-namespaces-and-retired-executable-observations)
    now cover separate prerequisites, not their full transaction composition.
-   The development-package trust choice, complete cold boundary, writer fencing,
-   whole-state rollback and native acceptance remain
-   unfinished, not waived by the proposal.
+   The [bounded cold maintenance commands](MACOS_COLD_MAINTENANCE.md) now compose
+   fenced candidate publication/recovery and data-retaining exact-app uninstall.
+   They do not complete activation/write isolation through validation/commit,
+   fresh-cold whole-state/app rollback, first install, full crash/low-disk
+   recovery or native lifecycle acceptance. Those remain unfinished, not waived
+   by the proposal or by fixture-level component checks.
 
 These are not all interchangeable with “tests not run”. In particular, a green
 native boot would not itself complete Guest/TestRun acceptance, prove installed
@@ -1276,4 +1279,70 @@ validation/commit, fresh-cold whole-state/app rollback with rewind acknowledgeme
 complete install/uninstall and full crash/fsync/low-disk lifecycle acceptance
 remain unfinished. No real installed app/state/service or remote ref was changed;
 no new Swift/CI/Apple Silicon/VZ/GaoOS, complete-upgrade or M8/MVP pass is claimed.
+Apple Silicon execution remains assigned to the user.
+
+## 2026-10-16 data-preserving cold uninstall and explicit recovery
+
+The separate [cold uninstall action](MACOS_COLD_MAINTENANCE.md#data-preserving-cold-uninstall)
+now composes independently proven cold ownership, a persistent startup fence,
+sealed retained-data evidence and recoverable exact-app retirement. It requires
+explicit app/state/work/inspection targets and release identity; it never stops
+clients/VMs, unregisters a service, migrates data or removes retained files.
+The original app inode moves only to the fixed private retirement child. Complete
+persistent state, external disk/EFI files, runtime evidence and command namespace
+bindings are re-read after native observers and before the move and success.
+Retained failed TestRuns and unknown staging data are not cleanup candidates.
+Acquiring state ownership may create the persistent empty `.gaovmd.lock` when
+absent; the command also deliberately retains its startup marker and checkpoints.
+
+`resume-uninstall --from preparation|retirement` requires the explicit completed
+checkpoint, a new empty private inspection directory, fresh original-state kernel
+ownership and independently observed catalog schema. Preparation recovery retires
+the original app; retirement recovery revalidates the same moved inode without
+another move. Changed data, occupied original slots, partial/unknown output and
+wrong selectors are retained and refused, not repaired, promoted or undone.
+The sealed record is retained-data evidence, not an external-file backup or
+rollback payload. Success reports `uninstalled_data_retained`; ordinary startup
+stays fenced and activation/rollback/upgrade-commit authorization remains false.
+Native inspection waits for the same owned child's confirmed exit before
+unwinding state and namespace ownership.
+
+Verification: **621 checks across 37 files**, concurrency 1, zero failures/skips,
+terminal success and confirmed runner exit (**1890.140 seconds**). The retained
+native JSON report is `/private/tmp/gaovm-cold-uninstall.so4pVk/verified.jsonl`.
+Independent report inspection confirms **135 release-inspection checks**, including
+**15 new uninstall integration checks**, and **26 command-process checks**,
+including **12 new cases**. The same three installed/startup scenarios were
+explicitly filtered and never started, not counted as passes or skips. Earlier
+broad/default-concurrency daemon failures were not rerun or resolved. No owned
+test/component fixture process remained after terminal completion.
+
+Test-first checks reproduced the missing action and completed-retirement recovery.
+An initial failed-TestRun fixture was correctly rejected for lacking bounded
+terminal provisioning proof; it now uses real create acceptance and provisioning
+before retaining the failed TestRun. No admission guard was weakened. A misplaced
+test helper caused analyzer errors and was corrected before the final run.
+The final 37-file run follows all Dart changes; source hashes remained unchanged
+throughout it. Existing production/test deadlines were not increased in this slice.
+
+Daemon analysis has no issues; root analysis exits 0 with the same nine existing
+UI informational notices, not zero diagnostics. Pinned Dart 3.9.0 daemon formatting
+(**303 files**) and non-UI formatting (**383 files**) have zero changes. JSON
+Schema/OpenAPI validation, scoped Markdown file targets and `git diff --check`
+passed; Markdown anchors were not checked. Whole-tree/UI formatting was not rerun
+or applied. The unrelated UI lockfile remains byte-identical and excluded.
+
+The standalone Intel maintenance executable compiled and passed no-HOME help
+and structured argument refusal. Real source-process tests reject an unsigned
+app before state ownership or candidate execution. Positive integration replaces
+only external signature/ARM64/component/service/process observations; private
+files, SQLite, native metadata, kernel locks and no-replace moves are real.
+These are not genuine signed ARM64 installed-product acceptance results. Existing
+CI already includes both test files and compiles the entry; no remote CI was run.
+
+This bounded uninstall does not complete M8/MVP. Activation/write isolation through
+explicit validation/commit, fresh-cold whole-state/app rollback with rewind
+acknowledgement, first install, and full process-crash/fsync/low-disk/native
+lifecycle acceptance remain unfinished. No real installed app/state/service or
+remote ref was changed, and no new Swift/Apple Silicon/VZ/GaoOS result is claimed.
 Apple Silicon execution remains assigned to the user.

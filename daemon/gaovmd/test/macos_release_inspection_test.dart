@@ -2018,6 +2018,738 @@ void main() {
     );
   }, skip: !Platform.isMacOS);
 
+  group('cold uninstall command', () {
+    late Directory state, work, scratch;
+    setUp(() async {
+      state = await Directory('${temporary.path}/uninstall-state').create();
+      work = await Directory('${temporary.path}/uninstall-work').create();
+      scratch = await Directory(
+        '${temporary.path}/uninstall-inspection',
+      ).create();
+      for (final directory in [state, work, scratch]) {
+        imageFileMode(directory.path, 0x1c0);
+      }
+      final database = await GaoVmDatabase.open('${state.path}/gaovm.db');
+      database.close();
+      imageFileMode('${state.path}/gaovm.db', 0x180);
+      for (final name in ['artifacts', 'logs', 'unknown-stage']) {
+        final directory = await Directory('${state.path}/$name').create();
+        imageFileMode(directory.path, 0x1c0);
+        await File('${directory.path}/keep').writeAsString('retain $name');
+        imageFileMode('${directory.path}/keep', 0x180);
+      }
+      final root = await OwnedImageDirectory.open(state);
+      try {
+        (await root.tryAcquireLock('.gaovmd.lock'))!.close();
+      } finally {
+        root.close();
+      }
+    });
+
+    List<String> arguments({String? from, int schema = 21}) => [
+      from == null ? 'uninstall-app' : 'resume-uninstall',
+      '--app',
+      app.path,
+      '--state-dir',
+      state.path,
+      '--work-dir',
+      work.path,
+      '--inspection-dir',
+      scratch.path,
+      '--bundle-id',
+      'org.gaovm.tests.Release',
+      '--version',
+      '0.1.0',
+      '--team-id',
+      'ABCDEFGHIJ',
+      if (from != null) ...['--from', from, '--catalog-schema', '$schema'],
+    ];
+
+    Future<void> freshUninstallInspection(String name) async {
+      scratch = await Directory('${temporary.path}/$name').create();
+      imageFileMode(scratch.path, 0x1c0);
+    }
+
+    Future<Map<String, Object?>> command(List<String> args) async {
+      activeRetirementChecks++;
+      try {
+        return await runMacOsColdUninstall(
+          args,
+          host: host,
+          observer: MacOsOpenReferences(
+            command: (_, _) async => ProcessResult(pid, 1, '', ''),
+          ),
+          inventory: (_) async =>
+              DriverInventorySnapshot(processes: [], unresolvedProcessIds: []),
+        );
+      } finally {
+        activeRetirementChecks--;
+      }
+    }
+
+    test(
+      'uninstall retires the exact app and retains all state bytes and metadata',
+      () async {
+        activeRetirementChecks++;
+        OwnedImageDirectory? originalApp;
+        MaintenanceTree? stateTree;
+        try {
+          originalApp = await OwnedImageDirectory.open(app);
+          stateTree = await MaintenanceTree.open(state);
+          final identity = await originalApp.maintenanceIdentity();
+          final before = await stateTree.capture(nativeMetadata: true);
+          final report = await command(arguments());
+          expect(report['phase'], 'uninstalled_data_retained');
+          expect(report['uninstall_completed'], true);
+          expect(report['observed_catalog_schema'], 21);
+          expect(report['state_retained'], true);
+          expect(report['data_deleted'], false);
+          expect(report['activation_authorized'], false);
+          expect(report['rollback_authorized'], false);
+          expect(report['committed'], false);
+          expect(await app.exists(), false);
+          final retired = await OwnedImageDirectory.open(
+            Directory('${work.path}/retirement/GaoVM.app'),
+          );
+          try {
+            expect(await retired.maintenanceIdentity(), identity);
+          } finally {
+            retired.close();
+          }
+          await stateTree.verify(before, nativeMetadata: true);
+          await expectLater(
+            MaintenanceStateFence.requireUnfenced(state),
+            throwsA(isA<MaintenanceFenceActive>()),
+          );
+        } finally {
+          stateTree?.close();
+          originalApp?.close();
+          activeRetirementChecks--;
+        }
+      },
+      timeout: const Timeout(Duration(minutes: 3)),
+    );
+    test(
+      'uninstall retains pre-catalog data without creating a database or inventing a schema',
+      () async {
+        await File(
+          '${state.path}/gaovm.db',
+        ).rename('${temporary.path}/retained-before-uninstall.db');
+        final result = await command(arguments());
+        expect(result['uninstall_completed'], true);
+        expect(result['observed_catalog_schema'], isNull);
+        expect(await File('${state.path}/gaovm.db').exists(), false);
+        expect(
+          await File('${state.path}/unknown-stage/keep').readAsString(),
+          'retain unknown-stage',
+        );
+        await freshUninstallInspection('pre-catalog-uninstall-recovery');
+        final recovered = await command(
+          arguments(from: 'retirement', schema: 0),
+        );
+        expect(recovered['uninstall_completed'], true);
+        expect(recovered['observed_catalog_schema'], isNull);
+        expect(await File('${state.path}/gaovm.db').exists(), false);
+        await expectLater(
+          MaintenanceStateFence.requireUnfenced(state),
+          throwsA(isA<MaintenanceFenceActive>()),
+        );
+      },
+      timeout: const Timeout(Duration(minutes: 3)),
+    );
+
+    test(
+      'uninstall refuses durable pending Operations before fencing or retiring the app',
+      () async {
+        final database = await GaoVmDatabase.open('${state.path}/gaovm.db');
+        late OperationId operation;
+        try {
+          operation = (await SqliteOperationRepository(database).create(
+            type: 'image.import',
+            resourceType: ResourceType.image,
+            resourceId: ImageId.generate(),
+            requestId: RequestId.generate(),
+            cancellable: true,
+            request: JsonObjectValue.empty,
+          )).id;
+        } finally {
+          database.close();
+        }
+        final source = await MaintenanceTree.open(state);
+        try {
+          final before = await source.capture(nativeMetadata: true);
+          await expectLater(
+            command(arguments()),
+            throwsA(
+              isA<ColdPublicationFailure>().having(
+                (error) => error.cause,
+                'durable-work refusal',
+                isA<ColdStateFailure>().having(
+                  (error) => error.stage,
+                  'catalog boundary',
+                  'catalog',
+                ),
+              ),
+            ),
+          );
+          await source.verify(before, nativeMetadata: true);
+          await MaintenanceStateFence.requireUnfenced(state);
+          expect(await app.exists(), true);
+          final retained = await GaoVmDatabase.open('${state.path}/gaovm.db');
+          try {
+            expect(
+              (await SqliteOperationRepository(retained).get(operation))!.state,
+              OperationState.pending,
+            );
+          } finally {
+            retained.close();
+          }
+        } finally {
+          source.close();
+        }
+      },
+    );
+
+    test(
+      'uninstall preserves a failed TestRun VM, external disk and EFI history',
+      () async {
+        activeRetirementChecks++;
+        MaintenanceTree? source;
+        OwnedImageDirectory? external;
+        OwnedImageFile? heldDisk, heldEfi;
+        try {
+          final disk = File('${temporary.path}/retained.raw');
+          final efi = File('${temporary.path}/retained.efi');
+          await disk.writeAsString('failed guest debugging filesystem');
+          await efi.writeAsString('failed guest NVRAM');
+          imageFileMode(disk.path, 0x180);
+          imageFileMode(efi.path, 0x180);
+          final database = await GaoVmDatabase.open('${state.path}/gaovm.db');
+          late TestRunId runId;
+          late VmId vmId;
+          try {
+            final accepted =
+                await SqliteVmCreateAcceptance(
+                  database: database,
+                  idempotencyRetention: const Duration(days: 30),
+                ).create(
+                  VmCreateCommand(
+                    requestId: RequestId.generate(),
+                    idempotencyKey: null,
+                    requestBody: const [],
+                    name: 'retained-uninstall-failure',
+                    spec: VmSpec(
+                      cpu: 1,
+                      memoryBytes: 268435456,
+                      boot: EfiBoot(
+                        variableStore: EfiVariableStore.external,
+                        variableStorePath: efi.path,
+                      ),
+                      disks: [
+                        VmDisk(
+                          id: 'root',
+                          source: ExternalDiskSource(disk.path),
+                          writable: true,
+                        ),
+                      ],
+                      networks: [DisconnectedNetwork(id: 'net0')],
+                      graphics: GraphicsConfig(enabled: false),
+                      serial: const SerialConfig(enabled: true, capture: true),
+                      guestAgent: GuestAgentConfig(
+                        enabled: false,
+                        requiredForReady: false,
+                      ),
+                      restartPolicy: RestartPolicy.never,
+                    ),
+                  ),
+                );
+            vmId = accepted.resourceId as VmId;
+            for (final name in ['vms', 'images']) {
+              final directory = await Directory('${state.path}/$name').create();
+              imageFileMode(directory.path, 0x1c0);
+            }
+            final bundles = await OwnedImageDirectory.open(
+              Directory('${state.path}/vms'),
+            );
+            try {
+              final images = await OwnedImageDirectory.open(
+                Directory('${state.path}/images'),
+              );
+              try {
+                final result = (await VmProvisioningWorker(
+                  work: SqliteVmProvisioningWorkRepository(database),
+                  bundles: VmBundleStore(
+                    database: database,
+                    bundles: bundles,
+                    images: images,
+                  ),
+                  owner: 'uninstall-fixture',
+                ).dispatchOnce()).single;
+                expect(
+                  result.completion,
+                  VmProvisioningCompletionKind.succeeded,
+                );
+              } finally {
+                images.close();
+              }
+            } finally {
+              bundles.close();
+            }
+            final runs = SqliteTestRunRepository(database);
+            final run = await runs.create(
+              spec: TestRunSpec(
+                source: TemplateVmTestRunSource(vmId),
+                wait: VmWaitSpec(
+                  condition: WaitCondition.guestAgentReady,
+                  timeoutSeconds: 1,
+                ),
+                steps: [
+                  TestStepRequest(argv: ['false'], timeoutSeconds: 1),
+                ],
+                cleanup: CleanupPolicy.retain,
+                retainOnFailure: true,
+              ),
+              requestId: RequestId.generate(),
+            );
+            runId = run.id;
+            await runs.transition(
+              runId,
+              expectedState: TestRunState.pending,
+              nextState: TestRunState.provisioning,
+            );
+            await runs.transition(
+              runId,
+              expectedState: TestRunState.provisioning,
+              nextState: TestRunState.collecting,
+              vmId: vmId,
+              outcome: TestRunState.failed,
+              error: OperationError(
+                code: ErrorCode.internalError,
+                message: 'retained failure fixture',
+                retryable: false,
+                details: JsonObjectValue.empty,
+              ),
+            );
+            await runs.transition(
+              runId,
+              expectedState: TestRunState.collecting,
+              nextState: TestRunState.cleaningUp,
+              cleanupDecision: 'retain',
+            );
+            await runs.finish(runId, outcome: TestRunState.failed);
+            await database.transaction(
+              (raw) => raw.execute(
+                "UPDATE vm_runtime SET phase = 'failed', observed_generation = 1, driver_generation = 1 WHERE vm_id = ?",
+                [vmId.value],
+              ),
+            );
+          } finally {
+            database.close();
+          }
+          source = await MaintenanceTree.open(state);
+          external = await OwnedImageDirectory.open(temporary);
+          heldDisk = external.file('retained.raw');
+          heldEfi = external.file('retained.efi');
+          final before = await source.capture(nativeMetadata: true);
+          final diskIdentity = heldDisk.stat(), efiIdentity = heldEfi.stat();
+          final diskMetadata = await heldDisk.maintenanceMetadata(),
+              efiMetadata = await heldEfi.maintenanceMetadata();
+          final report = await command(arguments());
+          expect(report['uninstall_completed'], true);
+          await source.verify(before, nativeMetadata: true);
+          expect(
+            await disk.readAsString(),
+            'failed guest debugging filesystem',
+          );
+          expect(await efi.readAsString(), 'failed guest NVRAM');
+          expect(heldDisk.stat(), diskIdentity);
+          expect(heldEfi.stat(), efiIdentity);
+          expect(await heldDisk.maintenanceMetadata(), diskMetadata);
+          expect(await heldEfi.maintenanceMetadata(), efiMetadata);
+          final retained = await GaoVmDatabase.open('${state.path}/gaovm.db');
+          try {
+            expect(
+              (await SqliteTestRunRepository(retained).get(runId))!.state,
+              TestRunState.failed,
+            );
+            expect(
+              (await SqliteVmRepository(retained).get(vmId))!.status.phase,
+              VmPhase.failed,
+            );
+          } finally {
+            retained.close();
+          }
+        } finally {
+          heldEfi?.close();
+          heldDisk?.close();
+          external?.close();
+          source?.close();
+          activeRetirementChecks--;
+        }
+      },
+      timeout: const Timeout(Duration(minutes: 3)),
+    );
+
+    for (final fault in [
+      'overlap',
+      'unknown-work',
+      'used-inspection',
+      'work-privacy',
+    ]) {
+      test(
+        'uninstall refuses $fault without changing state or fencing startup',
+        () async {
+          final args = arguments();
+          switch (fault) {
+            case 'overlap':
+              args[args.indexOf('--work-dir') + 1] = state.path;
+            case 'unknown-work':
+              await File('${work.path}/unknown').writeAsString('retain work');
+            case 'used-inspection':
+              await File(
+                '${scratch.path}/unknown',
+              ).writeAsString('retain scratch');
+            case 'work-privacy':
+              imageFileMode(work.path, 0x1ed);
+          }
+          await expectLater(
+            command(args),
+            throwsA(isA<ColdPublicationFailure>()),
+          );
+          await MaintenanceStateFence.requireUnfenced(state);
+          expect(await app.exists(), true);
+          expect(
+            await File('${state.path}/unknown-stage/keep').readAsString(),
+            'retain unknown-stage',
+          );
+          if (fault == 'work-privacy')
+            expect((await work.stat()).mode & 0xfff, 0x1ed);
+          if (fault == 'unknown-work')
+            expect(
+              await File('${work.path}/unknown').readAsString(),
+              'retain work',
+            );
+          if (fault == 'used-inspection')
+            expect(
+              await File('${scratch.path}/unknown').readAsString(),
+              'retain scratch',
+            );
+        },
+      );
+    }
+
+    test(
+      'uninstall refuses an actual current state owner without arming a fence',
+      () async {
+        activeRetirementChecks++;
+        OwnedImageDirectory? root;
+        DaemonOwnership? owner;
+        try {
+          root = await OwnedImageDirectory.open(state);
+          owner = await DaemonOwnership.tryAcquire(root);
+          expect(owner, isNotNull);
+          await expectLater(
+            command(arguments()),
+            throwsA(
+              isA<ColdPublicationFailure>().having(
+                (error) => error.cause,
+                'actual state owner',
+                isA<ColdStateFailure>(),
+              ),
+            ),
+          );
+          await owner!.verify();
+          await MaintenanceStateFence.requireUnfenced(state);
+          expect(await app.exists(), true);
+        } finally {
+          owner?.close();
+          root?.close();
+          activeRetirementChecks--;
+        }
+      },
+    );
+
+    for (final changed in ['unknown-state', 'command-lock']) {
+      test(
+        'uninstall refuses a late native $changed change before the app move',
+        () async {
+          var injected = false;
+          host.onStatus = () async {
+            if (File('${work.path}/retirement/intent.json').existsSync()) {
+              host.onStatus = null;
+              injected = true;
+              await File(
+                changed == 'unknown-state'
+                    ? '${state.path}/unknown-stage/keep'
+                    : '${work.path}/.gaovm-cold-uninstall.lock',
+              ).writeAsString('retain late change');
+            }
+          };
+          await expectLater(
+            command(arguments()),
+            throwsA(
+              isA<ColdPublicationFailure>().having(
+                (error) => error.cause,
+                'complete final filesystem guard',
+                isA<FormatException>(),
+              ),
+            ),
+          );
+          expect(injected, true);
+          expect(await app.exists(), true);
+          expect(
+            await Directory('${work.path}/retirement/GaoVM.app').exists(),
+            false,
+          );
+          expect(
+            await File(
+              changed == 'unknown-state'
+                  ? '${state.path}/unknown-stage/keep'
+                  : '${work.path}/.gaovm-cold-uninstall.lock',
+            ).readAsString(),
+            'retain late change',
+          );
+          await expectLater(
+            MaintenanceStateFence.requireUnfenced(state),
+            throwsA(isA<MaintenanceFenceActive>()),
+          );
+        },
+        timeout: const Timeout(Duration(minutes: 3)),
+      );
+    }
+
+    test(
+      'uninstall resumes an explicit complete preparation and checks the actual schema',
+      () async {
+        host.onStatus = () async {
+          if (File('${work.path}/uninstall/record.json').existsSync()) {
+            throw StateError('injected terminal prepared refusal');
+          }
+        };
+        await expectLater(
+          command(arguments()),
+          throwsA(isA<ColdPublicationFailure>()),
+        );
+        expect(await app.exists(), true);
+        host.onStatus = null;
+        await freshUninstallInspection('wrong-uninstall-schema');
+        await expectLater(
+          command(arguments(from: 'preparation', schema: 0)),
+          throwsA(
+            isA<ColdPublicationFailure>().having(
+              (error) => error.stage,
+              'independently observed schema',
+              'inspection',
+            ),
+          ),
+        );
+        expect(await app.exists(), true);
+        await freshUninstallInspection('resumed-uninstall-preparation');
+        final result = await command(arguments(from: 'preparation'));
+        expect(result['uninstall_completed'], true);
+        expect(result['observed_catalog_schema'], 21);
+        expect(await app.exists(), false);
+        expect(
+          await File('${state.path}/unknown-stage/keep').readAsString(),
+          'retain unknown-stage',
+        );
+      },
+      timeout: const Timeout(Duration(minutes: 3)),
+    );
+
+    test(
+      'uninstall recovery refuses changed retained data without promoting the checkpoint',
+      () async {
+        host.onStatus = () async {
+          if (File('${work.path}/uninstall/record.json').existsSync()) {
+            throw StateError('injected terminal prepared refusal');
+          }
+        };
+        await expectLater(
+          command(arguments()),
+          throwsA(isA<ColdPublicationFailure>()),
+        );
+        host.onStatus = null;
+        await File(
+          '${state.path}/unknown-stage/keep',
+        ).writeAsString('retain intervening write');
+        await freshUninstallInspection('changed-uninstall-data');
+        await expectLater(
+          command(arguments(from: 'preparation')),
+          throwsA(
+            isA<ColdPublicationFailure>().having(
+              (error) => error.cause,
+              'sealed retained-data comparison',
+              isA<FormatException>(),
+            ),
+          ),
+        );
+        expect(await app.exists(), true);
+        expect(
+          await File('${state.path}/unknown-stage/keep').readAsString(),
+          'retain intervening write',
+        );
+        await expectLater(
+          MaintenanceStateFence.requireUnfenced(state),
+          throwsA(isA<MaintenanceFenceActive>()),
+        );
+      },
+      timeout: const Timeout(Duration(minutes: 3)),
+    );
+
+    test(
+      'uninstall keeps its state and namespace owners until the original native exit settles',
+      () async {
+        final entered = Completer<void>(), ownedExit = Completer<int>();
+        Future<void>? settled;
+        Object? failure;
+        var finished = false;
+        host.onProbe = () async {
+          if (!entered.isCompleted &&
+              File('${work.path}/.gaovm-uninstall.lock').existsSync()) {
+            entered.complete();
+            throw MaintenanceCommandFailure(
+              'injected pending uninstall child',
+              pid + 500,
+              exitConfirmed: false,
+              ownedExit: ownedExit.future,
+            );
+          }
+        };
+        try {
+          settled = command(arguments())
+              .then<void>(
+                (_) => fail('pending command must not succeed'),
+                onError: (Object error) {
+                  failure = error;
+                },
+              )
+              .whenComplete(() {
+                finished = true;
+              });
+          await entered.future;
+          for (final (directory, name) in [
+            (state, '.gaovmd.lock'),
+            (work, '.gaovm-cold-uninstall.lock'),
+            (work, '.gaovm-uninstall.lock'),
+          ]) {
+            final root = await OwnedImageDirectory.open(directory);
+            try {
+              final competing = await root.tryAcquireMaintenanceLock(
+                name,
+                create: false,
+              );
+              try {
+                expect(competing, isNull);
+              } finally {
+                competing?.close();
+              }
+            } finally {
+              root.close();
+            }
+          }
+          expect(finished, false);
+          await expectLater(
+            MaintenanceStateFence.requireUnfenced(state),
+            throwsA(isA<MaintenanceFenceActive>()),
+          );
+        } finally {
+          if (!ownedExit.isCompleted) ownedExit.complete(1);
+          await settled;
+        }
+        expect(
+          failure,
+          isA<ColdPublicationFailure>().having(
+            (error) => error.cause,
+            'same terminal native failure',
+            isA<MaintenanceCommandFailure>().having(
+              (error) => error.exitConfirmed,
+              'confirmed original exit',
+              true,
+            ),
+          ),
+        );
+        expect(await app.exists(), true);
+        expect(
+          await File('${state.path}/unknown-stage/keep').readAsString(),
+          'retain unknown-stage',
+        );
+      },
+      timeout: const Timeout(Duration(minutes: 2)),
+    );
+
+    test(
+      'uninstall recovery rechecks an exact retired app after a terminal failure',
+      () async {
+        activeRetirementChecks++;
+        OwnedImageDirectory? original;
+        try {
+          original = await OwnedImageDirectory.open(app);
+          final identity = await original.maintenanceIdentity();
+          host.onStatus = () async {
+            if (Directory('${work.path}/retirement/GaoVM.app').existsSync()) {
+              throw StateError('injected terminal post-retirement refusal');
+            }
+          };
+          await expectLater(
+            command(arguments()),
+            throwsA(isA<ColdPublicationFailure>()),
+          );
+          expect(await app.exists(), false);
+          host.onStatus = null;
+          await freshUninstallInspection('wrong-uninstall-checkpoint');
+          final executed = host.executedRoles.length;
+          await expectLater(
+            command(arguments(from: 'preparation')),
+            throwsA(isA<ColdPublicationFailure>()),
+          );
+          expect(
+            host.executedRoles.length,
+            executed,
+            reason: 'wrong phase refuses before executing a helper',
+          );
+          await freshUninstallInspection('resume-uninstall-inspection');
+          final report = await command(arguments(from: 'retirement'));
+          expect(report['phase'], 'uninstalled_data_retained');
+          expect(report['action'], 'resume-uninstall');
+          final retired = await OwnedImageDirectory.open(
+            Directory('${work.path}/retirement/GaoVM.app'),
+          );
+          try {
+            expect(await retired.maintenanceIdentity(), identity);
+          } finally {
+            retired.close();
+          }
+          expect(
+            await File('${state.path}/unknown-stage/keep').readAsString(),
+            'retain unknown-stage',
+          );
+          await expectLater(
+            MaintenanceStateFence.requireUnfenced(state),
+            throwsA(isA<MaintenanceFenceActive>()),
+          );
+          await app.create();
+          await File(
+            '${app.path}/foreign',
+          ).writeAsString('retain occupied slot');
+          await freshUninstallInspection('occupied-uninstall-slot');
+          await expectLater(
+            command(arguments(from: 'retirement')),
+            throwsA(isA<ColdPublicationFailure>()),
+          );
+          expect(
+            await File('${app.path}/foreign').readAsString(),
+            'retain occupied slot',
+          );
+        } finally {
+          original?.close();
+          activeRetirementChecks--;
+        }
+      },
+      timeout: const Timeout(Duration(minutes: 3)),
+    );
+  }, skip: !Platform.isMacOS);
+
   group('cold paired snapshots', () {
     late Directory state;
     late OwnedImageDirectory inspection;

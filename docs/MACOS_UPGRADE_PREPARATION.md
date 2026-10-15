@@ -110,8 +110,10 @@ installed publication or migration.
 
 The [accepted cold operator workflow](proposals/MACOS_UPGRADE_ROLLBACK.md) still
 needs activation/write isolation through validation/commit, fresh-cold
-whole-state/app rollback with rewind acknowledgement, and data-preserving
-uninstall. Genuine signed installed-product and ARM64/VZ/GaoOS acceptance remain
+whole-state/app rollback with rewind acknowledgement and first install. A
+separate [cold uninstall action](MACOS_COLD_MAINTENANCE.md#data-preserving-cold-uninstall)
+now retains data and the startup fence while retiring only the exact proven-cold
+app. Genuine signed installed-product and ARM64/VZ/GaoOS acceptance remain
 unproved. This preparation component does not complete M8 or the MVP goal.
 
 Old-app retirement and typed host/ownership handoff are now a separate

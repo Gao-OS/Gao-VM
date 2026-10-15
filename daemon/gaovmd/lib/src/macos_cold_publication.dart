@@ -10,6 +10,8 @@ import 'macos_release_inspection.dart';
 import 'maintenance_command.dart';
 import 'maintenance_state_fence.dart';
 
+part 'macos_cold_uninstall.dart';
+
 /// A failed command is not proof of the last physical placement. All outputs
 /// and the persistent fence remain for an explicit fixed-location recovery.
 final class ColdPublicationFailure implements Exception {
@@ -21,6 +23,7 @@ final class ColdPublicationFailure implements Exception {
 }
 
 const _commandLock = '.gaovm-cold-publication.lock';
+const _uninstallCommandLock = '.gaovm-cold-uninstall.lock';
 const _preparation = 'preparation', _retirement = 'retirement';
 const _publication = 'publication';
 
@@ -220,31 +223,41 @@ Future<Map<String, Object?>> runMacOsColdPublication(
   }
 }
 
-Set<String> _workEntries(String? phase) => {
-  _commandLock,
-  if (phase != null) ...{'.gaovm-upgrade.lock', _preparation},
-  if ({_retirement, _publication}.contains(phase)) ...{
-    '.gaovm-app-retirement.lock',
-    _retirement,
-  },
-  if (phase == _publication) ...{
-    '.gaovm-candidate-publication.lock',
-    _publication,
-  },
-};
+Set<String> _workEntries(String? phase, {bool uninstall = false}) => uninstall
+    ? {
+        _uninstallCommandLock,
+        if (phase != null) ...{'.gaovm-uninstall.lock', 'uninstall'},
+        if (phase == _retirement) ...{
+          '.gaovm-app-retirement.lock',
+          _retirement,
+        },
+      }
+    : {
+        _commandLock,
+        if (phase != null) ...{'.gaovm-upgrade.lock', _preparation},
+        if ({_retirement, _publication}.contains(phase)) ...{
+          '.gaovm-app-retirement.lock',
+          _retirement,
+        },
+        if (phase == _publication) ...{
+          '.gaovm-candidate-publication.lock',
+          _publication,
+        },
+      };
 
 Future<void> _verifyWork(
   OwnedImageDirectory root,
   OwnedImageLock lock,
-  String? phase,
-) async {
+  String? phase, {
+  bool uninstall = false,
+}) async {
   await root.verifyPathBinding();
   if (root.mode & 0xfff != 0x1c0 ||
       (await root.maintenanceMetadata())['has_acl'] != false) {
     throw const FormatException('maintenance work privacy changed');
   }
   lock.verifyPathBinding();
-  final file = root.file(_commandLock);
+  final file = root.file(uninstall ? _uninstallCommandLock : _commandLock);
   try {
     final before = file.stat();
     if (before.mode & 0xfff != 0x180 ||
@@ -262,7 +275,7 @@ Future<void> _verifyWork(
   } finally {
     file.close();
   }
-  await _entries(root, _workEntries(phase));
+  await _entries(root, _workEntries(phase, uninstall: uninstall));
   lock.verifyPathBinding();
 }
 
@@ -290,29 +303,36 @@ final class _Options {
   String get inspection => values['--inspection-dir']!;
   String? get candidate => values['--candidate-app'];
   String get bundle => values['--bundle-id']!;
-  String get oldVersion => values['--old-version']!;
+  String get oldVersion => (values['--old-version'] ?? values['--version'])!;
   String get newVersion => values['--new-version']!;
   String get team => values['--team-id']!;
   String? get from => values['--from'];
   bool get resuming => from != null;
   int? get catalogSchema => int.tryParse(values['--catalog-schema'] ?? '');
 
-  static _Options parse(List<String> args) {
+  static _Options parse(List<String> args, {bool uninstall = false}) {
     if (args.isEmpty ||
-        !{'publish-upgrade', 'resume-publication'}.contains(args.first)) {
+        !(uninstall
+                ? {'uninstall-app', 'resume-uninstall'}
+                : {'publish-upgrade', 'resume-publication'})
+            .contains(args.first)) {
       throw const FormatException('explicit maintenance action required');
     }
-    final resume = args.first == 'resume-publication';
+    final resume =
+        args.first == (uninstall ? 'resume-uninstall' : 'resume-publication');
     final allowed = {
       '--app',
       '--state-dir',
       '--work-dir',
       '--inspection-dir',
       '--bundle-id',
-      '--old-version',
-      '--new-version',
+      if (uninstall) '--version' else ...{'--old-version', '--new-version'},
       '--team-id',
-      if (resume) ...{'--from', '--catalog-schema'} else '--candidate-app',
+      if (resume) ...{
+        '--from',
+        '--catalog-schema',
+      } else if (!uninstall)
+        '--candidate-app',
     };
     final values = <String, String>{};
     for (var i = 1; i < args.length; i += 2) {
@@ -332,7 +352,7 @@ final class _Options {
             (!{
                   _preparation,
                   _retirement,
-                  _publication,
+                  if (!uninstall) _publication,
                 }.contains(values['--from']) ||
                 !RegExp(
                   r'^(0|[1-9][0-9]*)$',
@@ -348,7 +368,10 @@ final class _Options {
           r'^[A-Za-z0-9][A-Za-z0-9-]*(?:\.[A-Za-z0-9][A-Za-z0-9-]*)+$',
         ).hasMatch(values['--bundle-id']!) ||
         !RegExp(r'^[A-Z0-9]{10}$').hasMatch(values['--team-id']!) ||
-        [values['--old-version']!, values['--new-version']!].any(
+        [
+          (values['--old-version'] ?? values['--version'])!,
+          if (!uninstall) values['--new-version']!,
+        ].any(
           (version) =>
               version.length > 32 ||
               !RegExp(
@@ -356,7 +379,7 @@ final class _Options {
               ).hasMatch(version),
         ) ||
         !values['--app']!.endsWith('.app') ||
-        !resume && !values['--candidate-app']!.endsWith('.app')) {
+        !resume && !uninstall && !values['--candidate-app']!.endsWith('.app')) {
       throw const FormatException(
         'explicit bundle ID, Team ID, X.Y.Z versions and app paths required',
       );

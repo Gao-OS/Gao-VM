@@ -1,11 +1,12 @@
-# Cold operator publication command
+# Cold operator maintenance commands
 
 [`tool/maintain_macos.dart`](../daemon/gaovmd/tool/maintain_macos.dart) composes
 the accepted [explicit cold operator workflow](proposals/MACOS_UPGRADE_ROLLBACK.md)
 through immutable preparation, old-app retirement and independent candidate
-publication. It is separate from the public API client and never exposes a
-driver passthrough. It performs no registration, stop, VM action, catalog
-migration, activation, commit, rollback, uninstall or retained-file cleanup.
+publication, plus a separate recoverable data-preserving uninstall. It is
+separate from the public API client and never exposes a driver passthrough.
+It performs no registration, stop, VM action, catalog migration, activation,
+upgrade commit, rollback or retained-file cleanup.
 
 **This is not a production-ready upgrade transaction.** A successful publication
 intentionally leaves ordinary startup blocked by a persistent fence. Activation,
@@ -41,7 +42,7 @@ socket or a copied lock file.
 All paths must be canonical and absolute. App inputs end in `.app`; state and
 existing work/inspection directories must be private and same-user owned, with
 work and inspection exactly `0700` and without ACL grants. These directories
-and app inputs must be mutually disjoint. A fresh publication requires empty
+and app inputs must be mutually disjoint. Every fresh action requires empty
 work and inspection directories; no existing output is reused or normalized.
 Work must support the no-replace same-filesystem moves to/from the installation
 slot; there is no cross-filesystem copy-and-delete substitute for those moves.
@@ -101,7 +102,7 @@ catalog schema, work/preparation/inspection/fence paths and candidate placement.
 `external_files_backed_up` and `committed` are false. Closing releases readers
 and kernel ownership only; it never clears the marker or deletes retained data.
 
-## Explicit recovery
+## Explicit publication recovery
 
 Resume is a separate action with an operator-selected completed checkpoint.
 It does not guess a phase from file existence or promote intent-only output.
@@ -139,6 +140,74 @@ and expectations. Journal paths are provenance, not filesystem selectors.
 Unknown entries, incomplete records, a substituted inode, a foreign occupied slot,
 or both/neither candidate locations are refused. Already-published recovery
 revalidates the same candidate without replacing it. No automatic undo occurs.
+
+## Data-preserving cold uninstall
+
+`uninstall-app` is a separate explicit action, not a side effect of publication.
+The operator must first quiesce clients and VMs and unregister the owning
+service. The tool independently proves that boundary; it never unregisters,
+stops, signals or retries a service/VM on the operator's behalf.
+
+```sh
+/absolute/outside-protected/gaovm-maintenance uninstall-app \
+  --app /absolute/install/GaoVM.app \
+  --state-dir /absolute/private-state \
+  --work-dir /absolute/private-unused-uninstall-work \
+  --inspection-dir /absolute/private-unused-inspection \
+  --bundle-id org.example.GaoVM --version 0.1.0 --team-id ABCDEFGHIJ
+```
+
+The command inspects the cold catalog, managed files, external disk/EFI inputs,
+legacy dependencies and runtime records without migrating or cleaning them.
+Before retiring anything, it publishes a sealed `uninstall/record.json` under
+the private work directory. This binds the app/state identities, expected release,
+independently observed catalog schema, complete persistent state/app manifests,
+external file evidence and runtime metadata. It is retained-data evidence, not
+a backup or rollback payload. The strict work and uninstall namespace locks
+are `.gaovm-cold-uninstall.lock` and `.gaovm-uninstall.lock`.
+
+With one continuously held original-state kernel lease and a persistent startup
+fence, only the exact app inode moves to `work/retirement/GaoVM.app` through
+the existing no-replace retirement primitive. Complete persistent and external
+bytes/metadata, runtime and namespace bindings are re-read after the last native
+observers before that move and before success. No state or external file is
+removed, rewound or rewritten, including retained failed TestRuns, current disks/
+NVRAM, diagnostics, images, artifacts and unknown staging data.
+Establishing state ownership may create the persistent empty `.gaovmd.lock` if
+it did not already exist; it is not deleted afterward. Checkpoint space is
+checked before the sealed record is written; failed work is retained.
+
+Successful stdout is `gaovm.cold-uninstall-command.v1`, with `status: observed`,
+`phase: uninstalled_data_retained`, `uninstall_completed: true`, retained app/
+state/work/inspection/fence paths and the observed schema. `state_retained` and
+`ordinary_startup_fenced` are true; `data_deleted`, `activation_authorized`,
+`rollback_authorized`, `external_files_backed_up` and upgrade `committed` are
+false. This is a cold app-retirement result, not native lifecycle acceptance
+or permission to delete its retained app/data. Ordinary startup remains blocked;
+do not manually clear that fence to reinstall or reuse the data.
+
+For an interrupted command, use a **new empty private inspection directory** and
+select the exact completed checkpoint:
+
+```sh
+/absolute/outside-protected/gaovm-maintenance resume-uninstall \
+  --app /absolute/install/GaoVM.app \
+  --state-dir /absolute/private-state \
+  --work-dir /absolute/private-unused-uninstall-work \
+  --inspection-dir /absolute/private-new-inspection \
+  --bundle-id org.example.GaoVM --version 0.1.0 --team-id ABCDEFGHIJ \
+  --from retirement --catalog-schema 21
+```
+
+`--from preparation` requires the complete uninstall checkpoint and original app
+still at its slot; it proceeds to retirement. `--from retirement` requires that
+checkpoint plus the exact old app in its fixed retirement child and an absent
+original slot; it revalidates without another move. Both reacquire actual state
+ownership, inspect a fresh private catalog copy, compare the expected schema and
+prove the sealed app/state/external/runtime evidence is unchanged. Partial or
+unknown output, wrong selectors, changed data, a substituted inode or an occupied
+original slot are retained and refused. Recovery does not infer a phase, recreate
+locks, promote intent-only output, undo a move or clear the startup fence.
 
 ## Failures and verification boundary
 
