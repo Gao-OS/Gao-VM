@@ -2079,6 +2079,560 @@ void main() {
       );
     }
 
+    group('validation recovery', () {
+      late Directory recoveryTemporary, recoveryState, recoveryWork;
+      late List<String> recoveryArguments;
+      late Map<String, Object?> validated;
+      final recoveryHost = _NativeBoundary();
+      var retain = false;
+      var active = 0;
+      MacOsOpenReferences references() => MacOsOpenReferences(
+        command: (_, _) async => ProcessResult(pid, 1, '', ''),
+      );
+      setUpAll(() async {
+        active++;
+        activeRetirementChecks++;
+        try {
+          recoveryTemporary = Directory(
+            await (await Directory(
+              '/private/tmp',
+            ).createTemp('gvm-recover-validation-')).resolveSymbolicLinks(),
+          );
+          imageFileMode(recoveryTemporary.path, 0x1c0);
+          final app = Directory('${recoveryTemporary.path}/GaoVM.app');
+          final candidate = Directory(
+            '${recoveryTemporary.path}/Candidate.app',
+          );
+          await _fixture(app);
+          await _fixture(candidate);
+          recoveryState = await Directory(
+            '${recoveryTemporary.path}/state',
+          ).create();
+          recoveryWork = await Directory(
+            '${recoveryTemporary.path}/work',
+          ).create();
+          final publicationInspection = await Directory(
+            '${recoveryTemporary.path}/publication-inspection',
+          ).create();
+          final validationInspection = await Directory(
+            '${recoveryTemporary.path}/validation-inspection',
+          ).create();
+          for (final directory in [
+            recoveryState,
+            recoveryWork,
+            publicationInspection,
+            validationInspection,
+          ]) {
+            imageFileMode(directory.path, 0x1c0);
+          }
+          final kernel = await File(
+            '${recoveryTemporary.path}/kernel',
+          ).writeAsString('original recovery kernel');
+          final disk = await File(
+            '${recoveryTemporary.path}/disk.raw',
+          ).writeAsString('original recovery disk');
+          for (final file in [kernel, disk]) imageFileMode(file.path, 0x180);
+          final inputs = {
+            'config.json': jsonEncode({
+              'cpu': 2,
+              'memory': 268435456,
+              'boot': {
+                'loader': 'linux',
+                'kernelPath': kernel.path,
+                'commandLine': 'console=hvc0',
+              },
+              'disk': {'path': disk.path, 'sizeMiB': 8192},
+              'network': {'mode': 'shared'},
+              'graphics': {'enabled': false, 'width': 1280, 'height': 800},
+            }),
+            'desired_state.json': jsonEncode({'desired': 'stopped'}),
+            'unknown-data': 'retained before migration',
+          };
+          for (final entry in inputs.entries) {
+            final file = await File(
+              '${recoveryState.path}/${entry.key}',
+            ).writeAsString(entry.value);
+            imageFileMode(file.path, 0x180);
+          }
+          final selectors = [
+            '--app',
+            app.path,
+            '--state-dir',
+            recoveryState.path,
+            '--work-dir',
+            recoveryWork.path,
+            '--bundle-id',
+            'org.gaovm.tests.Release',
+            '--old-version',
+            '0.1.0',
+            '--new-version',
+            '0.1.0',
+            '--team-id',
+            'ABCDEFGHIJ',
+          ];
+          await runMacOsColdPublication(
+            [
+              'publish-upgrade',
+              ...selectors,
+              '--candidate-app',
+              candidate.path,
+              '--inspection-dir',
+              publicationInspection.path,
+            ],
+            host: recoveryHost,
+            observer: references(),
+            inventory: (_) async => DriverInventorySnapshot(
+              processes: [],
+              unresolvedProcessIds: [],
+            ),
+          );
+          validated = await runMacOsCandidateValidation(
+            [
+              'validate-upgrade',
+              ...selectors,
+              '--inspection-dir',
+              validationInspection.path,
+              '--catalog-schema',
+              '0',
+            ],
+            host: recoveryHost,
+            currentExecutable: () async => '${app.path}/Contents/MacOS/gaovmd',
+            doctorHost: _ValidationDoctorHost(() async {}),
+            observer: references(),
+            inventory: (path) async => DriverInventorySnapshot(
+              processes: path == '${app.path}/Contents/MacOS/gaovmd'
+                  ? [
+                      DriverProcessIdentity(
+                        pid: pid,
+                        uid: 501,
+                        executablePath: path,
+                        startedAtMicroseconds: 1,
+                        pidVersion: 1,
+                      ),
+                    ]
+                  : [],
+              unresolvedProcessIds: [],
+            ),
+          );
+          recoveryArguments = [
+            'resume-validation',
+            ...selectors,
+            '--catalog-schema',
+            '0',
+          ];
+        } catch (_) {
+          retain = true;
+          rethrow;
+        } finally {
+          activeRetirementChecks--;
+          active--;
+        }
+      });
+      tearDownAll(() async {
+        if (retain || active != 0 || recoveryHost.retainInputs) {
+          throw StateError(
+            'retain validation recovery fixture ${recoveryTemporary.path}',
+          );
+        }
+        await recoveryTemporary.delete(recursive: true);
+      });
+      test(
+        'reopens a sealed result after actual legacy migration without changing either state generation',
+        () async {
+          active++;
+          activeRetirementChecks++;
+          MaintenanceTree? state, pair;
+          try {
+            final inspection = await Directory(
+              '${recoveryTemporary.path}/resume-inspection',
+            ).create();
+            imageFileMode(inspection.path, 0x1c0);
+            state = await MaintenanceTree.open(recoveryState);
+            pair = await MaintenanceTree.open(
+              Directory('${recoveryWork.path}/preparation'),
+            );
+            final current = await state.capture(nativeMetadata: true);
+            final original = await pair.capture(nativeMetadata: true);
+            final recovered = await runMacOsColdPublication(
+              [...recoveryArguments, '--inspection-dir', inspection.path],
+              host: recoveryHost,
+              observer: references(),
+              inventory: (_) async => DriverInventorySnapshot(
+                processes: [],
+                unresolvedProcessIds: [],
+              ),
+            );
+            expect(recovered['phase'], 'candidate_validation_recovered');
+            expect(recovered['completion_checkpoint_promoted'], false);
+            expect(recovered['public_api_rerun'], false);
+            expect(recovered['state_unchanged'], true);
+            expect(recovered['applied_catalog_schema'], 21);
+            expect(
+              recovered['catalog_identity'],
+              validated['catalog_identity'],
+            );
+            expect(recovered['ordinary_startup_fenced'], true);
+            expect(recovered['committed'], false);
+            expect(recovered['activation_authorized'], false);
+            expect(recovered['rollback_authorized'], false);
+            await state.verify(current, nativeMetadata: true);
+            await pair.verify(original, nativeMetadata: true);
+            await expectLater(
+              MaintenanceStateFence.requireUnfenced(recoveryState),
+              throwsA(isA<MaintenanceFenceActive>()),
+            );
+          } catch (_) {
+            retain = true;
+            rethrow;
+          } finally {
+            pair?.close();
+            state?.close();
+            activeRetirementChecks--;
+            active--;
+          }
+        },
+        timeout: const Timeout(Duration(minutes: 8)),
+      );
+      test(
+        'wrong original schema refuses before native helpers or inspection writes',
+        () async {
+          active++;
+          activeRetirementChecks++;
+          MaintenanceTree? state, work;
+          try {
+            final inspection = await Directory(
+              '${recoveryTemporary.path}/wrong-schema-inspection',
+            ).create();
+            imageFileMode(inspection.path, 0x1c0);
+            state = await MaintenanceTree.open(recoveryState);
+            work = await MaintenanceTree.open(recoveryWork);
+            final current = await state.capture(nativeMetadata: true);
+            final retained = await work.capture(nativeMetadata: true);
+            final roles = recoveryHost.executedRoles.length;
+            final arguments = [...recoveryArguments];
+            arguments[arguments.indexOf('--catalog-schema') + 1] = '21';
+            await expectLater(
+              runMacOsColdPublication(
+                [...arguments, '--inspection-dir', inspection.path],
+                host: recoveryHost,
+                observer: references(),
+                inventory: (_) async => throw StateError(
+                  'no native census before checkpoint binding',
+                ),
+              ),
+              throwsA(
+                isA<ColdPublicationFailure>().having(
+                  (failure) => failure.stage,
+                  'checkpoint refusal',
+                  'validation_checkpoint',
+                ),
+              ),
+            );
+            expect(recoveryHost.executedRoles.length, roles);
+            expect(await inspection.list().toList(), isEmpty);
+            await state.verify(current, nativeMetadata: true);
+            await work.verify(retained, nativeMetadata: true);
+          } catch (_) {
+            retain = true;
+            rethrow;
+          } finally {
+            work?.close();
+            state?.close();
+            activeRetirementChecks--;
+            active--;
+          }
+        },
+      );
+      test(
+        'promotes only a complete sealed completion checkpoint without repeating validation',
+        () async {
+          active++;
+          activeRetirementChecks++;
+          MaintenanceTree? state, pair;
+          OwnedImageDirectory? journal;
+          try {
+            final inspection = await Directory(
+              '${recoveryTemporary.path}/partial-completion-inspection',
+            ).create();
+            imageFileMode(inspection.path, 0x1c0);
+            state = await MaintenanceTree.open(recoveryState);
+            pair = await MaintenanceTree.open(
+              Directory('${recoveryWork.path}/preparation'),
+            );
+            final current = await state.capture(nativeMetadata: true);
+            final original = await pair.capture(nativeMetadata: true);
+            final record = await File(
+              '${recoveryWork.path}/validation/completed/record.json',
+            ).readAsBytes();
+            journal = await OwnedImageDirectory.open(
+              Directory('${recoveryWork.path}/validation'),
+            );
+            await journal.renameDirectoryNoReplace(
+              'completed',
+              '.completed.partial',
+            );
+            await journal.sync();
+            final recovered = await runMacOsColdPublication(
+              [...recoveryArguments, '--inspection-dir', inspection.path],
+              host: recoveryHost,
+              observer: references(),
+              inventory: (_) async => DriverInventorySnapshot(
+                processes: [],
+                unresolvedProcessIds: [],
+              ),
+            );
+            expect(recovered['phase'], 'candidate_validation_recovered');
+            expect(recovered['completion_checkpoint_promoted'], true);
+            expect(recovered['public_api_rerun'], false);
+            expect(recovered['state_unchanged'], true);
+            expect(
+              recovered['catalog_identity'],
+              validated['catalog_identity'],
+            );
+            expect(recovered['committed'], false);
+            expect(recovered['activation_authorized'], false);
+            expect(recovered['rollback_authorized'], false);
+            expect(
+              await File('${journal.path}/completed/record.json').readAsBytes(),
+              record,
+            );
+            expect(
+              await Directory('${journal.path}/.completed.partial').exists(),
+              false,
+            );
+            await state.verify(current, nativeMetadata: true);
+            await pair.verify(original, nativeMetadata: true);
+            await expectLater(
+              MaintenanceStateFence.requireUnfenced(recoveryState),
+              throwsA(isA<MaintenanceFenceActive>()),
+            );
+          } catch (_) {
+            retain = true;
+            rethrow;
+          } finally {
+            journal?.close();
+            pair?.close();
+            state?.close();
+            activeRetirementChecks--;
+            active--;
+          }
+        },
+        timeout: const Timeout(Duration(minutes: 8)),
+      );
+      test(
+        'unknown partial completion is retained before any native helper runs',
+        () async {
+          active++;
+          activeRetirementChecks++;
+          OwnedImageDirectory? journal;
+          MaintenanceTree? state, work;
+          try {
+            final inspection = await Directory(
+              '${recoveryTemporary.path}/unknown-completion-inspection',
+            ).create();
+            imageFileMode(inspection.path, 0x1c0);
+            journal = await OwnedImageDirectory.open(
+              Directory('${recoveryWork.path}/validation'),
+            );
+            await journal.renameDirectoryNoReplace(
+              'completed',
+              '.completed.partial',
+            );
+            final unknown = await File(
+              '${journal.path}/.completed.partial/unknown',
+            ).writeAsString('retain unrecognized completion');
+            imageFileMode(unknown.path, 0x180);
+            state = await MaintenanceTree.open(recoveryState);
+            work = await MaintenanceTree.open(recoveryWork);
+            final current = await state.capture(nativeMetadata: true);
+            final retained = await work.capture(nativeMetadata: true);
+            final roles = recoveryHost.executedRoles.length;
+            await expectLater(
+              runMacOsColdPublication(
+                [...recoveryArguments, '--inspection-dir', inspection.path],
+                host: recoveryHost,
+                observer: references(),
+                inventory: (_) async =>
+                    throw StateError('no census before sealed checkpoint'),
+              ),
+              throwsA(
+                isA<ColdPublicationFailure>().having(
+                  (failure) => failure.stage,
+                  'checkpoint refusal',
+                  'validation_checkpoint',
+                ),
+              ),
+            );
+            expect(recoveryHost.executedRoles.length, roles);
+            expect(await inspection.list().toList(), isEmpty);
+            await state.verify(current, nativeMetadata: true);
+            await work.verify(retained, nativeMetadata: true);
+            // Only after the expected refusal is proved, remove our own marker
+            // and restore this shared disposable fixture's original namespace.
+            await unknown.delete();
+            await journal.renameDirectoryNoReplace(
+              '.completed.partial',
+              'completed',
+            );
+            await journal.sync();
+          } catch (_) {
+            retain = true;
+            rethrow;
+          } finally {
+            work?.close();
+            state?.close();
+            journal?.close();
+            activeRetirementChecks--;
+            active--;
+          }
+        },
+      );
+      for (final censusCase in [
+        'candidate self',
+        'unresolved daemon',
+        'live driver',
+      ]) {
+        test(
+          'recovery rejects $censusCase without a validating-self exception',
+          () async {
+            active++;
+            activeRetirementChecks++;
+            MaintenanceTree? state, work;
+            try {
+              final inspection = await Directory(
+                '${recoveryTemporary.path}/refused-${censusCase.replaceAll(' ', '-')}-inspection',
+              ).create();
+              imageFileMode(inspection.path, 0x1c0);
+              state = await MaintenanceTree.open(recoveryState);
+              work = await MaintenanceTree.open(recoveryWork);
+              final current = await state.capture(nativeMetadata: true);
+              final retained = await work.capture(nativeMetadata: true);
+              final driver = censusCase == 'live driver';
+              await expectLater(
+                runMacOsColdPublication(
+                  [...recoveryArguments, '--inspection-dir', inspection.path],
+                  host: recoveryHost,
+                  observer: references(),
+                  inventory: (path) async {
+                    final selected = path.endsWith('gaovm-driver-vz') == driver;
+                    return DriverInventorySnapshot(
+                      processes: selected && censusCase != 'unresolved daemon'
+                          ? [
+                              DriverProcessIdentity(
+                                pid: pid,
+                                uid: 501,
+                                executablePath: path,
+                                startedAtMicroseconds: 1,
+                                pidVersion: 1,
+                              ),
+                            ]
+                          : [],
+                      unresolvedProcessIds:
+                          selected && censusCase == 'unresolved daemon'
+                          ? [pid]
+                          : [],
+                    );
+                  },
+                ),
+                throwsA(
+                  isA<ColdPublicationFailure>()
+                      .having(
+                        (failure) => failure.stage,
+                        'cold refusal',
+                        'cold',
+                      )
+                      .having(
+                        (failure) => failure.cause,
+                        'zero-process boundary',
+                        isA<ColdStateFailure>().having(
+                          (error) => error.stage,
+                          'native census',
+                          driver ? 'driver_processes' : 'daemon_processes',
+                        ),
+                      ),
+                ),
+              );
+              expect(await inspection.list().toList(), isEmpty);
+              await state.verify(current, nativeMetadata: true);
+              await work.verify(retained, nativeMetadata: true);
+            } catch (_) {
+              retain = true;
+              rethrow;
+            } finally {
+              work?.close();
+              state?.close();
+              activeRetirementChecks--;
+              active--;
+            }
+          },
+        );
+      }
+      test(
+        'changed historical kernel blocks recovery even after migration removed its live reference',
+        () async {
+          active++;
+          activeRetirementChecks++;
+          MaintenanceTree? state, work;
+          try {
+            final inspection = await Directory(
+              '${recoveryTemporary.path}/changed-original-kernel-inspection',
+            ).create();
+            imageFileMode(inspection.path, 0x1c0);
+            await File('${recoveryTemporary.path}/kernel').writeAsString(
+              'changed original kernel after candidate validation',
+            );
+            state = await MaintenanceTree.open(recoveryState);
+            work = await MaintenanceTree.open(recoveryWork);
+            final current = await state.capture(nativeMetadata: true);
+            final retained = await work.capture(nativeMetadata: true);
+            await expectLater(
+              runMacOsColdPublication(
+                [...recoveryArguments, '--inspection-dir', inspection.path],
+                host: recoveryHost,
+                observer: references(),
+                inventory: (_) async => DriverInventorySnapshot(
+                  processes: [],
+                  unresolvedProcessIds: [],
+                ),
+              ),
+              throwsA(
+                isA<ColdPublicationFailure>()
+                    .having(
+                      (failure) => failure.stage,
+                      'original evidence check',
+                      'retained_validation',
+                    )
+                    .having(
+                      (failure) => failure.cause,
+                      'unchanged original dependency required',
+                      isA<FormatException>().having(
+                        (error) => error.message,
+                        'original dependency seal',
+                        'original external file changed after validation',
+                      ),
+                    ),
+              ),
+            );
+            await state.verify(current, nativeMetadata: true);
+            await work.verify(retained, nativeMetadata: true);
+            await expectLater(
+              MaintenanceStateFence.requireUnfenced(recoveryState),
+              throwsA(isA<MaintenanceFenceActive>()),
+            );
+          } catch (_) {
+            retain = true;
+            rethrow;
+          } finally {
+            work?.close();
+            state?.close();
+            activeRetirementChecks--;
+            active--;
+          }
+        },
+        timeout: const Timeout(Duration(minutes: 8)),
+      );
+    }, timeout: const Timeout(Duration(minutes: 8)));
+
     group('candidate validation', () {
       late Directory publishedTemporary,
           publishedApp,

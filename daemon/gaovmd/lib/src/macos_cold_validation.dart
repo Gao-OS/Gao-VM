@@ -122,8 +122,10 @@ Future<Map<String, Object?>> runMacOsCandidateValidation(
     final document = await loadPublicOpenApiDocument(
       File('${options.app}/Contents/Resources/schemas/openapi/gaovm-v1.yaml'),
     );
+    journal = work.createDirectory('.validation.partial');
     final intent = <String, Object?>{
-      'format': 'gaovm.candidate-validation-intent.v1',
+      'format': 'gaovm.candidate-validation-intent.v2',
+      'workspace_identity': await journal.maintenanceIdentity(),
       'source_app': options.app,
       'source_state': options.state,
       'bundle_identifier': options.bundle,
@@ -136,7 +138,6 @@ Future<Map<String, Object?>> runMacOsCandidateValidation(
       'publication': coldHost.validationAdmissionEvidence,
       'fence_path': fence.path,
     };
-    journal = work.createDirectory('.validation.partial');
     await _writeValidationRecord(journal, 'intent.json', intent);
     await journal.sync();
     await work.sync();

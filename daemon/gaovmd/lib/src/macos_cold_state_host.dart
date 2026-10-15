@@ -61,12 +61,11 @@ final class MacOsColdStateHost implements ColdStateHost {
       _retirement?._publication?.evidence ??
       (throw StateError('candidate publication has not been opened'));
 
-  Map<String, Object?> get validationAdmissionEvidence {
+  /// Stable publication bindings, not a cold permit or a validating self PID.
+  /// A recovery coordinator must reacquire the actual state/fence ownership.
+  Map<String, Object?> get publicationBindingEvidence {
     final publication = _retirement?._publication;
-    final process = _validationProcess;
-    if (!isValidatingCandidate || publication == null || process == null) {
-      throw StateError('verified executing candidate required');
-    }
+    if (publication == null) throw StateError('verified publication required');
     return {
       ...publication.evidence,
       'publication_intent_digest':
@@ -78,6 +77,16 @@ final class MacOsColdStateHost implements ColdStateHost {
       'candidate_identity': Map<String, Object?>.from(
         publication._record['candidate_identity'] as Map,
       ),
+    };
+  }
+
+  Map<String, Object?> get validationAdmissionEvidence {
+    final process = _validationProcess;
+    if (!isValidatingCandidate || process == null) {
+      throw StateError('verified executing candidate required');
+    }
+    return {
+      ...publicationBindingEvidence,
       'executing_process': {
         'pid': process.pid,
         'uid': process.uid,

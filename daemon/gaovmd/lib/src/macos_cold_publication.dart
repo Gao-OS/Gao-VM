@@ -14,6 +14,7 @@ import 'maintenance_state_fence.dart';
 export 'macos_cold_command.dart' show ColdPublicationFailure;
 
 part 'macos_cold_uninstall.dart';
+part 'macos_cold_validation_recovery.dart';
 
 /// The source/operator executable interface, not a daemon API or driver proxy.
 /// Injection is confined to native observations, never command-line bypasses.
@@ -24,6 +25,14 @@ Future<Map<String, Object?>> runMacOsColdPublication(
   MacOsOpenReferences? observer,
   Future<DriverInventorySnapshot> Function(String)? inventory,
 }) async {
+  if (arguments.isNotEmpty && arguments.first == 'resume-validation') {
+    return runMacOsColdValidationRecovery(
+      arguments,
+      host: host,
+      observer: observer,
+      inventory: inventory,
+    );
+  }
   final options = ColdMaintenanceOptions.parse(arguments);
   final execution = OwnedColdInspection(host);
   final references =

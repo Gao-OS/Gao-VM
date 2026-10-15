@@ -98,9 +98,9 @@ path, the complete signed publication/preparation records and matching native
 identity, a held persistent fence and the actual original-state kernel lease.
 Native census permits only this exact versioned self PID; another daemon,
 driver, unresolved PID or changed self identity still prevents cold admission.
-The durable intent binds publication/preparation digests and the candidate
-inode/manifest plus the observed self identity. Marker files and copied locks
-are not ownership grants.
+The v2 durable intent binds the validation workspace inode,
+publication/preparation digests and the candidate inode/manifest plus the
+observed self identity. Marker files and copied locks are not ownership grants.
 
 Under that same lease, the coordinator opens the actual catalog for controlled
 schema/legacy migration, closes the writer and reopens it natively read-only.
@@ -127,6 +127,10 @@ the post-validation copy is verified again after native observations. Normal
 startup remains fenced, and `committed`, `activation_authorized` and
 `rollback_authorized` remain false. Any partial/unknown validation output is
 retained and a blind repeat is refused, not automatically repaired or promoted.
+The outside-app [sealed validation recovery](MACOS_COLD_MAINTENANCE.md#sealed-validation-recovery)
+entry separately re-establishes a zero-process cold boundary. It can reverify a
+complete record or atomically publish only its complete sealed completion
+checkpoint; it never reruns migration/API validation or clears the fence.
 
 ## Evidence and remaining composition
 
@@ -162,8 +166,9 @@ inspection output, with both persistent state and work manifests unchanged.
 This is one migration-error checkpoint, not the complete crash/recovery matrix.
 
 This candidate-only composition is not a production-ready upgrade transaction.
-An independently verified outside-app launcher, explicit cold validation
-recovery/commit, activation and paired whole-state/app rollback remain unfinished.
+An independently verified outside-app launcher, cold commit, arbitrary
+interrupted-validation recovery, activation and paired whole-state/app rollback
+remain unfinished.
 Historical nonzero-schema migration through the new composition and the complete
 failure/crash/low-disk matrix still need dedicated integration evidence. A green
 diagnostic report is not product readiness or VZ/Guest execution. First install

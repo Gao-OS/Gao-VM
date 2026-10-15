@@ -14,6 +14,10 @@ const _usage = '''Usage:
     --work-dir PATH --inspection-dir PATH --bundle-id ID
     --old-version X.Y.Z --new-version X.Y.Z --team-id TEAMID
     --from preparation|retirement|publication --catalog-schema N
+  maintain_macos.dart resume-validation --app PATH --state-dir PATH
+    --work-dir PATH --inspection-dir PATH --bundle-id ID
+    --old-version X.Y.Z --new-version X.Y.Z --team-id TEAMID
+    --catalog-schema N
   maintain_macos.dart uninstall-app --app PATH --state-dir PATH
     --work-dir PATH --inspection-dir PATH --bundle-id ID
     --version X.Y.Z --team-id TEAMID
@@ -22,13 +26,17 @@ const _usage = '''Usage:
     --version X.Y.Z --team-id TEAMID
     --from preparation|retirement --catalog-schema N
 
-Explicit cold-operator publication or data-preserving uninstall; does not activate, register, stop,
-migrate, commit, roll back, or remove retained files. Quiesce clients, services
+Explicit cold-operator publication, sealed validation recovery or data-preserving
+uninstall; does not activate, register, stop, migrate, commit, roll back, or remove
+retained files. Quiesce clients, services
 and VMs first. All paths are explicit canonical absolute paths. State, work and
 inspection are private; work and inspection are disjoint from all app inputs.
 Fresh publication requires empty work and inspection directories. Every resume
 requires a new empty inspection directory. Catalog schema on resume is an
 expected compatibility input, independently checked against the cold catalog.
+For resume-validation it is the original source schema, not the migrated schema.
+Only a complete sealed validation checkpoint can be recovered; the state and
+original rollback pair must be unchanged. Recovery does not rerun the public API.
 The command executable and source must remain outside all protected trees.
 ''';
 
@@ -40,6 +48,8 @@ Future<void> main(List<String> arguments) async {
   final uninstall =
       arguments.isNotEmpty &&
       {'uninstall-app', 'resume-uninstall'}.contains(arguments.first);
+  final validationRecovery =
+      arguments.isNotEmpty && arguments.first == 'resume-validation';
   try {
     stdout.writeln(
       jsonEncode(
@@ -59,6 +69,8 @@ Future<void> main(List<String> arguments) async {
       jsonEncode({
         'format': uninstall
             ? 'gaovm.cold-uninstall-command.v1'
+            : validationRecovery
+            ? 'gaovm.cold-validation-recovery-command.v1'
             : 'gaovm.cold-publication-command.v1',
         'status': incompatible ? 'refused' : 'unverified',
         'stage': error is ColdPublicationFailure ? error.stage : 'inputs',

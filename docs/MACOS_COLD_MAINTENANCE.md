@@ -3,15 +3,17 @@
 [`tool/maintain_macos.dart`](../daemon/gaovmd/tool/maintain_macos.dart) composes
 the accepted [explicit cold operator workflow](proposals/MACOS_UPGRADE_ROLLBACK.md)
 through immutable preparation, old-app retirement and independent candidate
-publication, plus a separate recoverable data-preserving uninstall. It is
+publication, sealed validation-checkpoint recovery and a separate recoverable
+data-preserving uninstall. It is
 separate from the public API client and never exposes a driver passthrough.
 It performs no registration, stop, VM action, catalog migration, activation,
 upgrade commit, rollback or retained-file cleanup.
 
 **This is not a production-ready upgrade transaction.** A successful publication
 intentionally leaves ordinary startup blocked by a persistent fence. Activation,
-explicit validation recovery/commit and paired whole-state/app rollback remain
-unfinished. The separate candidate-only validation entry below is not activation.
+explicit commit and paired whole-state/app rollback remain unfinished. Recovery
+below is limited to complete sealed validation checkpoints. The separate
+candidate-only validation entry below is not activation.
 The command must not be substituted for a complete upgrade, and this document
 does not authorize running it against an actual installation.
 
@@ -199,12 +201,60 @@ rollback pair remains intact. The process exits; ordinary startup stays fenced,
 and `committed`, `activation_authorized` and `rollback_authorized` stay false.
 Neither a green doctor nor this receipt authorizes registration or commit.
 
-Partial/unknown validation output is retained. A blind repeat refuses it;
-explicit interrupted-validation recovery and cold commit are not implemented.
+Partial/unknown validation output is retained. A blind repeat refuses it.
 Do not delete the fence/output to force retry, reuse publication-only recovery
 after migration, or substitute the new snapshot for the original rollback pair.
 The future commit must independently re-establish the cold boundary and validate
 the retained app/state identities and intervening-write boundary.
+
+## Sealed validation recovery
+
+After the candidate validation process has exited, an outside-app operator can
+explicitly re-open a complete sealed result. Use the original source schema
+(0 for pre-catalog), not the schema applied by migration, and a new empty private
+inspection directory:
+
+```sh
+/absolute/outside-protected/gaovm-maintenance resume-validation \
+  --app /absolute/install/GaoVM.app \
+  --state-dir /absolute/private-state \
+  --work-dir /absolute/private-upgrade-work \
+  --inspection-dir /absolute/private-new-recovery-inspection \
+  --bundle-id org.example.GaoVM \
+  --old-version 0.1.0 --new-version 0.1.1 --team-id ABCDEFGHIJ \
+  --catalog-schema 0
+```
+
+This is not migration replay, a validating-self exception, activation or commit.
+The command independently checks that services and all daemon/driver processes
+are absent, reacquires the original-state kernel owner and existing fence, and
+re-inspects the published candidate. It verifies the complete current persistent
+state against the post-validation snapshot, the immutable original app/state
+rollback pair and the original external-file evidence, including legacy inputs
+no longer referenced by the migrated catalog. No API or worker is started.
+
+The fixed `validation/` directory must contain exactly `intent.json`,
+`validated-state/`, `.gaovm-maintenance.lock` and either `completed/` or
+`.completed.partial/`. Both completion forms require the same complete sealed
+`record.json`. The v2 intent binds the original validation workspace inode;
+older unbound intents are retained and refused, not silently upgraded. Missing
+or unknown entries, partial state snapshots, changed bytes/metadata/identities,
+an active or unresolved process and mismatched explicit inputs are refused.
+
+An existing completion is reverified without rewriting it. A complete sealed
+`.completed.partial` can be atomically renamed to `completed` without replacement
+only after all checks pass, and is then reverified. Other interrupted migration
+or validation states remain retained for investigation; they are not guessed or
+automatically replayed. Unexpected failures may be after that rename: keep all
+fixed output locations for subsequent identity-based investigation.
+
+Success is a `gaovm.cold-validation-recovery-command.v1` JSON object with
+`phase: candidate_validation_recovered`, `completion_checkpoint_promoted`,
+`public_api_rerun: false` and `state_unchanged: true`. The applied catalog and IDs
+are rechecked, but this is not a new API/doctor run. Ordinary startup stays
+fenced, with `committed`, `activation_authorized` and `rollback_authorized` false.
+Cold commit, arbitrary interrupted-validation recovery and whole-state rollback
+remain unfinished; this command is not a complete upgrade transaction.
 
 ## Data-preserving cold uninstall
 

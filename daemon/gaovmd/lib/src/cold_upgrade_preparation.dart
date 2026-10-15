@@ -47,6 +47,35 @@ final class ColdUpgradePreparation {
     required String teamIdentifier,
     ReleaseInspectionHost host = const MacOsReleaseInspectionHost(),
     MacOsOpenReferences? observer,
+  }) => _open(
+    state,
+    fence,
+    parent,
+    name,
+    oldVersion: oldVersion,
+    newVersion: newVersion,
+    teamIdentifier: teamIdentifier,
+    host: host,
+    observer: observer,
+    sourceCatalogSchema: state.observedCatalogSchema,
+    retainedValidation: false,
+  );
+
+  // Only the sealed validation-checkpoint coordinator uses this alternate
+  // opening. It does not grant the unchanged-source permit from verify(),
+  // retireOriginalApp() or publishCandidate(); those checks remain strict.
+  static Future<ColdUpgradePreparation> _open(
+    ColdStateSnapshot state,
+    MaintenanceStateFence fence,
+    OwnedImageDirectory parent,
+    String name, {
+    required String oldVersion,
+    required String newVersion,
+    required String teamIdentifier,
+    required int? sourceCatalogSchema,
+    required bool retainedValidation,
+    required ReleaseInspectionHost host,
+    MacOsOpenReferences? observer,
   }) async {
     _validateName(name);
     await state.verify();
@@ -97,7 +126,7 @@ final class ColdUpgradePreparation {
           intent['old_version'] != oldVersion ||
           intent['new_version'] != newVersion ||
           intent['team_identifier'] != teamIdentifier ||
-          intent['catalog_schema'] != state._catalog?.schemaVersion ||
+          intent['catalog_schema'] != sourceCatalogSchema ||
           intent['fence_path'] != fence.path ||
           intent['candidate_source'] is! String ||
           !(intent['candidate_source'] as String).startsWith('/') ||
@@ -105,7 +134,7 @@ final class ColdUpgradePreparation {
           record.length != 13 ||
           record['format'] != 'gaovm.cold-upgrade-preparation.v1' ||
           record['phase'] != 'candidate_prepared' ||
-          record['catalog_schema'] != state._catalog?.schemaVersion ||
+          record['catalog_schema'] != sourceCatalogSchema ||
           record['intent_digest'] !=
               'sha256:${sha256.convert(_encode(intent))}' ||
           record['ordinary_startup_fenced'] != true ||
@@ -167,7 +196,11 @@ final class ColdUpgradePreparation {
         host,
         observer ?? MacOsOpenReferences(),
       );
-      await result.verify();
+      if (retainedValidation) {
+        await result.verifyRetainedValidationInputs();
+      } else {
+        await result.verify();
+      }
       return result;
     } catch (_) {
       if (result != null) {

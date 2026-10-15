@@ -40,6 +40,7 @@ void main() {
     expect(result.exitCode, 0, reason: '${result.stderr}');
     expect(result.stdout, contains('publish-upgrade'));
     expect(result.stdout, contains('resume-publication'));
+    expect(result.stdout, contains('resume-validation'));
     expect(result.stdout, contains('uninstall-app'));
     expect(result.stdout, contains('resume-uninstall'));
     expect(result.stdout, contains('does not activate'));
@@ -70,6 +71,45 @@ void main() {
   final resume = [...publish]..removeRange(5, 7);
   resume[0] = 'resume-publication';
   resume.addAll(['--from', 'publication', '--catalog-schema', '21']);
+  final resumeValidation = [...resume];
+  resumeValidation[0] = 'resume-validation';
+  final fromIndex = resumeValidation.indexOf('--from');
+  resumeValidation.removeRange(fromIndex, fromIndex + 2);
+  for (final invalid in [
+    ['resume-validation'],
+    ['resume-validation', '--app'],
+    [...resumeValidation, '--from', 'publication'],
+    [...resumeValidation, '--candidate-app', '/other/Candidate.app'],
+    [...resumeValidation, '--allow-unsafe', 'true'],
+    [...resumeValidation, '--catalog-schema', '21'],
+    [...resumeValidation]
+      ..[resumeValidation.indexOf('--catalog-schema') + 1] = '021',
+    [...resumeValidation]
+      ..[resumeValidation.indexOf('--catalog-schema') + 1] = '-1',
+    [...resumeValidation]
+      ..[resumeValidation.indexOf('--catalog-schema') + 1] = '2147483648',
+  ]) {
+    test(
+      'malformed validation recovery refuses before path inspection: $invalid',
+      () async {
+        final result = await run(invalid);
+        expect(
+          result.exitCode,
+          2,
+          reason: '${result.stderr}\n${result.stdout}',
+        );
+        expect(result.stderr, isEmpty);
+        final report = jsonDecode(result.stdout as String) as Map;
+        expect(report['format'], 'gaovm.cold-validation-recovery-command.v1');
+        expect(report['stage'], 'inputs');
+        expect(report['status'], 'refused');
+        expect(report['retain_inputs_and_outputs'], true);
+        expect(report['activation_authorized'], false);
+        expect(report['rollback_authorized'], false);
+        expect(report['committed'], false);
+      },
+    );
+  }
   for (final invalid in [
     <String>[],
     ['upgrade'],

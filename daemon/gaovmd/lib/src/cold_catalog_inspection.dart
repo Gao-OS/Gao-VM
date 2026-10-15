@@ -10,11 +10,13 @@ import 'cold_state_lease.dart';
 import 'driver_runtime_metadata.dart';
 import 'image_filesystem.dart';
 import 'image_manifest.dart';
+import 'macos_cold_state_host.dart' show MacOsColdStateHost;
 import 'macos_driver_inventory.dart';
 import 'macos_open_references.dart';
 import 'macos_release_inspection.dart';
 import 'maintenance_tree.dart';
 import 'maintenance_state_fence.dart';
+import 'sqlite_database.dart' show GaoVmDatabase;
 import 'vm_bundle_manifest.dart';
 import 'vm_provisioning_plan.dart';
 
@@ -25,6 +27,7 @@ part 'cold_runtime_inspection.dart';
 part 'cold_state_snapshot.dart';
 part 'cold_upgrade_snapshot.dart';
 part 'cold_upgrade_preparation.dart';
+part 'cold_validation_checkpoint.dart';
 part 'cold_uninstall_preparation.dart';
 
 /// Facts from a private catalog copy, not a full cold/upgrade certificate.
