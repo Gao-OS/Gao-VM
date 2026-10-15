@@ -9,6 +9,7 @@ import 'package:gaovm_models/gaovm_models.dart';
 import 'src/default_socket_path.dart';
 
 part 'src/artifact_download.dart';
+part 'src/legacy_config.dart';
 
 /// Exit codes: 0 success, 1 API/action failure, 2 usage, 3 transport,
 /// 4 invalid server response, 124 deadline, 130 SIGINT, 143 SIGTERM.
@@ -17,6 +18,7 @@ Future<int> runCli(
   List<String> args, {
   void Function(String)? output,
   void Function(String)? error,
+  Map<String, String>? environment,
 }) async {
   final void Function(String) write = output ?? stdout.writeln;
   final writeError = error ?? stderr.writeln;
@@ -30,7 +32,7 @@ Future<int> runCli(
   }
 
   try {
-    final options = _Options.parse(args);
+    final options = _Options.parse(args, environment ?? Platform.environment);
     if (options.help) {
       write(
         encode({
@@ -75,7 +77,8 @@ Future<int> runCli(
           'options': {
             '--after-sequence N':
                 'events: exclusive sequence cursor; default 0',
-            '--vm-id VM_ID': 'events: VM filter',
+            '--vm-id VM_ID':
+                'events: VM filter; legacy commands: explicit target',
             '--operation-id OP_ID': 'events: Operation filter',
             '--test-run-id TR_ID': 'events: TestRun filter',
             '--label-selector SELECTOR':
@@ -100,6 +103,28 @@ Future<int> runCli(
             '--output-dir DIRECTORY':
                 'vm/test download: existing local directory; creates a private child',
             '--kind KIND': 'vm logs: driver, serial, or guest',
+          },
+          'legacy': {
+            'lifetime': 'one release cycle (0.1.x); removed in 0.2.0',
+            'commands': [
+              'ping',
+              'status',
+              'list',
+              'start',
+              'stop',
+              'open-display',
+              'close-display',
+              'config-get',
+              'config-set',
+              'config-patch',
+            ],
+            'binding':
+                '--vm-id VM_ID overrides GAOVM_LEGACY_VM_ID; default requires that explicit environment binding',
+            'config_writes':
+                '--json OBJECT and --if-match REVISION; boot paths require imported img_ IDs; disk resize is unsupported',
+            'output':
+                'public API resources and durable Operations, not legacy RPC envelopes',
+            'driver-exec': 'unsupported; no public driver passthrough',
           },
         }),
       );
@@ -204,7 +229,20 @@ Future<int> runCli(
       write(encode(image.toJson()));
       return 0;
     }
-    final route = _route(options);
+    var route = _route(options);
+    var requestTimeout = options.timeout;
+    if (options.legacyConfig != null) {
+      final elapsed = Stopwatch()..start();
+      route = _Request(
+        'PATCH',
+        route.path,
+        body: await _legacyConfigBody(client, options),
+        ifMatch: route.ifMatch,
+      );
+      requestTimeout -= elapsed.elapsed;
+      if (requestTimeout <= Duration.zero)
+        throw ApiTimeoutException(options.timeout);
+    }
     if (options.command.length == 3 && options.command[0] == 'vm') {
       final action = options.command[1];
       if (action == 'open-display' || action == 'close-display') {
@@ -238,7 +276,7 @@ Future<int> runCli(
       route.path,
       query: route.query,
       timeout:
-          options.timeout +
+          requestTimeout +
           (route.path.endsWith('/wait')
               ? const Duration(seconds: 5)
               : Duration.zero),
@@ -248,6 +286,9 @@ Future<int> runCli(
           ? null
           : options.idempotencyKey ?? _newKey(),
     );
+    if (options.legacyVmRead) {
+      _legacyVmResponse(response, options.command[2]);
+    }
     if (route.path.endsWith('/guest/exec')) {
       final accepted = response.body.toJson();
       final operationId = accepted['operation_id'];
@@ -487,6 +528,9 @@ Future<ProcessSignal> _consumeEvents(
 
 _Request _route(_Options options) {
   final command = options.command;
+  if (command.length == 1 && command.single == 'ping') {
+    return _Request('GET', '/v1/system/live');
+  }
   if (command.length == 1 && command.single == 'schema') {
     return _Request('GET', '/v1/openapi.json');
   }
@@ -725,6 +769,8 @@ final class _Options {
     this.serviceName,
     this.outputDirectory,
     this.query = const {},
+    this.legacyConfig,
+    this.legacyVmRead = false,
   });
   final String socket;
   final Duration timeout;
@@ -738,14 +784,20 @@ final class _Options {
   final String? serviceName;
   final String? outputDirectory;
   final Map<String, String> query;
+  final String? legacyConfig;
+  final bool legacyVmRead;
 
-  static _Options parse(List<String> args) {
+  static _Options parse(List<String> args, Map<String, String> environment) {
     String? socket;
     var seconds = 30;
     var timeoutExplicit = false;
     var help = false;
+    var verbose = false;
     String? idempotencyKey;
     String? bodyJson;
+    String? legacyJson;
+    String? legacyConfig;
+    var legacyVmRead = false;
     String? ifMatch;
     String? condition;
     String? serviceName;
@@ -812,7 +864,15 @@ final class _Options {
             throw const FormatException('timeout must be 1-86400 seconds');
           }
         case '--json':
+          if (i + 1 < args.length && args[i + 1].trimLeft().startsWith('{')) {
+            if (legacyJson != null) {
+              throw const FormatException('duplicate legacy --json body');
+            }
+            legacyJson = args[++i];
+          }
           break;
+        case '--verbose' || '-v':
+          verbose = true;
         case '--help' || '-h':
           help = true;
         default:
@@ -820,6 +880,71 @@ final class _Options {
             throw FormatException('unknown option ${args[i]}');
           command.add(args[i]);
       }
+    }
+    if (command.isEmpty && !help) command.add('status');
+    if (verbose &&
+        !(command.length == 1 &&
+            const {
+              'ping',
+              'list',
+              'status',
+              'config-get',
+              'config-set',
+              'config-patch',
+              'start',
+              'stop',
+              'open-display',
+              'close-display',
+              'doctor',
+              'events',
+            }.contains(command.single))) {
+      throw const FormatException('--verbose is a legacy-command option');
+    }
+    if (command.length == 1 && command.single == 'list') {
+      command.replaceRange(0, 1, ['vm', 'list']);
+    }
+    if (command.length == 1 &&
+        const {
+          'status',
+          'config-get',
+          'config-set',
+          'config-patch',
+          'start',
+          'stop',
+          'open-display',
+          'close-display',
+        }.contains(command.single)) {
+      final legacy = command.single;
+      legacyVmRead = legacy == 'status' || legacy == 'config-get';
+      var target = query.remove('vm_id') ?? 'default';
+      if (target == 'default') {
+        target = environment['GAOVM_LEGACY_VM_ID'] ?? '';
+      }
+      if (target.isEmpty) {
+        throw FormatException(
+          'legacy $legacy requires --vm-id VM_ID or GAOVM_LEGACY_VM_ID; '
+          'default is never inferred from the catalog',
+        );
+      }
+      var action = legacy == 'status' || legacy == 'config-get'
+          ? 'get'
+          : legacy;
+      if (legacy == 'config-set' || legacy == 'config-patch') {
+        if (bodyJson != null || legacyJson == null || ifMatch == null) {
+          throw FormatException(
+            '$legacy requires --json OBJECT and --if-match REVISION',
+          );
+        }
+        legacyConfig = legacy;
+        bodyJson = legacyJson;
+        action = 'patch';
+      }
+      command.replaceRange(0, 1, ['vm', action, _id(target, 'vm_')]);
+    }
+    if (legacyJson != null && legacyConfig == null) {
+      throw const FormatException(
+        '--json OBJECT is only supported by legacy config-set/config-patch',
+      );
     }
     final verb = command.take(2).join(' ');
     final allowedQuery = switch (verb) {
@@ -919,7 +1044,8 @@ final class _Options {
       throw FormatException('${unsupported.join(', ')} not supported by $verb');
     }
     return _Options(
-      // Help and an empty invocation never connect or require installed state.
+      // Help never connects or requires installed state. A legacy empty
+      // invocation is status, but requires an explicit VM binding above.
       socket:
           socket ??
           (help || command.isEmpty
@@ -936,6 +1062,8 @@ final class _Options {
       serviceName: serviceName,
       outputDirectory: outputDirectory,
       query: Map.unmodifiable(query),
+      legacyConfig: legacyConfig,
+      legacyVmRead: legacyVmRead,
     );
   }
 }

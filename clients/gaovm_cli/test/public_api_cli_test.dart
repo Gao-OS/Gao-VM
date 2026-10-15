@@ -14,11 +14,13 @@ import '../tool/e2e_runtime_inspection.dart' as native;
 part 'artifact_download_cases.dart';
 part 'display_cases.dart';
 part 'e2e_flow_cases.dart';
+part 'legacy_cli_cases.dart';
 
 void main() {
   _e2eFlowTests();
   _displayCliTests();
   _artifactDownloadCliTests();
+  _legacyCliTests();
   test(
     'VM delete uses DELETE with an explicit target and idempotency key',
     () async {
@@ -75,6 +77,43 @@ void main() {
       expect(jsonDecode(error.toString())['code'], 'CLI_USAGE');
     }
   });
+
+  test(
+    'legacy start binds default explicitly and returns a public Operation',
+    () async {
+      final vm = VmId.generate();
+      final operation = OperationId.generate();
+      var calls = 0;
+      final router = PublicApiRouter()
+        ..add('POST', '/v1/vms/{vm_id}/actions/start', (request) async {
+          calls++;
+          expect(request.pathParameters['vm_id'], vm.value);
+          expect(request.headers['idempotency-key'], ['legacy-start']);
+          return PublicApiResponse.json(
+            status: 202,
+            body: {
+              'operation_id': operation.value,
+              'resource_id': vm.value,
+              'resource_type': 'virtual_machine',
+              'state': 'pending',
+            },
+          );
+        });
+      await _withServer(router, (server) async {
+        final result = await _invoke(server, [
+          'start',
+          '--vm-id',
+          vm.value,
+          '--idempotency-key',
+          'legacy-start',
+        ]);
+        expect(result.code, 0, reason: result.error);
+        expect(calls, 1);
+        expect(jsonDecode(result.output)['operation_id'], operation.value);
+        expect(jsonDecode(result.output)['state'], 'pending');
+      });
+    },
+  );
 
   test(
     'an unavailable public socket has a stable JSON transport exit',
@@ -547,13 +586,15 @@ Future<void> _withServer(
 
 Future<({int code, String output, String error})> _invoke(
   PublicApiServer server,
-  List<String> args,
-) async {
+  List<String> args, {
+  Map<String, String> environment = const {},
+}) async {
   final output = StringBuffer(), error = StringBuffer();
   final code = await runCli(
     ['--socket-path', server.socketPath, ...args, '--json'],
     output: output.writeln,
     error: error.writeln,
+    environment: environment,
   );
   return (code: code, output: output.toString(), error: error.toString());
 }

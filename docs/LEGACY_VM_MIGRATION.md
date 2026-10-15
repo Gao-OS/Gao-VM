@@ -1,8 +1,9 @@
 # Legacy VM migration checkpoint (PR015 / M1.6)
 
 `LegacyVmMigration` is a startup-only adapter from the former singleton files
-to the SQLite catalog. This checkpoint does not complete PR015's transitional
-CLI adapter or establish the real macOS upgrade acceptance gate.
+to the SQLite catalog. The user accepted the [one-cycle public-API CLI
+adapter](LEGACY_CLI.md) on 2026-10-15. That client input adapter is separate from
+this migration and does not establish the real macOS upgrade acceptance gate.
 
 ## State and startup boundary
 
@@ -111,8 +112,9 @@ as green.
 
 ## Remaining dependencies and limits
 
-- Finish the transitional public-API CLI adapter: `default` may be a temporary
-  alias, never an internal VM ID, and is removed after one release cycle.
+- The transitional public-API CLI adapter uses an explicit client-side binding
+  for `default`, never a catalog/name guess or internal VM ID, and is removed
+  after one release cycle. See its [compatibility boundaries](LEGACY_CLI.md).
 - Resolve legacy runtime/socket remnants through proven native ownership; this
   adapter does not blindly unlink old sockets or trust historical PID files.
 - Validate installed startup and migration on a host with a complete native
@@ -121,5 +123,5 @@ as green.
 - Run the real Apple Silicon VM boot/upgrade, Swift/VZ, signing, launchd, and
   release gates. Component/crash fixtures and AOT compilation do not replace them.
 
-PR015 therefore remains a partial work package. CLI integration and a clean-host
-native upgrade test are the next dependencies, not optional MVP exclusions.
+PR015 therefore remains a partial work package pending clean-host installed
+migration/native upgrade acceptance, not an optional MVP exclusion.

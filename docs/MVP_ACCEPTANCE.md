@@ -5,7 +5,9 @@ Checked against [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md),
 The ordinary local matrix baseline is `b75b5a1` on local `main`, including failed-VM
 retention, the `83bdc80` multi-VM smoke recipe and the independently bounded
 host-guard and artifact-recovery scenarios. The Guest development entry was
-accepted and updated after `c605e51` on 2026-10-14. Earlier checkpoints remain below.
+accepted and updated after `c605e51` on 2026-10-14. The two interface choices were
+accepted on 2026-10-15; the legacy CLI component checkpoint is recorded below.
+Earlier checkpoints remain below as historical evidence, not current decisions.
 
 **The Multi-VM Agent Testing MVP is not release-ready.** This ledger distinguishes
 implementation/test entry points from proof that the product works. A file,
@@ -27,13 +29,14 @@ release publication or remote push is authorized by this ledger.
    capability advertisement. Default launches remain Guest-disabled. Local
    compiled-driver/Unix/HTTP checks are not Apple Silicon/GaoOS acceptance;
    hello, UID/token, capability, generation and census guards remain mandatory.
-2. **PR015 transitional CLI compatibility is unfinished and its scope conflicts.**
-   M4.7 is conditional, whereas development-plan section 10, architecture
-   section 21 and [the migration checkpoint](LEGACY_VM_MIGRATION.md) still require
-   the adapter. The user must choose one release cycle of public-API-only legacy
-   compatibility or explicitly waive old-command compatibility while retaining
-   old-data migration. No new implicit VM or public driver passthrough follows
-   from either choice. The current public CLI rejects prototype commands.
+2. **PR015 installed migration acceptance remains unproved.** On 2026-10-15 the
+   user accepted one release cycle of [public-API-only legacy input
+   compatibility](LEGACY_CLI.md). The client adapter translates command spellings,
+   explicit real-ID binding and revision-checked configuration writes. It does
+   not restore raw RPC, implicit/name-based `default`, unrestricted filesystem
+   boot inputs, disk resize or public driver passthrough. The installed startup
+   and migration acceptance in [the checkpoint](LEGACY_VM_MIGRATION.md) remains
+   pending; implementing the client is not evidence for that native boundary.
 3. **M8 installed upgrade/rollback remains unfinished.**
    [Packaging](MACOS_PACKAGING.md) assembles a new app without replacing an
    installed one; [the helper](MACOS_SERVICE.md) provides scoped native service
@@ -41,14 +44,15 @@ release publication or remote push is authorized by this ledger.
    provides a manual same-path recipe, not an installed lifecycle transaction.
    DB migrations and conservative manual recovery are not proof of the planned
    install/update/uninstall and failed-upgrade rollback workflow. The plan does
-   not require automatic rollback; [the proposed lifecycle boundary](proposals/MACOS_UPGRADE_ROLLBACK.md)
-   leaves explicit cold versus automatic orchestration to the user. Its
+   not require automatic rollback; the user accepted the [explicit cold operator
+   lifecycle](proposals/MACOS_UPGRADE_ROLLBACK.md) on 2026-10-15, not automatic
+   orchestration. Its
    component/version, writer-fencing, whole-state rollback and native acceptance
    work packages remain unimplemented, not waived by the proposal.
 
 These are not all interchangeable with “tests not run”. In particular, a green
-native boot would not itself complete Guest/TestRun acceptance, resolve the legacy
-scope decision or implement installed upgrade/rollback.
+native boot would not itself complete Guest/TestRun acceptance, prove installed
+migration or implement installed upgrade/rollback.
 
 ## P0 traceability index
 
@@ -187,7 +191,7 @@ Entry points:
 | Plan deliverable | Current boundary | Missing proof/work |
 | --- | --- | --- |
 | M0 contracts, IDs, errors, AGENTS | Frozen documents, typed IDs and schema set present | Keep implementation, docs and packaged protocol versions aligned |
-| M1 catalog, WAL/outbox, repositories, old-data migration | SQLite/migration/reopen/crash components present | Installed startup/migration acceptance; legacy adapter scope choice |
+| M1 catalog, WAL/outbox, repositories, old-data migration | SQLite/migration/reopen/crash components and one-cycle CLI adapter present | Installed startup/migration acceptance |
 | M2 registry, queue, generations, fake runtime, restart, scheduler | Controller/admission/recovery components and tests present | Real parallel, crash, heartbeat and retry exhaustion evidence |
 | M3 driver split, hello/auth, VZ queue/lane, delegate/display/serial/stop | Swift runtime/protocol/log/display components present | Native VZ queue behavior, boot/display/serial and stop escalation |
 | M4 API, Operations, SSE, idempotency, OCC, conditional adapter | Public HTTP/UDS/application-service path present | Full installed path; unresolved M4.7 compatibility scope |
@@ -403,7 +407,7 @@ All ten PRD section 13 gates remain explicit:
 
 | Gate | Current verdict | Required evidence |
 | --- | --- | --- |
-| 1 All P0 complete or approved scope changes | Not proven | Close the 94 entries, implementation gaps and compatibility decision above |
+| 1 All P0 complete or approved scope changes | Not proven | Close the 94 entries and remaining implementation/acceptance gaps above |
 | 2 OpenAPI/implementation contract alignment | Component validation only | Complete live handler/schema contract checks at the release revision |
 | 3 All Dart unit/integration tests pass | Not proven | Unfiltered green release-revision runs; excluded native/cleanup cases are not passes |
 | 4 Swift driver tests pass | Local component pass | 145 tests and strict lint passed for the Guest entry; rerun at the release revision |
@@ -414,8 +418,25 @@ All ten PRD section 13 gates remain explicit:
 | 9 No public driver.exec | Architecture/source boundary retained | Recheck exported routes and clients at release; Guest exec remains an application service |
 | 10 README/PRD/OpenAPI/VmSpec/driver versions agree | Needs release audit | Signed release artifact version/role compatibility and documentation/schema parity |
 
-Do not mark M6, M8 or the overall goal complete from this ledger. The next
-decisions are legacy CLI compatibility scope and cold versus automatic installed
-lifecycle interface; the Guest development entry was accepted on 2026-10-14.
+Do not mark M6, M8 or the overall goal complete from this ledger. The user
+accepted both one-cycle public-API CLI compatibility and the explicit cold
+installed lifecycle on 2026-10-15; those choices no longer block implementation.
+The Guest development entry was accepted on 2026-10-14.
 Installed upgrade implementation and native/release evidence remain separate
 required work, not silently waived deliverables.
+
+## 2026-10-15 legacy CLI component checkpoint
+
+The [one-cycle adapter](LEGACY_CLI.md), tested on top of `820a5bd`, uses the existing
+public HTTP/Unix client only. Explicit alias binding, real catalog IDs, typed
+configuration translation, revision/idempotency propagation, wrong-target
+rejection, one composite local deadline and executable environment binding have
+component coverage. There is no public/raw driver passthrough or singleton VM.
+
+The **unfiltered CLI suite passed 167 tests**, with zero failures or skips.
+The report ended with `success: true` at
+`/private/tmp/gaovm-legacy-cli.ybrbkB/cli.jsonl`. CLI analysis and pinned Dart
+format checks passed. These checks include existing compiled CLI launch cases,
+but are not a new daemon/Swift/Guest matrix or installed/native acceptance run.
+The unrelated UI lockfile is unchanged. The cold upgrade transaction remains
+implementation work, not a passed gate.

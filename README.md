@@ -365,11 +365,14 @@ dart run bin/gaovm_cli.dart --socket-path /absolute/state/run/api.sock events --
 dart test
 ```
 
-Coverage includes real public-socket requests, VM/image deletion contracts, SQLite-backed filtered/paginated catalog queries, image lookup across pages, create/import/replay/query/cancellation with durable Operation waits, and resumable/live event streaming. TestRun tests exercise cross-client acceptance/query/cancellation, retry conflicts, isolated artifact pages, and the CLI executable querying a collected pre-allocation cancellation with a downloadable result. Doctor tests cover healthy/unhealthy reports, protocol validation, and local deadlines; daemon tests use real SQLite/filesystem/socket state, plus native static-signing fixtures that are never executed. Executable signal tests verify idle subscription cleanup and stable JSON/exit codes. Guest-exec and display composition now have component coverage. The legacy alias adapter remains pending; these checks do not establish installed-daemon, native guest execution, or Apple Silicon VM boot/display acceptance.
+Coverage includes real public-socket requests, VM/image deletion contracts, SQLite-backed filtered/paginated catalog queries, image lookup across pages, create/import/replay/query/cancellation with durable Operation waits, and resumable/live event streaming. TestRun tests exercise cross-client acceptance/query/cancellation, retry conflicts, isolated artifact pages, and the CLI executable querying a collected pre-allocation cancellation with a downloadable result. Doctor tests cover healthy/unhealthy reports, protocol validation, and local deadlines; daemon tests use real SQLite/filesystem/socket state, plus native static-signing fixtures that are never executed. Executable signal tests verify idle subscription cleanup and stable JSON/exit codes. Guest-exec and display composition now have component coverage. The [one-cycle legacy adapter](docs/LEGACY_CLI.md) accepts safe command spellings with explicit real-ID binding and revision-checked configuration translation. These checks do not establish installed-daemon, native guest execution, or Apple Silicon VM boot/display acceptance.
 
 ## Legacy Prototype CLI Reference (Not Supported)
 
-The commands and examples in this section describe the removed prototype RPC CLI. They are not supported by the current public-API client.
+The commands and examples in this section describe the removed prototype RPC CLI.
+They are historical wire/config references, not current invocation instructions.
+For the accepted one-cycle public-API input adapter, explicit binding, changed
+JSON output and safety restrictions, use [Legacy CLI](docs/LEGACY_CLI.md).
 
 ```bash
 cd clients/gaovm_cli

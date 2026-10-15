@@ -51,6 +51,45 @@ void main() {
   });
 
   test(
+    'legacy list uses the public catalog and preserves real VM IDs',
+    () async {
+      final first = await vms.create(name: 'first', spec: _spec());
+      final second = await vms.create(name: 'second', spec: _spec());
+
+      final result = await _invoke(server, ['list']);
+
+      expect(result.code, 0, reason: result.error);
+      final json = jsonDecode(result.output) as Map;
+      expect((json['items'] as List).map((item) => item['metadata']['id']), [
+        first.metadata.id.value,
+        second.metadata.id.value,
+      ]);
+      expect(json['next_cursor'], isNull);
+    },
+  );
+
+  test(
+    'legacy status, empty invocation and config-get return the public VM',
+    () async {
+      final vm = await vms.create(name: 'bound', spec: _spec());
+      await vms.create(name: 'default', spec: _spec());
+      for (final args in [
+        <String>[],
+        ['status'],
+        ['config-get', '--vm-id', 'default'],
+      ]) {
+        final result = await _invoke(
+          server,
+          args,
+          environment: {'GAOVM_LEGACY_VM_ID': vm.metadata.id.value},
+        );
+        expect(result.code, 0, reason: result.error);
+        expect(VirtualMachine.fromJson(jsonDecode(result.output)), vm);
+      }
+    },
+  );
+
+  test(
     'VM list filters and resumes an opaque cursor through the public API',
     () async {
       final first = await vms.create(
@@ -181,13 +220,15 @@ VmSpec _spec() => VmSpec(
 
 Future<({int code, String output, String error})> _invoke(
   PublicApiServer server,
-  List<String> args,
-) async {
+  List<String> args, {
+  Map<String, String> environment = const {},
+}) async {
   final output = StringBuffer(), error = StringBuffer();
   final code = await runCli(
     ['--socket-path', server.socketPath, ...args, '--json'],
     output: output.writeln,
     error: error.writeln,
+    environment: environment,
   );
   return (code: code, output: output.toString(), error: error.toString());
 }
