@@ -72,6 +72,66 @@ void main() {
   }
 
   test(
+    'maintenance validation downloads retained evidence through a native read-only catalog',
+    () async {
+      final bytes = [0, 255, 10, 13, 128, 1];
+      final artifact = await artifacts.publish(
+        bytes: Stream.value(bytes),
+        kind: ArtifactKind.stdout,
+        contentType: 'application/octet-stream',
+        maxBytes: 16,
+      );
+      await server.close();
+      await logger.flush();
+      database.close();
+      final before = await File('${temporary.path}/catalog.db').readAsBytes();
+      database = await GaoVmDatabase.openReadOnly(
+        '${temporary.path}/catalog.db',
+      );
+      artifacts = ArtifactApplicationService(
+        database: database,
+        directory: root,
+      );
+      final router = PublicApiRouter();
+      ArtifactApiHandlers(artifacts: artifacts).register(router);
+      server = PublicApiServer(
+        socketPath: '${temporary.path}/api.sock',
+        openApiDocument: const {},
+        systemHealth: _Health(),
+        router: router,
+        access: PublicApiAccess.maintenanceValidation,
+      );
+      await server.start();
+      final request = await client.getUrl(
+        Uri.parse('http://localhost${artifact.downloadUrl}'),
+      );
+      final response = await request.close();
+      expect(response.statusCode, 200);
+      expect(
+        response.headers.value('digest'),
+        'sha-256=${base64.encode(sha256.convert(bytes).bytes)}',
+      );
+      expect(response.contentLength, bytes.length);
+      expect(await response.expand((chunk) => chunk).toList(), bytes);
+      final remove = await client.deleteUrl(
+        Uri.parse('http://localhost${artifact.downloadUrl}'),
+      );
+      final refused = await remove.close();
+      expect(refused.statusCode, 403);
+      expect(
+        jsonDecode(await utf8.decoder.bind(refused).join())['code'],
+        'INVALID_REQUEST',
+      );
+      await server.close();
+      database.close();
+      expect(
+        await File('${temporary.path}/catalog.db').readAsBytes(),
+        orderedEquals(before),
+      );
+    },
+  );
+
+  test(
     'streams exact binary bytes with digest and request ID over Unix HTTP',
     () async {
       final bytes = [0, 255, 10, 13, 128, 1];

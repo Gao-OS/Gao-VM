@@ -445,6 +445,31 @@ final class PublicApiRouter {
   }
 }
 
+/// Request restriction only: does not grant state ownership, bypass a startup
+/// fence, stop workers, or authorize migration/activation/commit.
+enum PublicApiAccess { normal, maintenanceValidation }
+
+// Route templates, not path patterns: a more-specific future GET handler must
+// not inherit permission from an existing resource template. No events, waits,
+// display/driver calls, or unknown endpoints are admitted by default.
+const _maintenanceReadPaths = {
+  '/v1/openapi.json',
+  '/v1/system/live',
+  '/v1/system/ready',
+  '/v1/system/capabilities',
+  '/v1/system/doctor',
+  '/v1/vms',
+  '/v1/vms/{vm_id}',
+  '/v1/vms/{vm_id}/logs',
+  '/v1/vms/{vm_id}/artifacts',
+  '/v1/images',
+  '/v1/operations',
+  '/v1/operations/{operation_id}',
+  '/v1/test-runs/{test_run_id}',
+  '/v1/test-runs/{test_run_id}/artifacts',
+  '/v1/artifacts/{artifact_id}',
+};
+
 final class PublicApiServer {
   PublicApiServer({
     required this.socketPath,
@@ -461,6 +486,7 @@ final class PublicApiServer {
     this.requestDeadline = const Duration(seconds: 15),
     this.streamWriteDeadline = const Duration(seconds: 15),
     this.socketProbeDeadline = const Duration(milliseconds: 250),
+    this.access = PublicApiAccess.normal,
   }) : _openApiDocument = _deepFreezeJsonObject(openApiDocument),
        _systemHealth = systemHealth,
        _router = router ?? PublicApiRouter(),
@@ -502,6 +528,7 @@ final class PublicApiServer {
   final Duration requestDeadline;
   final Duration streamWriteDeadline;
   final Duration socketProbeDeadline;
+  final PublicApiAccess access;
   final Map<String, Object?> _openApiDocument;
   final SystemHealthService _systemHealth;
   final PublicApiRouter _router;
@@ -882,6 +909,41 @@ final class PublicApiServer {
       '/v1/system/ready',
     };
     final builtIn = builtInPaths.contains(request.uri.path);
+    if (access == PublicApiAccess.maintenanceValidation &&
+        (request.method != 'GET' ||
+            request.contentLength > 0 ||
+            request.headers.value(HttpHeaders.transferEncodingHeader) != null ||
+            !_maintenanceReadPaths.contains(
+              builtIn
+                  ? request.uri.path
+                  : _router._matchingPath(request.uri.path),
+            ))) {
+      final problem = PublicApiProblem(
+        status: HttpStatus.forbidden,
+        code: ErrorCode.invalidRequest,
+        type: 'maintenance-validation-read-only',
+        title: 'Read-only maintenance validation',
+        detail: 'This request is not available during maintenance validation.',
+        retryable: false,
+        details: JsonObjectValue.empty,
+      );
+      final bytes = _encodePublicProblem(requestId, problem);
+      request.response.statusCode = problem.status;
+      request.response.headers.contentType = ContentType(
+        'application',
+        'problem+json',
+        charset: 'utf-8',
+      );
+      request.response.contentLength = bytes.length;
+      // HttpResponse.add/close implicitly drains an unsubscribed request body
+      // before writing headers. A denied upload must not control that lifetime.
+      // The existing owned socket writer sends without draining, then closes.
+      await _writeStream(
+        request.response,
+        request.method == 'HEAD' ? const Stream.empty() : Stream.value(bytes),
+      );
+      return null;
+    }
     final routed = _router.containsPath(request.uri.path);
     if (!builtIn && !routed) {
       _writeProblem(
@@ -976,9 +1038,14 @@ final class PublicApiServer {
           },
         );
       case '/v1/system/ready':
-        final status = await _systemHealth.readiness().timeout(
-          remainingOrdinaryDeadline(),
-        );
+        final status = access == PublicApiAccess.maintenanceValidation
+            ? SystemHealthStatus(
+                healthy: false,
+                checks: const {'maintenance_validation': 'read_only'},
+              )
+            : await _systemHealth.readiness().timeout(
+                remainingOrdinaryDeadline(),
+              );
         _writeJson(
           request.response,
           status.healthy ? HttpStatus.ok : HttpStatus.serviceUnavailable,
@@ -1117,24 +1184,29 @@ final class PublicApiServer {
       'problem+json',
       charset: 'utf-8',
     );
-    final bytes = utf8.encode(
-      jsonEncode(
-        Problem(
-          type: Uri.parse('https://gaovm.dev/problems/${problem.type}'),
-          title: problem.title,
-          status: problem.status,
-          code: problem.code,
-          detail: problem.detail,
-          requestId: requestId,
-          retryable: problem.retryable,
-          operationId: problem.operationId,
-          details: problem.details,
-        ).toJson(),
-      ),
-    );
+    final bytes = _encodePublicProblem(requestId, problem);
     response.contentLength = bytes.length;
     response.add(bytes);
   }
+
+  List<int> _encodePublicProblem(
+    RequestId requestId,
+    PublicApiProblem problem,
+  ) => utf8.encode(
+    jsonEncode(
+      Problem(
+        type: Uri.parse('https://gaovm.dev/problems/${problem.type}'),
+        title: problem.title,
+        status: problem.status,
+        code: problem.code,
+        detail: problem.detail,
+        requestId: requestId,
+        retryable: problem.retryable,
+        operationId: problem.operationId,
+        details: problem.details,
+      ).toJson(),
+    ),
+  );
 
   Future<void> _removeSocketIfPresent() async {
     final type = await FileSystemEntity.type(socketPath, followLinks: false);

@@ -61,6 +61,9 @@ release publication or remote push is authorized by this ledger.
    fresh-cold whole-state/app rollback, first install, full crash/low-disk
    recovery or native lifecycle acceptance. Those remain unfinished, not waived
    by the proposal or by fixture-level component checks.
+   [Request/catalog validation restrictions](MACOS_VALIDATION_ISOLATION.md) now
+   provide a fail-closed HTTP allowlist and native read-only SQLite connection,
+   not candidate admission, worker isolation or a completed activation command.
 
 These are not all interchangeable with “tests not run”. In particular, a green
 native boot would not itself complete Guest/TestRun acceptance, prove installed
@@ -1346,3 +1349,68 @@ acknowledgement, first install, and full process-crash/fsync/low-disk/native
 lifecycle acceptance remain unfinished. No real installed app/state/service or
 remote ref was changed, and no new Swift/Apple Silicon/VZ/GaoOS result is claimed.
 Apple Silicon execution remains assigned to the user.
+
+## 2026-10-16 maintenance validation request/catalog isolation
+
+The internal [validation restrictions](MACOS_VALIDATION_ISOLATION.md) now provide
+an immutable HTTP access policy and a native read-only connection to an already
+current catalog. These are composition prerequisites, not candidate admission or
+an activation/commit command. Ordinary daemon startup still refuses the persistent
+maintenance fence, and its normal worker startup policy is unchanged.
+
+Restricted HTTP permits only empty-body GETs on fifteen reviewed winning route
+templates. Writes, events, waits, driver/display observations, new more-specific
+GETs, unknown routes and body framing are refused before application dispatch.
+Policy failures retain server request correlation and the existing Problem code;
+HEAD has no response body. Liveness remains available, but ordinary readiness is
+always false. Closing/restarting the listener never lifts the immutable policy.
+No frozen public field/error enum, driver authentication or generation check changed.
+
+`GaoVmDatabase.openReadOnly` uses SQLite's native read-only open mode, refuses
+missing/old/newer/incomplete catalogs without creating or migrating them, and
+rejects transactions before invoking their callbacks. Native main-catalog write
+refusal remains effective after `query_only` is disabled. It is not a filesystem
+sandbox or a state-ownership grant; SQLite sidecar bookkeeping and supplied
+diagnostic logging require separate lifecycle accounting. Existing writable opens
+are unchanged. A real Artifact service integration downloads retained bytes over
+restricted HTTP UDS, refuses DELETE and leaves main-catalog bytes unchanged.
+
+Verification: **544 checks across 46 files**, concurrency 1, zero failures/skips,
+terminal success and confirmed runner exit (**179.551 seconds**). The retained
+native JSON report is `/private/tmp/gaovm-validation-isolation.kuPn2w/verified.jsonl`.
+There are **21 new checks**: ten HTTP policy checks, ten native read-only catalog
+checks and one real Artifact-service integration. The existing database suite
+also passes. This run has no per-test-name exclusions within the selected files;
+it does not select `daemon_application_test.dart`, so the three previously unrun
+installed/startup scenarios are not claimed as passes. Earlier broad/default-
+concurrency daemon failures were not rerun or resolved. No owned test/component
+fixture process remained after completion.
+
+Test-first loops reproduced missing factories/policies, route/body admission and
+false ordinary readiness. The stalled-upload check initially timed out with zero
+response bytes: the pinned Dart 3.9 HTTP implementation implicitly drains an
+unsubscribed request body before ordinary response headers. Policy refusal now
+uses the existing tracked detached-socket writer without draining the body, then
+closes. The same three-second check passes without a longer deadline; temporary
+debug instrumentation was removed. Other ordinary early-error paths were not
+audited or changed by this fix.
+
+Daemon analysis has no issues; root analysis exits 0 with the same nine existing
+UI informational notices. Pinned Dart 3.9.0 daemon formatting (**304 files**) and
+non-UI formatting (**384 files**) have zero changes. JSON Schema/OpenAPI validation,
+workflow YAML/four explicit test targets, scoped Markdown file targets and
+`git diff --check` passed. actionlint was unavailable; Markdown anchors, whole-UI
+formatting and remote CI were not run. The unrelated UI lockfile remains
+byte-identical and excluded. Both Intel daemon and maintenance executables compile;
+maintenance help runs without HOME. These are not installed signed ARM64 results.
+The macOS CI component job now includes the four request/catalog test files;
+this is source wiring, not a remote CI result.
+
+Candidate/publication-bound controlled admission and ownership handoff, controlled
+migration, disabled/drained background writers, installed API/doctor/catalog
+identity evidence and durable explicit validation/commit/recovery remain unfinished.
+Whole-state/app rollback, first install and full crash/fsync/low-disk/native
+lifecycle acceptance also remain unfinished. This slice does not complete M8/MVP;
+no real installed app/state/service or remote ref changed, and no new Swift/Apple
+Silicon/VZ/GaoOS result is claimed. Apple Silicon execution remains assigned to
+the user.

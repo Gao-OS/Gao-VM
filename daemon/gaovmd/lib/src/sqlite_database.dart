@@ -44,7 +44,11 @@ final _transactionGates = <String, _AsyncGate>{};
 var _memoryDatabaseSequence = 0;
 
 final class GaoVmDatabase {
-  GaoVmDatabase._(this._database, this._transactionGate);
+  GaoVmDatabase._(
+    this._database,
+    this._transactionGate, {
+    this.isReadOnly = false,
+  });
 
   static const latestSchemaVersion = _latestSchemaVersion;
 
@@ -85,8 +89,59 @@ final class GaoVmDatabase {
     }
   }
 
+  /// Open an already migrated catalog for maintenance validation. SQLite's
+  /// native read-only flag also rejects main-catalog writes through [read]. This
+  /// never creates or migrates a catalog, acquires state ownership, or admits a
+  /// daemon through a maintenance fence. The caller retains that ownership.
+  static Future<GaoVmDatabase> openReadOnly(
+    String path, {
+    Duration busyTimeout = const Duration(seconds: 5),
+  }) async {
+    if (path.isEmpty || path == ':memory:') {
+      throw ArgumentError.value(path, 'path', 'existing file catalog required');
+    }
+    if (busyTimeout.isNegative) {
+      throw ArgumentError.value(
+        busyTimeout,
+        'busyTimeout',
+        'must not be negative',
+      );
+    }
+    // An absolute filesystem path cannot be interpreted as a SQLite URI or
+    // special in-memory filename, even if the native library enables URI mode.
+    final catalogPath = File(path).absolute.path;
+    final gate = _transactionGates.putIfAbsent(catalogPath, _AsyncGate.new);
+    Database? database;
+    try {
+      database = sqlite3.open(catalogPath, mode: OpenMode.readOnly);
+      final wrapper = GaoVmDatabase._(database, gate, isReadOnly: true);
+      wrapper._setBusyTimeout(busyTimeout);
+      final currentSchema =
+          wrapper.schemaVersion == latestSchemaVersion &&
+          coreTableNames.difference(wrapper.tableNames).isEmpty;
+      final versions = currentSchema
+          ? wrapper.appliedMigrationVersions
+          : const <int>[];
+      if (!currentSchema ||
+          versions.length != latestSchemaVersion ||
+          versions.asMap().entries.any(
+            (entry) => entry.value != entry.key + 1,
+          )) {
+        throw StateError(
+          'read-only validation requires the complete current catalog',
+        );
+      }
+      database.execute('PRAGMA foreign_keys = ON');
+      return wrapper;
+    } catch (_) {
+      database?.dispose();
+      rethrow;
+    }
+  }
+
   final Database _database;
   final _AsyncGate _transactionGate;
+  final bool isReadOnly;
   bool _closed = false;
 
   /// True when this caller already owns a transaction on this catalog, even
@@ -143,6 +198,11 @@ final class GaoVmDatabase {
   }
 
   Future<T> transaction<T>(FutureOr<T> Function(Database database) action) {
+    if (isReadOnly) {
+      throw StateError(
+        'read-only maintenance validation cannot start a transaction',
+      );
+    }
     final context = Zone.current[_transactionContextKey];
     if (context is _TransactionContext && context.active) {
       if (identical(context.database, this)) {

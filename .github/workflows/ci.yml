@@ -124,6 +124,14 @@ jobs:
           test/cold_publication_tool_test.dart
           test/macos_driver_inventory_test.dart --concurrency=1
 
+      - name: Check validation request and catalog write isolation
+        working-directory: daemon/gaovmd
+        run: >-
+          dart test test/public_api_server_test.dart
+          test/sqlite_database_test.dart
+          test/sqlite_read_only_validation_test.dart
+          test/artifact_api_handlers_test.dart --concurrency=1
+
       - name: Resolve CLI dependencies
         working-directory: clients/gaovm_cli
         run: dart pub get --enforce-lockfile

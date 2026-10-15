@@ -28,6 +28,392 @@ void main() {
   });
 
   test(
+    'maintenance validation rejects writes before invoking a handler',
+    () async {
+      var accepted = false;
+      final router = PublicApiRouter()
+        ..add('POST', '/v1/vms', (_) async {
+          accepted = true;
+          return PublicApiResponse.json(status: 202, body: const {});
+        });
+      final server = PublicApiServer(
+        socketPath: socketPath,
+        openApiDocument: const {},
+        systemHealth: _HealthService(),
+        router: router,
+        newRequestId: () => _requestId,
+        access: PublicApiAccess.maintenanceValidation,
+      );
+      addTearDown(server.close);
+      await server.start();
+      final response = await _request(
+        socketPath,
+        'POST',
+        '/v1/vms',
+        headers: const {'Content-Type': 'application/json'},
+        body: utf8.encode('{malformed'),
+      );
+      _expectProblem(response, 403, 'INVALID_REQUEST');
+      expect(jsonDecode(response.body)['retryable'], isFalse);
+      expect(
+        jsonDecode(response.body)['type'],
+        endsWith('/maintenance-validation-read-only'),
+      );
+      expect(accepted, isFalse);
+    },
+  );
+
+  test(
+    'maintenance validation does not admit new GET routes by spelling alone',
+    () async {
+      var changed = false;
+      final vmId = VmId.generate();
+      final router = PublicApiRouter()
+        ..add(
+          'GET',
+          '/v1/vms/{vm_id}',
+          (_) async =>
+              PublicApiResponse.json(status: 200, body: {'id': vmId.value}),
+        )
+        ..add('GET', '/v1/vms/future-action', (_) async {
+          changed = true;
+          return PublicApiResponse.json(status: 200, body: const {});
+        });
+      final server = PublicApiServer(
+        socketPath: socketPath,
+        openApiDocument: const {},
+        systemHealth: _HealthService(),
+        router: router,
+        newRequestId: () => _requestId,
+        access: PublicApiAccess.maintenanceValidation,
+      );
+      addTearDown(server.close);
+      await server.start();
+      expect(
+        (await _request(socketPath, 'GET', '/v1/vms/${vmId.value}')).status,
+        200,
+      );
+      _expectProblem(
+        await _request(socketPath, 'GET', '/v1/vms/future-action'),
+        403,
+        'INVALID_REQUEST',
+      );
+      expect(changed, isFalse);
+    },
+  );
+
+  test(
+    'maintenance validation refuses bodies even on an approved GET',
+    () async {
+      var invoked = false;
+      final router = PublicApiRouter()
+        ..add('GET', '/v1/vms', (_) async {
+          invoked = true;
+          return PublicApiResponse.json(status: 200, body: const {});
+        });
+      final server = PublicApiServer(
+        socketPath: socketPath,
+        openApiDocument: const {},
+        systemHealth: _HealthService(),
+        router: router,
+        newRequestId: () => _requestId,
+        access: PublicApiAccess.maintenanceValidation,
+      );
+      addTearDown(server.close);
+      await server.start();
+      _expectProblem(
+        await _request(
+          socketPath,
+          'GET',
+          '/v1/vms',
+          headers: const {'Content-Type': 'application/json'},
+          body: utf8.encode('{"action":"write"}'),
+        ),
+        403,
+        'INVALID_REQUEST',
+      );
+      expect(invoked, isFalse);
+    },
+  );
+
+  test(
+    'maintenance validation is live but never reports ordinary readiness',
+    () async {
+      final server = PublicApiServer(
+        socketPath: socketPath,
+        openApiDocument: const {},
+        systemHealth: _HealthService(),
+        newRequestId: () => _requestId,
+        access: PublicApiAccess.maintenanceValidation,
+      );
+      addTearDown(server.close);
+      await server.start();
+      final live = await _request(socketPath, 'GET', '/v1/system/live');
+      expect(live.status, 200);
+      expect(jsonDecode(live.body)['live'], isTrue);
+      final ready = await _request(socketPath, 'GET', '/v1/system/ready');
+      expect(ready.status, 503);
+      expect(jsonDecode(ready.body), {
+        'ready': false,
+        'checks': {'maintenance_validation': 'read_only'},
+      });
+      expect(ready.headers['x-request-id'], _requestId.value);
+    },
+  );
+
+  test(
+    'maintenance validation does not preapprove a GET on a write-only template',
+    () async {
+      var invoked = false;
+      final router = PublicApiRouter()
+        ..add('GET', '/v1/images/{image_id}', (_) async {
+          invoked = true;
+          return PublicApiResponse.json(status: 200, body: const {});
+        });
+      final server = PublicApiServer(
+        socketPath: socketPath,
+        openApiDocument: const {},
+        systemHealth: _HealthService(),
+        router: router,
+        newRequestId: () => _requestId,
+        access: PublicApiAccess.maintenanceValidation,
+      );
+      addTearDown(server.close);
+      await server.start();
+      _expectProblem(
+        await _request(
+          socketPath,
+          'GET',
+          '/v1/images/${ImageId.generate().value}',
+        ),
+        403,
+        'INVALID_REQUEST',
+      );
+      expect(invoked, isFalse);
+    },
+  );
+
+  test(
+    'maintenance validation rejects every non-GET method even when registered',
+    () async {
+      var invoked = false;
+      final router = PublicApiRouter();
+      const methods = [
+        'POST',
+        'PATCH',
+        'PUT',
+        'DELETE',
+        'OPTIONS',
+        'TRACE',
+        'HEAD',
+      ];
+      for (final method in methods) {
+        router.add(method, '/v1/vms', (_) async {
+          invoked = true;
+          return PublicApiResponse.json(status: 202, body: const {});
+        });
+      }
+      final server = PublicApiServer(
+        socketPath: socketPath,
+        openApiDocument: const {},
+        systemHealth: _HealthService(),
+        router: router,
+        newRequestId: () => _requestId,
+        access: PublicApiAccess.maintenanceValidation,
+      );
+      addTearDown(server.close);
+      await server.start();
+      for (final method in methods) {
+        final response = await _request(socketPath, method, '/v1/vms');
+        expect(response.status, 403, reason: method);
+        expect(response.headers['x-request-id'], _requestId.value);
+        if (method == 'HEAD') {
+          expect(response.body, isEmpty);
+        } else {
+          _expectProblem(response, 403, 'INVALID_REQUEST');
+        }
+      }
+      expect(invoked, isFalse);
+    },
+  );
+
+  test(
+    'maintenance validation leaves diagnostic and resource reads available',
+    () async {
+      final routes = {
+        '/v1/system/capabilities': '/v1/system/capabilities',
+        '/v1/system/doctor': '/v1/system/doctor',
+        '/v1/vms': '/v1/vms?limit=1',
+        '/v1/vms/{vm_id}': '/v1/vms/${VmId.generate().value}',
+        '/v1/vms/{vm_id}/logs': '/v1/vms/${VmId.generate().value}/logs',
+        '/v1/vms/{vm_id}/artifacts':
+            '/v1/vms/${VmId.generate().value}/artifacts',
+        '/v1/images': '/v1/images',
+        '/v1/operations': '/v1/operations',
+        '/v1/operations/{operation_id}':
+            '/v1/operations/${OperationId.generate().value}',
+        '/v1/test-runs/{test_run_id}':
+            '/v1/test-runs/${TestRunId.generate().value}',
+        '/v1/test-runs/{test_run_id}/artifacts':
+            '/v1/test-runs/${TestRunId.generate().value}/artifacts',
+        '/v1/artifacts/{artifact_id}':
+            '/v1/artifacts/${ArtifactId.generate().value}',
+      };
+      final router = PublicApiRouter();
+      for (final template in routes.keys) {
+        router.add(
+          'GET',
+          template,
+          (_) async =>
+              PublicApiResponse.json(status: 200, body: {'route': template}),
+        );
+      }
+      final server = PublicApiServer(
+        socketPath: socketPath,
+        openApiDocument: const {'openapi': '3.1.0'},
+        systemHealth: _HealthService(),
+        router: router,
+        access: PublicApiAccess.maintenanceValidation,
+      );
+      addTearDown(server.close);
+      await server.start();
+      for (final route in routes.entries) {
+        final response = await _request(socketPath, 'GET', route.value);
+        expect(response.status, 200, reason: route.value);
+        expect(jsonDecode(response.body), {'route': route.key});
+      }
+      final schema = await _request(socketPath, 'GET', '/v1/openapi.json');
+      expect(schema.status, 200);
+      expect(jsonDecode(schema.body), {'openapi': '3.1.0'});
+    },
+  );
+
+  test(
+    'maintenance validation denies events, display, waits and late GET registration',
+    () async {
+      var invoked = false;
+      final router = PublicApiRouter();
+      final server = PublicApiServer(
+        socketPath: socketPath,
+        openApiDocument: const {},
+        systemHealth: _HealthService(),
+        router: router,
+        newRequestId: () => _requestId,
+        access: PublicApiAccess.maintenanceValidation,
+      );
+      addTearDown(server.close);
+      await server.start();
+      final routes = {
+        '/v1/events': '/v1/events',
+        '/v1/vms/{vm_id}/display': '/v1/vms/${VmId.generate().value}/display',
+        '/v1/operations/{operation_id}/wait':
+            '/v1/operations/${OperationId.generate().value}/wait',
+        '/v1/future-action': '/v1/future-action',
+      };
+      for (final route in routes.entries) {
+        router.add('GET', route.key, (_) async {
+          invoked = true;
+          return PublicApiResponse.json(status: 200, body: const {});
+        });
+        _expectProblem(
+          await _request(socketPath, 'GET', route.value),
+          403,
+          'INVALID_REQUEST',
+        );
+      }
+      _expectProblem(
+        await _request(socketPath, 'GET', '/v1/unknown'),
+        403,
+        'INVALID_REQUEST',
+      );
+      expect(invoked, isFalse);
+      await server.close();
+      await server.start();
+      _expectProblem(
+        await _request(socketPath, 'GET', '/v1/future-action'),
+        403,
+        'INVALID_REQUEST',
+      );
+    },
+  );
+
+  test(
+    'maintenance validation rejects a stalled write without reading its body',
+    () async {
+      final server = PublicApiServer(
+        socketPath: socketPath,
+        openApiDocument: const {},
+        systemHealth: _HealthService(),
+        access: PublicApiAccess.maintenanceValidation,
+      );
+      addTearDown(server.close);
+      await server.start();
+      final socket = await Socket.connect(
+        InternetAddress(socketPath, type: InternetAddressType.unix),
+        0,
+      );
+      final bytes = socket.fold<List<int>>(
+        [],
+        (out, chunk) => out..addAll(chunk),
+      );
+      try {
+        socket.add(
+          ascii.encode(
+            'POST /v1/vms HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 100000000\r\n\r\n',
+          ),
+        );
+        await socket.flush();
+        final response = await bytes.timeout(const Duration(seconds: 3));
+        expect(
+          ascii.decode(response.take(_headerBoundary(response)).toList()),
+          startsWith('HTTP/1.1 403'),
+        );
+      } finally {
+        socket.destroy();
+        // Settle the same owned reader even if the observation deadline failed.
+        await bytes.catchError((Object _) => <int>[]);
+      }
+    },
+  );
+
+  test(
+    'maintenance validation rejects chunked GET bodies before dispatch',
+    () async {
+      var invoked = false;
+      final router = PublicApiRouter()
+        ..add('GET', '/v1/vms', (_) async {
+          invoked = true;
+          return PublicApiResponse.json(status: 200, body: const {});
+        });
+      final server = PublicApiServer(
+        socketPath: socketPath,
+        openApiDocument: const {},
+        systemHealth: _HealthService(),
+        router: router,
+        newRequestId: () => _requestId,
+        access: PublicApiAccess.maintenanceValidation,
+      );
+      addTearDown(server.close);
+      await server.start();
+      _expectProblem(
+        await _request(
+          socketPath,
+          'GET',
+          '/v1/vms',
+          headers: const {
+            'Transfer-Encoding': 'chunked',
+            'Content-Type': 'application/json',
+          },
+          body: ascii.encode('2\r\n{}\r\n0\r\n\r\n'),
+        ),
+        403,
+        'INVALID_REQUEST',
+      );
+      expect(invoked, isFalse);
+    },
+  );
+
+  test(
     'stalled log I/O does not delay responses or listener shutdown',
     () async {
       final log = File('${temporaryDirectory.path}/daemon.log');

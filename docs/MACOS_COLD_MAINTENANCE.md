@@ -211,6 +211,11 @@ locks, promote intent-only output, undo a move or clear the startup fence.
 
 ## Failures and verification boundary
 
+The separate [validation request/catalog restrictions](MACOS_VALIDATION_ISOLATION.md)
+provide internal fail-closed HTTP and native SQLite read-only components. They
+do not introduce an activation/commit command, startup-fence bypass or disabled
+worker composition; those remain unfinished.
+
 Malformed/refused input returns exit 2; unverified native/filesystem/maintenance
 completion returns exit 3. JSON includes the failed stage and false authorization/
 commit flags. A failure is **not** proof that a rename did not happen. Retain all
