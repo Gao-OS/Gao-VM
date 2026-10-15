@@ -1,6 +1,72 @@
 part of 'image_filesystem.dart';
 
+/// No-follow presence lookup without requiring ownership of a normal startup's
+/// parent directory. Dart's type() folds EACCES/other errors into notFound; an
+/// unavailable maintenance namespace must never admit a writer.
+bool maintenancePathEntryExists(String path) {
+  final native = path.toNativeUtf8();
+  final buffer = calloc<Uint8>(256);
+  try {
+    final stat = _libc
+        .lookupFunction<
+          Int32 Function(Int32, Pointer<Utf8>, Pointer<Uint8>, Int32),
+          int Function(int, Pointer<Utf8>, Pointer<Uint8>, int)
+        >(
+          Platform.isMacOS && Abi.current() == Abi.macosX64
+              ? 'fstatat\$INODE64'
+              : 'fstatat',
+        );
+    if (stat(
+          Platform.isMacOS ? -2 : -100,
+          native,
+          buffer,
+          Platform.isMacOS ? 0x20 : 0x100,
+        ) ==
+        0)
+      return true;
+    final error = _currentErrno();
+    if (error == 2) return false;
+    throw FileSystemException(
+      'maintenance namespace lookup unavailable',
+      path,
+      OSError('fstatat failed', error),
+    );
+  } finally {
+    calloc.free(buffer);
+    malloc.free(native);
+  }
+}
+
 extension MaintenanceDirectoryCopy on OwnedImageDirectory {
+  /// Nonblocking, no-follow acquisition without chmod of an existing inode.
+  /// Maintenance refuses unknown lock contents, links, permissions or ACLs.
+  Future<OwnedImageLock?> tryAcquireMaintenanceLock(
+    String name, {
+    bool create = true,
+  }) {
+    if (!Platform.isMacOS) {
+      throw UnsupportedError('Darwin maintenance lock required');
+    }
+    return _acquireLock(name, wait: false, maintenance: true, create: create);
+  }
+
+  /// Bound directory identity, not a copy manifest: inode/device and birth time
+  /// intentionally change when a snapshot is restored into another directory.
+  Future<Map<String, Object?>> maintenanceIdentity() async {
+    _requireOpen();
+    final stat = _sourceStat(_fd, identity: true);
+    final metadata = await maintenanceMetadata();
+    return Map.unmodifiable({
+      'device_major': stat.deviceMajor,
+      'device_minor': stat.deviceMinor,
+      'inode': stat.inode,
+      'uid': stat.uid,
+      'created': List<int>.unmodifiable(
+        (metadata['created'] as List).cast<int>(),
+      ),
+    });
+  }
+
   Future<Map<String, Object?>> maintenanceMetadata() {
     _requireOpen();
     return _maintenanceMetadata(_fd);

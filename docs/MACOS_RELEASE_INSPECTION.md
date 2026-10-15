@@ -89,8 +89,10 @@ is a separate pending user choice. This entry point currently implements only
 the formal-signature path common to both proposed policies; existing explicit
 ad-hoc assembly tests remain valid build fixtures, not upgrade authority.
 The components below now compose cold observations and durable paired snapshots.
-Persistent writer/startup fencing, candidate publication, validation/commit,
-rollback/recovery, uninstall and installed cold acquisition remain separate M8 work.
+A separate [persistent admission guard](MACOS_MAINTENANCE_FENCE.md) now blocks
+ordinary startup during marked maintenance. Full transaction writer isolation,
+candidate publication, validation/commit, rollback/recovery, uninstall and
+installed cold acquisition remain separate M8 work.
 
 ## Cold-state preparation library
 
@@ -129,9 +131,10 @@ This lease alone is a preparation prerequisite, **not a complete cold-boundary
 certificate** or an installed maintenance command. It does not itself check
 catalog work/leases or external disks/EFI; the separate inspections below now
 cover those component boundaries; the snapshot consumers below compose them.
-Startup fencing across state-directory replacement remains unimplemented.
+The separate [persistent guard](MACOS_MAINTENANCE_FENCE.md) supplies ordinary
+daemon admission checks outside the state inode; this lease alone does not.
 The lease alone must not justify omitting
-`run/`, moving installed trees, or declaring M8 complete. Normal daemon startup
+`run/`, moving installed trees, or declaring M8 complete. Unfenced daemon startup
 and public API behavior remain unchanged. Real service registration/unregistration
 and native ARM64 product acceptance remain outside this component's tests.
 
@@ -471,8 +474,9 @@ The receipt explicitly reports `paired_app_snapshot: false`,
 ownership, and neither JSON nor a successful copy is a transferable cold permit.
 Holding the original same-path lease does not fence a replacement tree after
 rename. The separate paired consumer below also retains the old app.
-Persistent publication/startup fencing, durable
-transaction recovery, activation/commit, fresh-cold whole-state rollback,
+The separate [persistent guard](MACOS_MAINTENANCE_FENCE.md) is not armed by this
+snapshot consumer. Complete publication/write isolation, durable transaction
+recovery, activation/commit, fresh-cold whole-state rollback,
 uninstall and their crash/low-disk/native installed acceptance remain unfinished.
 
 ## Paired old-app and state snapshots
@@ -547,8 +551,9 @@ tree preservation; that does not grant external-file restore authority.
 The outer receipt explicitly denies external-backup, candidate
 publication, replacement-startup-fence and rollback authority. A copied lock is
 not kernel ownership, and stored JSON is not a transferable cold permit or
-recovery journal. Persistent fencing across replacement, the durable transaction
-journal, activation/commit, fresh-cold whole-state rollback and uninstall remain
+recovery journal. The separate [persistent guard](MACOS_MAINTENANCE_FENCE.md) is
+not armed here. Full publication/write isolation, the durable transaction journal,
+activation/commit, fresh-cold whole-state rollback and uninstall remain
 unfinished. Local tests exercise real private files, SQLite, native metadata and
 an actual app-file holder; positive signing/component/service/process evidence
 uses explicit external-boundary fixtures. They are not native ARM64 signed-product

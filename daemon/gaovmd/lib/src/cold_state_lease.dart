@@ -4,6 +4,7 @@ import 'dart:io';
 import 'daemon_ownership.dart';
 import 'image_filesystem.dart';
 import 'macos_driver_inventory.dart';
+import 'maintenance_state_fence.dart';
 
 /// External observations only. The native implementation binds these to the
 /// previously inspected owning app; fixtures never register or stop services.
@@ -31,11 +32,13 @@ final class ColdStateLease {
     this._ownership,
     this._bundleIdentifier,
     this._host,
+    this._maintenanceFence,
   );
   final OwnedImageDirectory _root;
   final DaemonOwnership _ownership;
   final String _bundleIdentifier;
   final ColdStateHost _host;
+  final MaintenanceStateFence? _maintenanceFence;
   bool _closed = false;
   String get path => _root.path;
   String get appPath => _host.appPath;
@@ -45,6 +48,7 @@ final class ColdStateLease {
     Directory state, {
     required String bundleIdentifier,
     required ColdStateHost host,
+    MaintenanceStateFence? maintenanceFence,
   }) async {
     final broadRoots = {
       '/',
@@ -76,11 +80,29 @@ final class ColdStateLease {
       if (root.path != state.path) {
         throw const ColdStateFailure('inputs', 'state canonical path changed');
       }
-      ownership = await DaemonOwnership.tryAcquire(root);
+      if (maintenanceFence != null) {
+        await maintenanceFence.verifyFor(
+          root,
+          bundleIdentifier: bundleIdentifier,
+          appPath: host.appPath,
+        );
+      }
+      ownership = maintenanceFence == null
+          ? await DaemonOwnership.tryAcquire(root)
+          : await DaemonOwnership.tryAcquireForMaintenance(
+              root,
+              maintenanceFence,
+            );
       if (ownership == null) {
         throw const ColdStateFailure('ownership', 'state already has an owner');
       }
-      final lease = ColdStateLease._(root, ownership, bundleIdentifier, host);
+      final lease = ColdStateLease._(
+        root,
+        ownership,
+        bundleIdentifier,
+        host,
+        maintenanceFence,
+      );
       await lease.verify();
       return lease;
     } catch (_) {
@@ -94,6 +116,11 @@ final class ColdStateLease {
   /// explicit close; never automatically release a potentially active fence.
   Future<void> verify() async {
     if (_closed) throw StateError('cold state lease is closed');
+    await _maintenanceFence?.verifyFor(
+      _root,
+      bundleIdentifier: _bundleIdentifier,
+      appPath: appPath,
+    );
     await _ownership.verify();
     await _verifyService();
     for (final driver in [false, true]) {
@@ -115,6 +142,11 @@ final class ColdStateLease {
     }
     await _verifyService();
     await _ownership.verify();
+    await _maintenanceFence?.verifyFor(
+      _root,
+      bundleIdentifier: _bundleIdentifier,
+      appPath: appPath,
+    );
   }
 
   Future<void> _verifyService() async {

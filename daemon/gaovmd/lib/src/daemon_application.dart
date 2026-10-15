@@ -32,6 +32,7 @@ import 'legacy_vm_migration.dart';
 import 'macos_driver_inventory.dart';
 import 'macos_host_metrics.dart';
 import 'macos_system_doctor_host.dart';
+import 'maintenance_state_fence.dart';
 import 'operation_application_service.dart';
 import 'operation_repository.dart';
 import 'public_api_server.dart';
@@ -110,11 +111,15 @@ final class DaemonApplication {
     if (maxRunningVms < 1 || maxConcurrentBoots < 1) {
       throw ArgumentError('VM and boot limits must be positive');
     }
+    await MaintenanceStateFence.requireUnfenced(stateDirectory);
     final type = await FileSystemEntity.type(
       stateDirectory.path,
       followLinks: false,
     );
     if (type == FileSystemEntityType.notFound) {
+      // A cold transaction fences before retiring the old state root. Recheck
+      // after observing a missing root, before mkdir can fill that rename gap.
+      await MaintenanceStateFence.requireUnfenced(stateDirectory);
       await stateDirectory.create(recursive: true);
       imageFileMode(stateDirectory.path, 0x1c0);
     } else if (type != FileSystemEntityType.directory) {

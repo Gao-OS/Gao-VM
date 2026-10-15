@@ -902,3 +902,56 @@ explicit activation/commit, whole-state rollback, uninstall and full lifecycle
 crash/low-disk/native installed acceptance remain unfinished. No real installed
 app/state/service or remote ref was changed. Apple Silicon/VZ/GaoOS work remains
 assigned to the user; this checkpoint does not complete M8 or the full goal.
+
+## 2026-10-15 persistent maintenance admission checkpoint
+
+On top of `21dc2d4`, the internal [persistent admission component](MACOS_MAINTENANCE_FENCE.md)
+now places a private durable marker outside the replaceable state inode. Ordinary
+daemon startup checks it before creating state/runtime directories, opening the
+ownership lock or SQLite, or resolving the driver. New ownership checks again
+after obtaining the kernel lock. Any malformed/foreign marker blocks too. Native
+no-follow lookup treats only ENOENT as absence: the new red/green regression
+reproduced Dart `type()` silently treating EACCES as `notFound`.
+
+Arming requires the original held cold lease and a canonical same-user parent
+without shared write permissions or ACL grants. A canonical-parent substitution
+is refused before namespace creation. A sealed original-identity record is synced
+and independently checked before/after atomic no-replace publication. Failure
+retains partial/final output and the caller's original state/ownership. Closing
+the maintenance process releases its kernel lock but never the durable marker.
+
+Explicit internal recovery opens only the caller-selected canonical target's
+fixed namespace, refuses a missing/foreign lock without recreation/chmod, and
+retains exclusive ownership. A typed held fence still requires the actual original
+state inode/device/UID/birth identity, matching caller app/bundle expectations,
+the real state kernel lock, and fresh service/process/reference checks. A copied
+replacement inode is not admitted. Late native-callback changes refuse, and
+closing the fence invalidates a dependent recovery lease. There is no ordinary
+daemon bypass option or automatic marker cleanup.
+
+The **38 new tests** passed in the combined **483-test** run with **concurrency 1**,
+zero failures/skips, across **35** files. This includes the previous 430-test
+group and safe startup/path/packaged-probe regressions. The three previously
+excluded checks remain explicitly filtered, not run or counted as passing/skipped:
+
+- `installed daemon completes a pre-cancelled TestRun without client polling`
+- `installed daemon serves the VM catalog over HTTP UDS`
+- `unresolved native census rejects startup before legacy migration`
+
+The terminal report is `verified.jsonl` under
+`/private/tmp/gaovm-maintenance-fence.MDM5PY/`. The crash fixture's owned child
+exit is confirmed before cleanup. Positive cold-host observations and ad-hoc
+packaged signing remain explicit fixtures, not native installed-product evidence.
+Dart analysis, pinned formatting (**294** files, zero changes), JSON Schema/
+OpenAPI validation, scoped Markdown file links and staged `git diff --check`
+passed. The unrelated UI lockfile is unchanged and excluded. Full daemon broad
+regressions were not rerun; earlier broad failures remain unresolved. No new
+Swift, CI, genuine installed lifecycle, ARM64/VZ or GaoOS pass is claimed.
+
+The snapshot consumers do not arm this guard or change their denied authority
+fields. Complete transaction writer isolation, the maintenance executable outside
+renamed trees, replacement-generation journal/recovery, candidate publication,
+explicit activation/validation/commit, fresh-cold whole-state rollback, uninstall
+and full lifecycle crash/low-disk/native acceptance remain unfinished. No real
+installed app/state/service or remote ref was changed; Apple Silicon/VZ/GaoOS
+execution remains assigned to the user. This does not complete M8 or the full goal.

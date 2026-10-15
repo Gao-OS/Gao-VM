@@ -362,6 +362,8 @@ final class OwnedImageDirectory {
   Future<OwnedImageLock?> _acquireLock(
     String name, {
     required bool wait,
+    bool maintenance = false,
+    bool create = true,
   }) async {
     _requireOpen();
     _validateChildName(name);
@@ -373,8 +375,8 @@ final class OwnedImageDirectory {
         var lockFd = -1;
         try {
           final flags = Platform.isMacOS
-              ? 0x2 | 0x200 | 0x100 | 0x1000000 | 0x4
-              : 0x2 | 0x40 | 0x20000 | 0x80000 | 0x800;
+              ? 0x2 | (create ? 0x200 : 0) | 0x100 | 0x1000000 | 0x4
+              : 0x2 | (create ? 0x40 : 0) | 0x20000 | 0x80000 | 0x800;
           for (var attempt = 0; ; attempt++) {
             lockFd = _openatCreate(parentFd, nativeName, flags, 0x180);
             if (lockFd >= 0) break;
@@ -389,14 +391,25 @@ final class OwnedImageDirectory {
               OSError('openat failed', error),
             );
           }
-          final stat = _sourceStat(lockFd);
+          final stat = _sourceStat(lockFd, metadata: maintenance);
           if (stat.uid != _getuid() || stat.mode & 0xf000 != 0x8000) {
             throw FileSystemException(
               'lock must be an owned regular file',
               displayPath,
             );
           }
-          if (_fchmod(lockFd, 0x180) != 0) {
+          if (maintenance) {
+            // Never normalize a pre-existing maintenance namespace lock. Check
+            // the opened inode, not a pathname inspected before openat.
+            if (stat.mode & 0xfff != 0x180 ||
+                stat.size != 0 ||
+                stat.linkCount != 1 ||
+                _darwinMetadata(lockFd)['has_acl'] != false) {
+              throw FormatException(
+                'unrecognized maintenance lock: $displayPath',
+              );
+            }
+          } else if (_fchmod(lockFd, 0x180) != 0) {
             throw FileSystemException(
               'cannot set owned lock permissions',
               displayPath,
