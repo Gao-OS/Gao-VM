@@ -110,6 +110,18 @@ retirement of the unlinked native executable or repairs historical remnants.
 Native census guards are unchanged, and the full daemon suite is not reported
 as green.
 
+## Cold maintenance inspection
+
+The read-only [legacy maintenance inspector](MACOS_RELEASE_INSPECTION.md#legacy-inputs-and-migration-backup-provenance)
+supports pre-catalog inputs and verifies published backup provenance without
+running this adapter. Before completion it accounts for the selected config's
+current boot/disk dependencies; after completion it preserves old JSON as opaque
+history rather than reopening obsolete boot paths. Current catalog file checks
+remain mandatory. Unknown ordinary staging/backup data is retained and bound,
+not cleaned or treated as proof that candidate migration will succeed.
+The inspector never authorizes a snapshot or replaces installed migration/native
+upgrade acceptance; interrupted durable migrations still block cold preparation.
+
 ## Remaining dependencies and limits
 
 - The transitional public-API CLI adapter uses an explicit client-side binding

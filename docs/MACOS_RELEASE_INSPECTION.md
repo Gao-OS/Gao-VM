@@ -350,8 +350,62 @@ diagnostic evidence, not a recovery authority, and always reports
 `run_omission_authorized: false`.
 
 This component does not establish the complete cold boundary or a lasting
-startup/writer fence. Legacy/external boundaries, complete paired snapshots,
+startup/writer fence. Composition of legacy/external boundaries, paired snapshots,
 safe `run/` omission, publication, durable journal/recovery, activation/commit,
 whole-state rollback and uninstall still require the composed M8 workflow.
 Fixture process/service observations plus genuine local filesystem/socket/ACL
 checks do not prove installed lifecycle, ARM64, VZ or GaoOS acceptance.
+
+## Legacy inputs and migration backup provenance
+
+The internal [`ColdLegacyInspection`](../daemon/gaovmd/lib/src/cold_legacy_inspection.dart)
+reads the original held state without calling migration, creating a database,
+repairing inputs or cleaning staging. A pre-catalog legacy state is supported
+only while the database and all WAL/SHM/rollback-journal paths remain absent.
+If any exists, the original lease's quiescent private-copy catalog inspection is
+required. A new lease cannot reuse an old lease's catalog facts. Migration rows
+are read only from that private SQLite copy, never the original database.
+
+Before migration completes, `pending_config.json` wins over `config.json`.
+The selected JSON identifies the current kernel, optional initrd and external
+root disk. These must be canonical, owned, nonempty, singly linked regular files
+without unsafe write permissions or ACL grants. Held readers bind their current
+bytes/native metadata and reject other native process references or unavailable
+observations. The selected JSON is capped at 1 MiB. This discovers dependencies;
+it does not replace the candidate daemon's complete configuration validation.
+Legacy desired state and PID/observed JSON are preserved bytes, not authority
+to declare coldness, signal processes or start a VM.
+
+A published migration backup requires its empty ownership **directory** and
+the frozen v1 manifest. Raw saved-file byte digests/sizes, boot-source records
+and the canonical manifest digest must match. If a catalog migration row exists,
+its backup digest must also match; missing or substituted backups refuse. A
+pending backup additionally pins the original root inputs and actual kernel/
+initrd path, size and digest. The mutable root disk is bound at its current bytes,
+not compared to an invented historical disk digest. Known saved JSON inputs and
+the backup manifest retain the migration's 1 MiB limits.
+
+After a durable completed migration, root legacy JSON is opaque retained history.
+It need not remain valid JSON or equal the published backup, and deleted old
+kernel/initrd paths do not become current dependencies. Current catalog external
+disk/EFI references still require `ColdFileReferences`; managed images/bundles
+still require `ColdManagedAssets`. An incomplete durable migration remains a
+catalog blocker and cannot opt into this historical treatment.
+
+Both the published backup and any `.legacy-v1-backup-stage` tree are captured
+and revalidated with native metadata. Unknown regular files and empty directories
+are retained, even in an unowned stage; their presence does not authorize cleanup
+or certify candidate migration. Links, special files, unsafe permissions, ACL
+grants, changed entries or newly appearing trees refuse without removing data.
+Existing `MaintenanceTree` traversal bounds apply. The four root legacy inputs
+and any migration lock file are also sealed and their absence/presence rechecked.
+
+The result is `gaovm.cold-legacy-inspection.v1`, always with
+`snapshot_authorized: false` and active files marked `backed_up: false`.
+Verification checks the original lease/catalog around input reads and native
+observations. Failure retains the caller's ownership; close releases only the
+inspection's readers. Exported JSON cannot replace the held inspection object.
+This is neither a migration success certificate nor a complete cold snapshot,
+external writer fence, safe `run/` omission or recovery authority. Complete
+composition, paired app/state snapshots, durable publication/recovery,
+activation/commit, whole-state rollback and uninstall remain unfinished.

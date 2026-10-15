@@ -17,6 +17,7 @@ import 'vm_bundle_manifest.dart';
 import 'vm_provisioning_plan.dart';
 
 part 'cold_file_references.dart';
+part 'cold_legacy_inspection.dart';
 part 'cold_managed_assets.dart';
 part 'cold_runtime_inspection.dart';
 
@@ -29,6 +30,7 @@ final class ColdCatalogInspection {
     Map<String, Object?> evidence,
     this._managedImages,
     this._managedVms,
+    this._legacyMigration,
   ) : schemaVersion = evidence['schema_version'] as int,
       _quiescent = (evidence['blockers'] as List).isEmpty,
       _evidence = JsonObjectValue.fromJson(evidence);
@@ -36,6 +38,7 @@ final class ColdCatalogInspection {
   final ColdStateLease _state;
   final List<Image> _managedImages;
   final List<_ColdManagedVm> _managedVms;
+  final _ColdLegacyMigration? _legacyMigration;
   final bool _quiescent;
   final int schemaVersion;
   String get sourcePath => _state.path;
@@ -143,6 +146,7 @@ final class ColdCatalogInspection {
       late Map<String, Object?> catalog;
       late List<Image> images;
       late List<_ColdManagedVm> vms;
+      late _ColdLegacyMigration? legacy;
       try {
         await inspection.verifyPathBinding();
         database.execute('PRAGMA query_only = ON');
@@ -150,6 +154,7 @@ final class ColdCatalogInspection {
         catalog = _read(database);
         images = _readManagedImages(database);
         vms = _readManagedVms(database);
+        legacy = _readLegacyMigration(database);
       } finally {
         database.dispose();
       }
@@ -184,6 +189,7 @@ final class ColdCatalogInspection {
         },
         images,
         vms,
+        legacy,
       );
     } finally {
       for (final file in inputs.values) {

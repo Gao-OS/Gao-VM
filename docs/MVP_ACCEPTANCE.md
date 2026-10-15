@@ -741,3 +741,50 @@ persistent startup/writer fencing, paired app/state publication, durable
 journal/recovery, activation/commit, whole-state rollback and uninstall remain
 unfinished. No installed app/state, real service, remote ref or hardware was
 changed; M8 and the full PRD/development-plan goal remain open.
+
+## 2026-10-15 legacy input inspection checkpoint
+
+On top of `e46050f`, [legacy input inspection](MACOS_RELEASE_INSPECTION.md#legacy-inputs-and-migration-backup-provenance)
+supports pre-catalog state without creating/opening an original database. An
+existing database or sidecar requires a quiescent private-copy catalog tied to
+the exact original held lease. Before completion, pending config takes priority;
+current kernel/initrd and disk bytes are bound and checked for other native
+references. Published backup bytes/manifests must match the frozen migration
+format and any catalog migration digest. Incomplete durable migration refuses.
+
+Completed migration inputs are retained opaque history, not a live spec source.
+The integration fixture uses a real migration, deletes the historical kernel,
+changes the writable disk and old root JSON, then confirms both historical
+preservation and current catalog disk accounting. Published backups and unknown
+ordinary staging/backup data are native-metadata-bound without cleanup. Unsafe
+paths, permissions/ACLs, hardlinks, corruption and changed inputs refuse.
+
+The **39 new tests** passed, including a genuine native open-file holder that
+refuses inspection until its owned exit is confirmed. Other service/process
+success observations are fixtures, not installed cold-boundary acceptance.
+Fixture cleanup requires owned-child exit confirmation; unavailable native
+evidence cannot become an empty result. Exported evidence is not authority;
+`snapshot_authorized` remains false. Closing readers or failed verification does
+not release the caller's original state lease.
+
+The combined **372-test** run passed with **concurrency 1**, zero failures/skips,
+across **30** files (138.021 seconds). It includes the prior 316-test group, these
+39 tests, 14 safely filtered legacy migration cases and 3 owned-process tests.
+The unsafe `unresolved native census rejects startup before legacy migration`
+case was explicitly excluded, not run or counted as a passing/skipped test.
+The terminal report is `focused.jsonl` under
+`/private/tmp/gaovm-legacy-inspection.zKYWDb/`.
+
+Dart analysis, pinned formatting (**288** files, zero changes), JSON Schema/
+OpenAPI validation, scoped Markdown file links and staged `git diff --check`
+passed. The unrelated UI lockfile is unchanged and excluded. Full daemon
+regression was not rerun; these focused results do not supersede the earlier
+failed broad regressions. No new Swift, CI, installed lifecycle or hardware pass
+is claimed.
+
+Complete cold/external-file composition, safe `run/` handling, persistent writer/
+startup fencing, paired app/state snapshots, durable publication/recovery,
+activation/commit, whole-state rollback and uninstall remain unfinished. Full
+daemon regression and installed lifecycle/hardware release gates are not made
+green by these component tests. No installed app/state, real service, remote ref,
+Apple Silicon/VZ or GaoOS runtime was changed; the full goal remains open.
