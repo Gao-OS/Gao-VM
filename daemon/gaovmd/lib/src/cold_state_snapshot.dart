@@ -109,17 +109,27 @@ final class ColdStateSnapshot {
   Future<void> verify() async {
     if (_closed) throw StateError('state snapshot preparation is closed');
     await _state.verify();
-    await _catalog?.verify();
+    await _catalog?._verifySourceFiles();
     _catalog?.requireQuiescent();
     if (_catalog == null) await _noLegacyRuntime(_state);
-    await _runtime?.verify();
-    await _assets?.verify();
-    await _references?.verify();
-    await _legacy.verify();
-    await _runtime?.verify();
-    await _catalog?.verify();
+    // Each constituent belongs to this same held lease/catalog. Do not recurse
+    // through its standalone native-context wrapper at every dependency edge.
+    await _runtime?._verifyObservedRuntime();
+    await _assets?._verifyObservedAssets();
+    await _references?._verifyObservedFiles();
+    await _legacy._verifyObservedLegacy();
+    await _runtime?._verifyObservedRuntime();
+    await _catalog?._verifySourceFiles();
     if (_catalog == null) await _noLegacyRuntime(_state);
     await _state.verify();
+    // The last native observer may have changed an earlier dependency. Re-read
+    // every constituent using filesystem-only checks; no result is memoized.
+    await _runtime?._verifyTree();
+    await _assets?._verifyPersistentAssets();
+    await _references?._verifyPersistentFiles();
+    await _legacy._verifyPersistentLegacy();
+    await _catalog?._verifySourceFiles();
+    if (_catalog == null) await _noLegacyRuntime(_state);
   }
 
   static Future<void> _noLegacyRuntime(ColdStateLease state) async {

@@ -50,6 +50,12 @@ final class ColdRuntimeInspection {
   Future<void> verify() async {
     if (_closed) throw StateError('runtime inspection is closed');
     await _catalog.verify();
+    await _verifyObservedRuntime();
+    await _catalog.verify();
+  }
+
+  Future<void> _verifyObservedRuntime() async {
+    if (_closed) throw StateError('runtime inspection is closed');
     await _verifyTree();
     final executables = {
       '${_catalog._state.appPath}/Contents/Helpers/gaovm-driver-vz',
@@ -67,7 +73,6 @@ final class ColdRuntimeInspection {
       }
     }
     await _verifyTree();
-    await _catalog.verify();
   }
 
   Future<void> _verifyTree() async {

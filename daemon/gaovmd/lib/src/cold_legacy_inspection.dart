@@ -244,28 +244,38 @@ final class ColdLegacyInspection {
       catalog.requireQuiescent();
       await catalog.verify();
     } else {
-      for (final name in [
-        'gaovm.db',
-        'gaovm.db-wal',
-        'gaovm.db-shm',
-        'gaovm.db-journal',
-      ]) {
-        if (await FileSystemEntity.type(
-              '${state.path}/$name',
-              followLinks: false,
-            ) !=
-            FileSystemEntityType.notFound) {
-          throw const ColdStateFailure(
-            'legacy_inputs',
-            'catalog inspection required',
-          );
-        }
+      await _requireNoCatalog(state);
+    }
+  }
+
+  static Future<void> _requireNoCatalog(ColdStateLease state) async {
+    for (final name in [
+      'gaovm.db',
+      'gaovm.db-wal',
+      'gaovm.db-shm',
+      'gaovm.db-journal',
+    ]) {
+      if (await FileSystemEntity.type(
+            '${state.path}/$name',
+            followLinks: false,
+          ) !=
+          FileSystemEntityType.notFound) {
+        throw const ColdStateFailure(
+          'legacy_inputs',
+          'catalog inspection required',
+        );
       }
     }
   }
 
   Future<void> _verifyInputs() async {
     await _context(_state, _catalog);
+    await _verifyInputContents();
+  }
+
+  Future<void> _verifyInputContents() async {
+    if (_closed) throw StateError('legacy inspection is closed');
+    if (_catalog == null) await _requireNoCatalog(_state);
     if (JsonValue.fromJson(await _inputs(_root)) != _evidence['inputs']) {
       throw const ColdStateFailure('legacy_inputs', 'legacy inputs changed');
     }
@@ -289,6 +299,18 @@ final class ColdLegacyInspection {
   Future<void> verify() async {
     if (_closed) throw StateError('legacy inspection is closed');
     await _verifyInputs();
+    await _verifyObservedFiles();
+    await _verifyInputs();
+    await _context(_state, _catalog);
+  }
+
+  Future<void> _verifyObservedLegacy() async {
+    await _verifyInputContents();
+    await _verifyObservedFiles();
+    await _verifyInputContents();
+  }
+
+  Future<void> _verifyObservedFiles() async {
     for (final held in _files.values) {
       await held.parent.verifyPathBinding();
       if (JsonValue.fromJson(await _seal(held.file)) != held.evidence) {
@@ -311,8 +333,19 @@ final class ColdLegacyInspection {
         );
       }
     }
-    await _verifyInputs();
-    await _context(_state, _catalog);
+  }
+
+  Future<void> _verifyPersistentLegacy() async {
+    await _verifyInputContents();
+    for (final held in _files.values) {
+      await held.parent.verifyPathBinding();
+      if (JsonValue.fromJson(await _seal(held.file)) != held.evidence) {
+        throw const ColdStateFailure(
+          'legacy_inputs',
+          'legacy dependency changed after observation',
+        );
+      }
+    }
   }
 
   Map<String, Object?> toJson() {

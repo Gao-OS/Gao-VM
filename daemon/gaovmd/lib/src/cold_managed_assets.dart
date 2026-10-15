@@ -248,16 +248,29 @@ final class ColdManagedAssets {
   Future<void> verify() async {
     if (_files._closed) throw StateError('managed asset inspection is closed');
     await _files._catalog.verify();
-    await _verifyAbsences();
-    for (final held in _trees.values) {
-      await held.tree.verify(held.manifest, nativeMetadata: true);
-    }
+    await _verifyAssetTrees();
     await _files.verify();
+    await _verifyAssetTrees();
+    await _files._catalog.verify();
+  }
+
+  Future<void> _verifyObservedAssets() async {
+    await _verifyAssetTrees();
+    await _files._verifyObservedFiles();
+    await _verifyAssetTrees();
+  }
+
+  Future<void> _verifyAssetTrees() async {
+    if (_files._closed) throw StateError('managed asset inspection is closed');
     await _verifyAbsences();
     for (final held in _trees.values) {
       await held.tree.verify(held.manifest, nativeMetadata: true);
     }
-    await _files._catalog.verify();
+  }
+
+  Future<void> _verifyPersistentAssets() async {
+    await _verifyAssetTrees();
+    await _files._verifyPersistentFiles();
   }
 
   Future<void> _verifyAbsences() async {

@@ -89,6 +89,12 @@ final class ColdFileReferences {
   Future<void> verify() async {
     if (_closed) throw StateError('file reference inspection is closed');
     await _catalog.verify();
+    await _verifyObservedFiles();
+    await _catalog.verify();
+  }
+
+  Future<void> _verifyObservedFiles() async {
+    if (_closed) throw StateError('file reference inspection is closed');
     for (final held in _files.values) {
       await held.parent.verifyPathBinding();
       if (JsonValue.fromJson(await _seal(held.file)) != held.evidence) {
@@ -112,7 +118,21 @@ final class ColdFileReferences {
         );
       }
     }
-    await _catalog.verify();
+  }
+
+  // Re-read after the coordinator's last native callback, without starting a
+  // new observation that could invalidate another constituent's read set.
+  Future<void> _verifyPersistentFiles() async {
+    if (_closed) throw StateError('file reference inspection is closed');
+    for (final held in _files.values) {
+      await held.parent.verifyPathBinding();
+      if (JsonValue.fromJson(await _seal(held.file)) != held.evidence) {
+        throw const ColdStateFailure(
+          'file_references',
+          'referenced file changed after observation',
+        );
+      }
+    }
   }
 
   Map<String, Object?> toJson() {

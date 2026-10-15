@@ -65,6 +65,13 @@ final class ColdCatalogInspection {
   /// This verifies catalog evidence, not all state entries or external files.
   Future<void> verify() async {
     await _state.verify();
+    await _verifySourceFiles();
+    await _state.verify();
+  }
+
+  // Filesystem-only constituent for the snapshot coordinator, which holds the
+  // same lease and verifies native context around the complete read set.
+  Future<void> _verifySourceFiles() async {
     final source = await OwnedImageDirectory.open(Directory(sourcePath));
     final expected = toJson()['source_files'] as Map<String, Object?>;
     try {
@@ -86,7 +93,6 @@ final class ColdCatalogInspection {
         }
       }
       await source.verifyPathBinding();
-      await _state.verify();
     } finally {
       source.close();
     }

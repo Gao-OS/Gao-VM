@@ -476,6 +476,41 @@ void main() {
   );
 
   test(
+    'the final native observation cannot bless changed managed bytes',
+    () async {
+      var runtimeObservations = 0;
+      final prepared = await prepare(
+        inventory: (_) async {
+          runtimeObservations++;
+          return DriverInventorySnapshot(
+            processes: [],
+            unresolvedProcessIds: [],
+          );
+        },
+      );
+      runtimeObservations = 0;
+      var changed = false;
+      host.onStatus = () async {
+        if (changed || runtimeObservations < 2) return;
+        changed = true;
+        final path =
+            '${state.path}/images/sha256-${image.digest.substring(7)}/objects/payload';
+        imageFileMode(path, 0x180);
+        await File(
+          path,
+        ).writeAsString('changed after the last runtime observation');
+      };
+      await expectLater(
+        prepared.verify(),
+        throwsA(anyOf(isA<ColdStateFailure>(), isA<FormatException>())),
+      );
+      expect(changed, true);
+      expect(await Directory('${backups.path}/before').exists(), false);
+    },
+    skip: !Platform.isMacOS,
+  );
+
+  test(
     'service restart after preparation refuses before snapshot staging',
     () async {
       final prepared = await prepare();
@@ -960,6 +995,7 @@ void main() {
 final class _Host implements ColdStateHost {
   _Host(this.appPath);
   bool registered = false;
+  Future<void> Function()? onStatus;
   @override
   final String appPath;
   @override
@@ -968,18 +1004,21 @@ final class _Host implements ColdStateHost {
   @override
   Future<Set<int>> stateReferences(Directory state) async => {pid};
   @override
-  Future<ProcessResult> serviceStatus() async => ProcessResult(
-    pid,
-    0,
-    jsonEncode({
-      'action': 'status',
-      'bundle_identifier': 'org.gaovm.tests.Snapshot',
-      'plist_name': 'gaovmd.plist',
-      'authorization_state': registered ? 'enabled' : 'notRegistered',
-      'native_status': 0,
-      'outcome': 'observed',
-      'error_code': null,
-    }),
-    '',
-  );
+  Future<ProcessResult> serviceStatus() async {
+    await onStatus?.call();
+    return ProcessResult(
+      pid,
+      0,
+      jsonEncode({
+        'action': 'status',
+        'bundle_identifier': 'org.gaovm.tests.Snapshot',
+        'plist_name': 'gaovmd.plist',
+        'authorization_state': registered ? 'enabled' : 'notRegistered',
+        'native_status': 0,
+        'outcome': 'observed',
+        'error_code': null,
+      }),
+      '',
+    );
+  }
 }
