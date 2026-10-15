@@ -41,6 +41,7 @@ void main() {
   });
   tearDown(() async {
     if (realHost?.retainInputs == true ||
+        host.retainInputs ||
         retainInputs ||
         activeRetirementChecks != 0) {
       throw StateError(
@@ -472,6 +473,74 @@ void main() {
       }
     }
 
+    Future<Map<String, Object?>> publish({
+      Future<void> Function()? verifyInputs,
+      bool resume = false,
+    }) async {
+      final candidate = Directory('${temporary.path}/Candidate.app');
+      if (!resume) await _fixture(candidate);
+      final tree = await MaintenanceTree.open(candidate);
+      final stateTree = await MaintenanceTree.open(state);
+      final directory = Directory('${temporary.path}/publications');
+      if (!resume) {
+        await directory.create();
+        imageFileMode(directory.path, 0x1c0);
+      }
+      final output = await OwnedImageDirectory.open(directory);
+      try {
+        final before = await stateTree.capture(nativeMetadata: true);
+        return await lease.publishCandidate(
+          fence,
+          output,
+          'upgrade',
+          candidate,
+          version: '0.1.0',
+          catalogSchema: 0,
+          candidateManifest: await tree.capture(nativeMetadata: true),
+          verifyPreparedInputs: () async {
+            await verifyInputs?.call();
+            await stateTree.verify(before, nativeMetadata: true);
+          },
+        );
+      } finally {
+        output.close();
+        stateTree.close();
+        tree.close();
+      }
+    }
+
+    Future<MacOsColdStateHost> reopenPublished({
+      String version = '0.1.0',
+    }) async {
+      final output = await OwnedImageDirectory.open(
+        Directory('${temporary.path}/publications'),
+      );
+      try {
+        final recovered = await MacOsColdStateHost.openPublished(
+          app,
+          state,
+          fence,
+          storage,
+          'old',
+          output,
+          'upgrade',
+          bundleIdentifier: 'org.gaovm.tests.Release',
+          oldVersion: '0.1.0',
+          newVersion: version,
+          teamIdentifier: 'ABCDEFGHIJ',
+          retiredCatalogSchema: 0,
+          catalogSchema: 0,
+          host: host,
+          observer: observer(),
+          inventory: inventory,
+        );
+        recoveredHosts.add(recovered);
+        return recovered;
+      } finally {
+        output.close();
+      }
+    }
+
     setUp(() async {
       inventoryPaths.clear();
       referencedApp = null;
@@ -518,6 +587,585 @@ void main() {
       recoveredHosts.clear();
       storage.close();
     });
+
+    test(
+      'candidate publication requires explicit old-app retirement first',
+      () => check(() async {
+        await expectLater(publish(), throwsStateError);
+        expect(await Directory(app.path).exists(), true);
+        expect(
+          await File(
+            '${temporary.path}/publications/upgrade/intent.json',
+          ).exists(),
+          false,
+        );
+        await assertStateOwner();
+      }),
+      timeout: const Timeout(Duration(minutes: 2)),
+    );
+
+    test(
+      'candidate publication retains the original app, state owner and startup fence',
+      () => check(() async {
+        await retire();
+        final oldPath = lease.appPath;
+        final oldRoot = await OwnedImageDirectory.open(Directory(oldPath));
+        final oldIdentity = await oldRoot.maintenanceIdentity();
+        oldRoot.close();
+        final candidate = Directory('${temporary.path}/Candidate.app');
+        await _fixture(candidate);
+        await File(
+          '${candidate.path}/Contents/Resources/candidate-only',
+        ).writeAsString('new candidate');
+        imageFileMode(
+          '${candidate.path}/Contents/Resources/candidate-only',
+          0x180,
+        );
+        final tree = await MaintenanceTree.open(candidate);
+        final stateTree = await MaintenanceTree.open(state);
+        final output = await Directory(
+          '${temporary.path}/publications',
+        ).create();
+        imageFileMode(output.path, 0x1c0);
+        final publicationStorage = await OwnedImageDirectory.open(output);
+        try {
+          final manifest = await tree.capture(nativeMetadata: true);
+          final before = await stateTree.capture(nativeMetadata: true);
+          host.realAdmission = true;
+          final result = await lease.publishCandidate(
+            fence,
+            publicationStorage,
+            'upgrade',
+            candidate,
+            version: '0.1.0',
+            catalogSchema: 0,
+            candidateManifest: manifest,
+            verifyPreparedInputs: () =>
+                stateTree.verify(before, nativeMetadata: true),
+          );
+          expect(result['phase'], 'candidate_published');
+          expect(result['installed_candidate_published'], true);
+          expect(result['activation_authorized'], false);
+          expect(result['rollback_authorized'], false);
+          expect(host.admissions, 2);
+          expect(lease.appPath, oldPath);
+          expect(
+            await File(
+              '${app.path}/Contents/Resources/candidate-only',
+            ).readAsString(),
+            'new candidate',
+          );
+          expect(
+            await File(
+              '${candidate.path}/Contents/Resources/candidate-only',
+            ).readAsString(),
+            'new candidate',
+          );
+          expect(
+            await File('${output.path}/upgrade/prepared/record.json').exists(),
+            true,
+          );
+          expect(
+            await File(
+              '${output.path}/upgrade/candidate/receipt.json',
+            ).exists(),
+            true,
+          );
+          expect(
+            await Directory(
+              '${output.path}/upgrade/candidate/payload.app',
+            ).exists(),
+            false,
+          );
+          final retained = await OwnedImageDirectory.open(Directory(oldPath));
+          try {
+            expect(await retained.maintenanceIdentity(), oldIdentity);
+          } finally {
+            retained.close();
+          }
+          await lease.verify();
+          await assertStateOwner();
+          await stateTree.verify(before, nativeMetadata: true);
+          await expectLater(
+            MaintenanceStateFence.requireUnfenced(state),
+            throwsA(isA<MaintenanceFenceActive>()),
+          );
+        } finally {
+          publicationStorage.close();
+          stateTree.close();
+          tree.close();
+        }
+      }),
+      timeout: const Timeout(Duration(minutes: 3)),
+    );
+
+    test(
+      'candidate publication keeps ownership until an unconfirmed owned child actually exits',
+      () => check(() async {
+        await retire();
+        final entered = Completer<void>();
+        final exit = Completer<int>();
+        host.onAdmission = (_, _) async {
+          entered.complete();
+          throw MaintenanceCommandFailure(
+            'fixture exit is pending',
+            pid + 80,
+            exitConfirmed: false,
+            ownedExit: exit.future,
+          );
+        };
+        final result = publish().then<Object>(
+          (value) => value,
+          onError: (Object error) => error,
+        );
+        try {
+          await entered.future;
+          final settled = await Future.any([
+            result.then((_) => true),
+            Future<bool>.delayed(const Duration(milliseconds: 30), () => false),
+          ]);
+          expect(settled, false);
+          expect(() => lease.close(), throwsStateError);
+          await assertStateOwner();
+        } finally {
+          if (!exit.isCompleted) exit.complete(-9);
+          expect(
+            await result,
+            isA<MaintenanceCommandFailure>().having(
+              (e) => e.exitConfirmed,
+              'terminal exit confirmed',
+              true,
+            ),
+          );
+        }
+        await assertStateOwner();
+        expect(maintenancePathEntryExists(app.path), false);
+        expect(
+          await Directory(
+            '${temporary.path}/publications/upgrade/candidate/payload.app',
+          ).exists(),
+          true,
+        );
+      }),
+      timeout: const Timeout(Duration(minutes: 2)),
+    );
+
+    test(
+      'published candidate recovery binds both apps before reacquiring original state ownership',
+      () => check(() async {
+        await retire();
+        await publish();
+        lease.close();
+        fence.close();
+        original.close();
+        fence = await MaintenanceStateFence.open(state);
+        final output = await OwnedImageDirectory.open(
+          Directory('${temporary.path}/publications'),
+        );
+        try {
+          final recovered = await MacOsColdStateHost.openPublished(
+            app,
+            state,
+            fence,
+            storage,
+            'old',
+            output,
+            'upgrade',
+            bundleIdentifier: 'org.gaovm.tests.Release',
+            oldVersion: '0.1.0',
+            newVersion: '0.1.0',
+            teamIdentifier: 'ABCDEFGHIJ',
+            retiredCatalogSchema: 0,
+            catalogSchema: 0,
+            host: host,
+            observer: observer(),
+            inventory: inventory,
+          );
+          recoveredHosts.add(recovered);
+          lease = await ColdStateLease.acquire(
+            state,
+            bundleIdentifier: 'org.gaovm.tests.Release',
+            host: recovered,
+            maintenanceFence: fence,
+          );
+          expect(recovered.publicationEvidence['phase'], 'candidate_published');
+          expect(recovered.publicationEvidence['committed'], false);
+          expect(lease.appPath, '${storage.path}/old/GaoVM.app');
+          inventoryPaths.clear();
+          await lease.verify();
+          expect(
+            inventoryPaths,
+            contains(
+              '${output.path}/upgrade/candidate/payload.app/Contents/MacOS/gaovmd',
+            ),
+          );
+          await assertStateOwner();
+          await expectLater(
+            MaintenanceStateFence.requireUnfenced(state),
+            throwsA(isA<MaintenanceFenceActive>()),
+          );
+        } finally {
+          output.close();
+        }
+      }),
+      timeout: const Timeout(Duration(minutes: 3)),
+    );
+
+    for (final fault in [
+      'wrong error',
+      'successful startup',
+      'scratch write',
+    ]) {
+      test(
+        'candidate publication refuses $fault without moving an app',
+        () => check(() async {
+          await retire();
+          host.onAdmission = (_, arguments) async {
+            if (fault == 'wrong error')
+              return ProcessResult(pid, 1, '', 'unrelated startup failure\n');
+            if (fault == 'successful startup')
+              return ProcessResult(pid, 0, 'ready\n', '');
+            final probeState = arguments[arguments.indexOf('--state-dir') + 1];
+            await File(
+              '$probeState/gaovm.db',
+            ).writeAsString('unexpected initialization');
+            imageFileMode('$probeState/gaovm.db', 0x180);
+            return null;
+          };
+          await expectLater(publish(), throwsA(isA<FormatException>()));
+          expect(host.admissions, 1);
+          expect(maintenancePathEntryExists(app.path), false);
+          expect(
+            await Directory(
+              '${temporary.path}/publications/upgrade/candidate/payload.app',
+            ).exists(),
+            true,
+          );
+          expect(
+            await Directory(
+              '${temporary.path}/publications/upgrade/prepared',
+            ).exists(),
+            false,
+          );
+          expect(
+            await File('${state.path}/unknown-data').readAsString(),
+            'keep original state',
+          );
+          await assertStateOwner();
+          await lease.verify();
+          if (fault == 'wrong error') {
+            lease.close();
+            fence.close();
+            original.close();
+            fence = await MaintenanceStateFence.open(state);
+            final executions = host.executedRoles.length;
+            await expectLater(
+              reopenPublished(),
+              throwsA(isA<FileSystemException>()),
+            );
+            expect(host.executedRoles.length, executions);
+          }
+        }),
+        timeout: const Timeout(Duration(minutes: 2)),
+      );
+    }
+
+    test(
+      'last native publication callback cannot hide an unknown state write',
+      () => check(() async {
+        await retire();
+        host.onStatus = () async {
+          if (await File(
+            '${temporary.path}/publications/upgrade/prepared/record.json',
+          ).exists()) {
+            await File(
+              '${state.path}/unknown-data',
+            ).writeAsString('late native write');
+          }
+        };
+        await expectLater(publish(), throwsA(isA<FormatException>()));
+        expect(maintenancePathEntryExists(app.path), false);
+        expect(
+          await Directory(
+            '${temporary.path}/publications/upgrade/candidate/payload.app',
+          ).exists(),
+          true,
+        );
+        expect(
+          await File('${state.path}/unknown-data').readAsString(),
+          'late native write',
+        );
+        await assertStateOwner();
+      }),
+      timeout: const Timeout(Duration(minutes: 2)),
+    );
+
+    test(
+      'publication never overwrites a foreign app appearing at the final boundary',
+      () => check(() async {
+        await retire();
+        await expectLater(
+          publish(
+            verifyInputs: () async {
+              await app.create();
+              imageFileMode(app.path, 0x1c0);
+              await File(
+                '${app.path}/foreign',
+              ).writeAsString('preserve foreign target');
+              imageFileMode('${app.path}/foreign', 0x180);
+            },
+          ),
+          throwsA(isA<FormatException>()),
+        );
+        expect(
+          await File('${app.path}/foreign').readAsString(),
+          'preserve foreign target',
+        );
+        expect(
+          await Directory(
+            '${temporary.path}/publications/upgrade/candidate/payload.app',
+          ).exists(),
+          true,
+        );
+        await assertStateOwner();
+      }),
+      timeout: const Timeout(Duration(minutes: 2)),
+    );
+
+    for (final driver in [false, true]) {
+      test(
+        'publication retains unresolved staged ${driver ? 'driver' : 'daemon'} PIDs',
+        () => check(() async {
+          await retire();
+          unresolvedExecutable =
+              '${temporary.path}/publications/upgrade/candidate/payload.app/${driver ? 'Contents/Helpers/gaovm-driver-vz' : 'Contents/MacOS/gaovmd'}';
+          await expectLater(
+            publish(),
+            throwsA(
+              isA<ColdStateFailure>().having(
+                (e) => e.stage,
+                'stage',
+                driver ? 'driver_processes' : 'daemon_processes',
+              ),
+            ),
+          );
+          expect(inventoryPaths, contains(unresolvedExecutable));
+          expect(maintenancePathEntryExists(app.path), false);
+          expect(
+            await Directory(
+              '${temporary.path}/publications/upgrade/candidate/payload.app',
+            ).exists(),
+            true,
+          );
+          await assertStateOwner();
+        }),
+        timeout: const Timeout(Duration(minutes: 2)),
+      );
+    }
+
+    test(
+      'post-publication inspection failure retains owners for explicit in-process resume',
+      () => check(() async {
+        await retire();
+        host.onProbe = () async {
+          if (maintenancePathEntryExists(app.path) &&
+              await File(
+                '${temporary.path}/publications/upgrade/prepared/record.json',
+              ).exists()) {
+            throw StateError('injected installed inspection failure');
+          }
+        };
+        await expectLater(
+          publish(),
+          throwsA(
+            isA<StateError>().having(
+              (e) => e.message,
+              'message',
+              'injected installed inspection failure',
+            ),
+          ),
+        );
+        host.onProbe = null;
+        await assertStateOwner();
+        await lease.verify();
+        expect(
+          await Directory(
+            '${temporary.path}/publications/upgrade/candidate/payload.app',
+          ).exists(),
+          false,
+        );
+        expect(await Directory(app.path).exists(), true);
+        final output = await OwnedImageDirectory.open(
+          Directory('${temporary.path}/publications'),
+        );
+        try {
+          expect(
+            await output.tryAcquireMaintenanceLock(
+              '.gaovm-candidate-publication.lock',
+            ),
+            isNull,
+          );
+        } finally {
+          output.close();
+        }
+        final result = await publish(resume: true);
+        expect(result['phase'], 'candidate_published');
+        expect(result['committed'], false);
+        await assertStateOwner();
+        await expectLater(
+          MaintenanceStateFence.requireUnfenced(state),
+          throwsA(isA<MaintenanceFenceActive>()),
+        );
+      }),
+      timeout: const Timeout(Duration(minutes: 3)),
+    );
+
+    test(
+      'staged candidate recovery resumes only after a fresh original-state owner',
+      () => check(() async {
+        await retire();
+        await expectLater(
+          publish(
+            verifyInputs: () async {
+              throw StateError('operator stopped before publication');
+            },
+          ),
+          throwsA(isA<StateError>()),
+        );
+        expect(maintenancePathEntryExists(app.path), false);
+        final sourcePath = '${temporary.path}/Candidate.app';
+        final source = await MaintenanceTree.open(Directory(sourcePath));
+        final manifest = await source.capture(nativeMetadata: true);
+        source.close();
+        await Directory(
+          sourcePath,
+        ).rename('${temporary.path}/Candidate-retained.app');
+        lease.close();
+        fence.close();
+        original.close();
+        fence = await MaintenanceStateFence.open(state);
+        final recovered = await reopenPublished();
+        expect(recovered.publicationEvidence['phase'], 'candidate_staged');
+        lease = await ColdStateLease.acquire(
+          state,
+          bundleIdentifier: 'org.gaovm.tests.Release',
+          host: recovered,
+          maintenanceFence: fence,
+        );
+        await assertStateOwner();
+        final output = await OwnedImageDirectory.open(
+          Directory('${temporary.path}/publications'),
+        );
+        final stateTree = await MaintenanceTree.open(state);
+        try {
+          final before = await stateTree.capture(nativeMetadata: true);
+          final result = await lease.publishCandidate(
+            fence,
+            output,
+            'upgrade',
+            Directory(sourcePath),
+            version: '0.1.0',
+            catalogSchema: 0,
+            candidateManifest: manifest,
+            verifyPreparedInputs: () =>
+                stateTree.verify(before, nativeMetadata: true),
+          );
+          expect(result['phase'], 'candidate_published');
+          expect(result['committed'], false);
+          expect(await Directory(sourcePath).exists(), false);
+          await stateTree.verify(before, nativeMetadata: true);
+          await assertStateOwner();
+        } finally {
+          output.close();
+          stateTree.close();
+        }
+      }),
+      timeout: const Timeout(Duration(minutes: 3)),
+    );
+
+    for (final fault in [
+      'record',
+      'substituted inode',
+      'unknown entry',
+      'missing lock',
+      'both locations',
+      'neither location',
+      'lock contents',
+      'wrong version',
+    ]) {
+      test(
+        'publication recovery rejects $fault before executing any helper',
+        () => check(() async {
+          await retire();
+          await publish();
+          lease.close();
+          fence.close();
+          original.close();
+          fence = await MaintenanceStateFence.open(state);
+          final root = '${temporary.path}/publications/upgrade';
+          switch (fault) {
+            case 'record':
+              final path = '$root/prepared/record.json';
+              imageFileMode(path, 0x180);
+              await File(path).writeAsString('malformed record\n');
+              imageFileMode(path, 0x100);
+            case 'substituted inode':
+              await app.rename('${temporary.path}/Published-retained.app');
+              await _fixture(app);
+            case 'unknown entry':
+              await File(
+                '$root/unknown',
+              ).writeAsString('preserve unknown evidence');
+              imageFileMode('$root/unknown', 0x180);
+            case 'missing lock':
+              await File(
+                '${temporary.path}/publications/.gaovm-candidate-publication.lock',
+              ).delete();
+            case 'both locations':
+              await Directory('$root/candidate/payload.app').create();
+              imageFileMode('$root/candidate/payload.app', 0x1c0);
+            case 'neither location':
+              await app.rename('${temporary.path}/Published-retained.app');
+            case 'lock contents':
+              await File(
+                '${temporary.path}/publications/.gaovm-candidate-publication.lock',
+              ).writeAsString('preserve unexpected lock bytes');
+            case 'wrong version':
+              break;
+          }
+          final executions = host.executedRoles.length;
+          await expectLater(
+            reopenPublished(
+              version: fault == 'wrong version' ? '0.2.0' : '0.1.0',
+            ),
+            throwsA(
+              fault == 'missing lock'
+                  ? isA<FileSystemException>()
+                  : isA<FormatException>(),
+            ),
+          );
+          expect(host.executedRoles.length, executions);
+          expect(
+            await Directory(app.path).exists(),
+            fault != 'neither location',
+          );
+          expect(
+            await Directory('${storage.path}/old/GaoVM.app').exists(),
+            true,
+          );
+          expect(
+            await File('${state.path}/unknown-data').readAsString(),
+            'keep original state',
+          );
+          expect(await File('$root/intent.json').exists(), true);
+          await expectLater(
+            MaintenanceStateFence.requireUnfenced(state),
+            throwsA(isA<MaintenanceFenceActive>()),
+          );
+        }),
+        timeout: const Timeout(Duration(minutes: 3)),
+      );
+    }
 
     test(
       'retired app recovery reacquires the original state lock under its fence',
@@ -1050,7 +1698,7 @@ void main() {
     }
 
     test(
-      'prepared upgrade retires the exact old app without releasing state ownership',
+      'prepared upgrade publishes a candidate without releasing original state ownership',
       () async {
         activeRetirementChecks++;
         try {
@@ -1162,6 +1810,38 @@ void main() {
               // The original checkpoint stays immutable, not a commit record.
               expect(reopened.toJson()['phase'], 'candidate_prepared');
               expect(reopened.toJson()['installed_candidate_published'], false);
+              host.onStatus =
+                  null; // The pre-retirement callback boundary passed.
+              final published = await reopened.publishCandidate(
+                retirement,
+                'candidate',
+              );
+              expect(published['phase'], 'candidate_published');
+              expect(published['activation_authorized'], false);
+              expect(published['committed'], false);
+              expect(lease.appPath, '${retirement.path}/old/GaoVM.app');
+              expect(
+                await DaemonOwnership.tryAcquireForMaintenance(
+                  stateRoot,
+                  fence,
+                ),
+                isNull,
+              );
+              expect(
+                await Directory(
+                  '${reopened.path}/candidate-app/payload.app',
+                ).exists(),
+                true,
+              );
+              expect(reopened.toJson()['installed_candidate_published'], false);
+              expect(
+                await File('${state.path}/unknown-data').readAsString(),
+                'preserve state',
+              );
+              await expectLater(
+                MaintenanceStateFence.requireUnfenced(state),
+                throwsA(isA<MaintenanceFenceActive>()),
+              );
             } finally {
               reopened.close();
             }
@@ -1174,7 +1854,7 @@ void main() {
           activeRetirementChecks--;
         }
       },
-      timeout: const Timeout(Duration(minutes: 3)),
+      timeout: const Timeout(Duration(minutes: 5)),
     );
 
     test(
@@ -2330,6 +3010,8 @@ final class _RealNativeBoundary implements ReleaseInspectionHost {
 // fixtures are never executed or presented as signed GaoVM product binaries.
 final class _NativeBoundary implements ReleaseInspectionHost {
   int statusCalls = 0;
+  int admissions = 0;
+  bool realAdmission = false, retainInputs = false;
   final executedRoles = <String>[];
   final _verified = <String>{};
   final componentChanges = <String, Map<String, Object?>>{};
@@ -2337,6 +3019,7 @@ final class _NativeBoundary implements ReleaseInspectionHost {
   bool rejectSignature = false, nativeArm64 = true, runtimeFlag = true;
   String metadataTeam = 'ABCDEFGHIJ';
   Future<void> Function()? onProbe, onStatus;
+  Future<ProcessResult?> Function(String, List<String>)? onAdmission;
   @override
   bool get canExecuteArm64 => nativeArm64;
   @override
@@ -2425,6 +3108,34 @@ final class _NativeBoundary implements ReleaseInspectionHost {
         'outcome': 'observed',
         'error_code': null,
       });
+    } else if (arguments.contains('--state-dir')) {
+      expect(executable, endsWith('/Contents/MacOS/gaovmd'));
+      expect(verifiedFor(executable), 5);
+      admissions++;
+      final overridden = await onAdmission?.call(executable, arguments);
+      if (overridden != null) return overridden;
+      if (realAdmission) {
+        try {
+          return await runMaintenanceCommand(Platform.resolvedExecutable, [
+            '--packages=${Directory.current.path}/.dart_tool/package_config.json',
+            '${Directory.current.path}/bin/gaovmd.dart',
+            ...arguments,
+          ], timeout: const Duration(seconds: 30));
+        } on MaintenanceCommandFailure catch (failure) {
+          if (!failure.exitConfirmed) retainInputs = true;
+          rethrow;
+        }
+      }
+      final state = arguments[arguments.indexOf('--state-dir') + 1];
+      final parent = Directory(state).parent.path;
+      final marker =
+          '$parent/.gaovmd-maintenance-${sha256.convert(utf8.encode(state))}';
+      return ProcessResult(
+        pid,
+        1,
+        '',
+        'gaovmd startup failed: maintenance recovery required for $state; retained fence: $marker\n',
+      );
     } else {
       expect(arguments, ['--component-info']);
       expect(

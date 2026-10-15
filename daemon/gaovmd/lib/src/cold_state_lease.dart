@@ -261,6 +261,48 @@ final class ColdStateLease {
     }
   }
 
+  /// Publish an independent candidate copy into the original installation slot.
+  /// Retains this exact state owner, old app and startup fence on every failure.
+  /// This neither activates the candidate nor authorizes commit or rollback.
+  Future<Map<String, Object?>> publishCandidate(
+    MaintenanceStateFence fence,
+    OwnedImageDirectory storage,
+    String name,
+    Directory candidate, {
+    required String version,
+    required int catalogSchema,
+    required Map<String, Object?> candidateManifest,
+    required Future<void> Function() verifyPreparedInputs,
+  }) async {
+    if (_closed || _retiring) throw StateError('cold lease is unavailable');
+    final host = _host;
+    if (host is! MacOsColdStateHost || !host.isRetired) {
+      throw StateError('held retired native app required');
+    }
+    _retiring = true;
+    try {
+      await verify();
+      await fence.verifyFor(
+        _root,
+        bundleIdentifier: _bundleIdentifier,
+        appPath: installationPath,
+      );
+      return await host.publishForMaintenance(
+        this,
+        fence,
+        storage,
+        name,
+        candidate,
+        version: version,
+        catalogSchema: catalogSchema,
+        candidateManifest: candidateManifest,
+        verifyPreparedInputs: verifyPreparedInputs,
+      );
+    } finally {
+      _retiring = false;
+    }
+  }
+
   Future<void> _verifyService() async {
     final result = await _host.serviceStatus();
     final value = jsonDecode(result.stdout as String);
@@ -292,7 +334,7 @@ final class ColdStateLease {
   void close() {
     if (_closed) return;
     if (_retiring)
-      throw StateError('await pending app retirement before close');
+      throw StateError('await pending app maintenance before close');
     _closed = true;
     try {
       _ownership.close();

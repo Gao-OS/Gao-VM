@@ -5,8 +5,10 @@ composes a caller-held [cold state snapshot](MACOS_RELEASE_INSPECTION.md#guarded
 and [persistent admission fence](MACOS_MAINTENANCE_FENCE.md). It creates and
 reopens a `candidate_prepared` checkpoint. Its separate
 [`retireOriginalApp` step](MACOS_APP_RETIREMENT.md) can retain the exact old app
-while keeping state ownership. Neither step publishes a candidate/replacement
-state, activates a service, authorizes rollback, or completes an upgrade.
+while keeping state ownership. Its separate
+[`publishCandidate` step](MACOS_CANDIDATE_PUBLICATION.md) publishes an independent
+candidate copy, not a replacement state. None of these steps activates a service,
+authorizes rollback, or completes an upgrade.
 There is no preparation/install CLI yet. The read-only release inspector's
 command remains unchanged.
 
@@ -106,9 +108,8 @@ do not simulate a complete upgrade process crash, low-disk lifecycle, real
 installed publication or migration.
 
 The [accepted cold operator workflow](proposals/MACOS_UPGRADE_ROLLBACK.md) still
-needs a maintenance executable/command outside renamed trees, cross-parent
-candidate publication, identity-safe interrupted replacement
-recovery, activation/write isolation through validation/commit, fresh-cold
+needs a maintenance executable/command outside renamed trees,
+activation/write isolation through validation/commit, fresh-cold
 whole-state/app rollback with rewind acknowledgement, and data-preserving
 uninstall. Genuine signed installed-product and ARM64/VZ/GaoOS acceptance remain
 unproved. This preparation component does not complete M8 or the MVP goal.
@@ -119,6 +120,9 @@ against that retired host using the fixed original installation slot for fence
 binding and the observed retired path for fresh app checks. The immutable
 checkpoint still reports its original preparation phase, not current installed
 publication/commit status. No snapshot payload is moved out of the checkpoint.
+Independent candidate publication, ordinary-startup fence-cooperation checks and
+fixed-location interrupted-publication recovery are now a separate
+[implemented phase](MACOS_CANDIDATE_PUBLICATION.md), not full transaction recovery.
 
 ## Bound cross-parent directory move prerequisite
 

@@ -8,10 +8,15 @@ final class MaintenanceCommandFailure implements Exception {
     this.reason,
     this.pid, {
     required this.exitConfirmed,
+    this.ownedExit,
   });
   final String reason;
   final int pid;
   final bool exitConfirmed;
+
+  /// The original owned process handle's eventual exit, not a PID poll/restart.
+  /// Native unconfirmed failures retain this future for mutation coordinators.
+  final Future<int>? ownedExit;
   @override
   String toString() =>
       '$reason (owned child $pid; exit confirmed: $exitConfirmed)';
@@ -117,6 +122,7 @@ Future<ProcessResult> runMaintenanceCommand(
       'maintenance child exit is unconfirmed; retain all inputs',
       child.pid,
       exitConfirmed: false,
+      ownedExit: exit,
     );
   }
   if (failure is MaintenanceCommandFailure) {

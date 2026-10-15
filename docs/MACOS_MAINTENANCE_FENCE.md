@@ -81,6 +81,10 @@ original state inode and original app-slot binding. A freshly verified typed
 retired host distinguishes the fixed installation slot from the observed old
 app path; explicit adoption retains the same state kernel lock. This does not
 widen `verifyFor` to copied/replacement state roots or clear ordinary admission.
+The separate [candidate-publication phase](MACOS_CANDIDATE_PUBLICATION.md)
+retains that same original-state ownership and verifies the candidate's ordinary
+startup refusal in an isolated marked state before and after app publication.
+It does not admit a replacement state or release the real state marker.
 
 This is cooperative admission for this daemon build, not an ACL barrier against
 privileged/malicious writers, an old non-cooperating binary, or arbitrary external
@@ -98,7 +102,7 @@ cleanup. Only external service/process/reference observations are replaced.
 They also cover damaged/foreign records, concurrent recovery, cold revalidation,
 late native-callback changes and publication failures with original preservation.
 
-There is no begin/recover/clear CLI yet, no replacement-generation checkpoint,
+There is no begin/recover/clear CLI yet, no replacement-state admission,
 activation/write isolation, validated commit/retirement, whole-state rollback or
 uninstall transaction. The separate [paired snapshot](MACOS_RELEASE_INSPECTION.md#paired-old-app-and-state-snapshots)
 does not arm this guard and still reports `replacement_startup_fenced: false`.
@@ -106,5 +110,7 @@ The separate [candidate preparation](MACOS_UPGRADE_PREPARATION.md) requires an
 already-held typed guard and retains it; its durable `candidate_prepared`
 checkpoint is not installed publication or replacement-generation recovery.
 Its old-app retirement/gap-recovery step is separate from those later phases.
+Independent app publication and fixed-location interrupted-publication recovery
+now have their own checkpoint; that is still not whole-transaction recovery.
 Full lifecycle crash/low-disk, genuine signed installed-product, ARM64/VZ and
 GaoOS acceptance remain separate; this component does not complete M8.

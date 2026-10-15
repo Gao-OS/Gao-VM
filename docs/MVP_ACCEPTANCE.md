@@ -1109,3 +1109,88 @@ power-loss/fsync/low-disk/full process-crash and genuine signed installed-produc
 lifecycle acceptance are not proved by boundary fixtures. No real installed
 app/state/service or remote ref was changed. No new Swift/CI/Apple Silicon/VZ/
 GaoOS or M8/MVP completion is claimed; Apple Silicon execution stays with the user.
+
+## 2026-10-16 fenced candidate publication and fixed-location recovery
+
+On top of `68dbc9c`, the [independent candidate-publication phase](MACOS_CANDIDATE_PUBLICATION.md)
+now composes the immutable preparation, retired native host, persistent fence
+and continuously held original-state kernel lock. The coordinator selects only
+the fixed prepared candidate payload and independently inspected catalog
+requirement. It copies a second candidate, seals/fsyncs durable intent/prepared
+records, and moves only that staged inode into the original installation slot
+without replacement. Original state, old app and all three preparation payloads
+remain intact. Both move parents are synced, including explicit revalidation
+after an earlier post-rename failure; a foreign target is never overwritten.
+
+Fresh strict release/actual-component inspection precedes candidate execution.
+An isolated private canary state and synthetic blocking marker test its ordinary
+daemon entry: exact maintenance refusal, exit 1, empty stdout and a completely
+unchanged native/content probe manifest are required. The installed path is
+inspected/probed again. No startup bypass or frozen public/driver schema change
+was added. This bounded cooperation check does not grant typed maintenance
+authority or prove write isolation after activation. Full persistent/external
+input and independent preparation-output reads follow the last native callbacks.
+
+Recovery accepts explicit operator app/state/fence, both storage/name pairs and
+expected old/new identities/schema requirements. Before any helper executes it
+checks sealed canonical records, retirement/workspace/state/parent bindings,
+independent receipts, complete probe/candidate bytes and native metadata, and
+requires exactly one fixed location to contain the recorded staged inode.
+Fresh signatures/components, ordinary-startup refusal and reference observations
+repeat. A new process still has to acquire the actual original-state kernel
+lock under its typed fence; journals/copies cannot grant ownership. All three
+original/retired/staged daemon/driver paths retain unresolved PIDs as blockers.
+Post-publication inspection failure retains the typed journal owner for explicit
+in-process revalidation; a staged checkpoint can resume after fresh recovery
+even when the original candidate input directory is no longer present.
+
+Native unconfirmed command failures now expose the same owned process's eventual
+exit future. Cold-host/publication execution waits for that exit before
+unwinding readers/namespace ownership, then reports the original command failure;
+it neither restarts the command nor treats an observation timeout as exit. The
+pending-child test asserts that lease close refuses and the original state lock
+is still held until the supplied owned completion settles.
+
+Returned candidate placement is not activation or commit: authorization/rollback/
+commit flags remain false, and the original `candidate_prepared` record stays
+immutable. The existing SQLite/preparation/retirement integration scenario was
+extended through candidate publication; its own limit changed from three to
+five minutes to cover the longer lifecycle. No production command deadline,
+ordinary test limit, authentication or generation check was weakened.
+
+Verification: **568 tests across 36 files**, concurrency 1, zero failures/skips,
+terminal success and confirmed runner exit (**730.943 seconds**). The complete
+affected release-inspection file contributes **109 passing checks**, including
+**21 new checks** and the extended real-SQLite preparation/publication scenario.
+The JSON report is `/private/tmp/gaovm-candidate-publication.3dLFfK/verified.jsonl`.
+It confirms that the same three installed/startup checks were explicitly filtered
+and never started, not counted as passes/skips. Earlier broad/default-concurrency
+daemon failures were not rerun or resolved by this focused verification.
+
+The canary-probe tracer delegates ordinary startup to the actual source daemon;
+signature/ARM64/component/service/process boundaries otherwise remain explicit
+fixtures, not genuine signed-product execution. Daemon analysis has no issues;
+root analysis exits 0 with the same nine existing UI `RegExp` informational
+notices, not zero diagnostics. Pinned Dart 3.9.0 formatting (**298 files**, zero
+changes), JSON Schema/OpenAPI validation, scoped Markdown file-target validation
+and `git diff --check` passed. The unrelated UI lockfile remains byte-identical
+and excluded. No owned test/component fixture remains running after completion.
+
+Final review moved two reader acquisitions inside their cleanup scopes so a
+failed directory/tree open cannot strand an earlier reader. After that small
+lifetime adjustment, **44 affected publication/retirement/integrated checks**
+passed again (`post-review.jsonl`, **328.317 seconds**), as did **28 command/lease
+checks** (`post-review-lease-command.jsonl`, **5.358 seconds**). Both reports are
+in the same retained directory, with zero failures/skips, terminal success and
+confirmed runner exit. Daemon/root analysis and all 298 formatting checks were
+also repeated. The whole 36-file run above predates this final adjustment; it
+was not silently presented as a second post-review whole-daemon pass.
+
+This is not a complete upgrade transaction. The operator executable/command,
+activation/write isolation through explicit validation/commit, fresh-cold
+whole-state/app rollback with rewind acknowledgement, and data-preserving
+uninstall remain unfinished. Full power-loss/fsync/low-disk/process-crash and
+genuine signed installed-product lifecycle acceptance remain unproved. No real
+installed app/state/service or remote ref was changed, and no new Swift/CI/
+Apple Silicon/VZ/GaoOS or M8/MVP completion is claimed. Apple Silicon execution
+remains assigned to the user.

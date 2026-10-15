@@ -16,6 +16,9 @@ import 'release_compatibility.dart';
 
 abstract interface class ReleaseInspectionHost {
   bool get canExecuteArm64;
+
+  /// Return only after the owned child exits. An unconfirmed native failure
+  /// carries MaintenanceCommandFailure.ownedExit for callers retaining inputs.
   Future<ProcessResult> run(
     String executable,
     List<String> arguments, {

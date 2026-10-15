@@ -475,49 +475,87 @@ final class ColdUpgradePreparation {
       _fence,
       storage,
       name,
-      verifyPreparedInputs: () async {
-        // Filesystem-only reads after the LAST native observer. Check every
-        // held external dependency too: it is not part of the state snapshot.
-        final files = <_HeldReference>{
-          ...?_state._references?._files.values,
-          ...?_state._assets?._files._files.values,
-          ..._state._legacy._files.values,
-        };
-        for (final held in files) {
-          await held.parent.verifyPathBinding();
-          if (JsonValue.fromJson(await _seal(held.file)) != held.evidence) {
-            throw const ColdStateFailure(
-              'app_retirement',
-              'external input changed',
-            );
-          }
-        }
-        await _state._runtime?._verifyTree();
-        // The complete persistent manifest also covers legacy files/backups.
-        // Do not call legacy._verifyInputs here: its _context invokes native
-        // observations and could change dependencies we just finished reading.
-        if (!_equal(
-          await _state._capturePersistent(),
-          (_record['original_state_receipt'] as Map)['manifest'],
-        )) {
-          throw const FormatException(
-            'prepared state changed before app retirement',
-          );
-        }
-        await _originalApp.verify(
-          (_record['original_app_receipt'] as Map)['manifest']
-              as Map<String, Object?>,
-          nativeMetadata: true,
-        );
-        await _verifyOutput();
-        await _verifyNamespace();
-      },
+      verifyPreparedInputs: _verifyPreparedFiles,
     );
     final moved = await MaintenanceTree.open(Directory(_state._state.appPath));
     _originalApp.close();
     _originalApp = moved;
     await verify();
     return result;
+  }
+
+  /// Publish a second, independent copy, never the immutable candidate snapshot.
+  /// The caller keeps this preparation, original-state owner and fence alive.
+  /// The observation remains uncommitted and startup stays fenced.
+  Future<Map<String, Object?>> publishCandidate(
+    OwnedImageDirectory storage,
+    String name,
+  ) async {
+    await verify();
+    for (final protected in [path, _state._inspectionPath]) {
+      for (final target in [
+        '${storage.path}/$name',
+        '${storage.path}/.$name.partial',
+      ]) {
+        if (_overlap(target, protected) ||
+            storage.path == protected ||
+            storage.path.startsWith('$protected/')) {
+          throw const FormatException(
+            'candidate publication overlaps preparation',
+          );
+        }
+      }
+    }
+    final result = await _state._state.publishCandidate(
+      _fence,
+      storage,
+      name,
+      Directory('$path/candidate-app/payload.app'),
+      version: _intent['new_version'] as String,
+      catalogSchema: _state._catalog?.schemaVersion ?? 0,
+      candidateManifest:
+          (_record['candidate_app_receipt'] as Map)['manifest']
+              as Map<String, Object?>,
+      verifyPreparedInputs: _verifyPreparedFiles,
+    );
+    await verify();
+    return result;
+  }
+
+  Future<void> _verifyPreparedFiles() async {
+    // Filesystem-only reads after the LAST native observer. External inputs are
+    // not part of the state snapshot. Do not call legacy._verifyInputs: its
+    // context invokes native observers after dependencies have been read.
+    final files = <_HeldReference>{
+      ...?_state._references?._files.values,
+      ...?_state._assets?._files._files.values,
+      ..._state._legacy._files.values,
+    };
+    for (final held in files) {
+      await held.parent.verifyPathBinding();
+      if (JsonValue.fromJson(await _seal(held.file)) != held.evidence) {
+        throw const ColdStateFailure(
+          'app_maintenance',
+          'external input changed',
+        );
+      }
+    }
+    await _state._runtime?._verifyTree();
+    if (!_equal(
+      await _state._capturePersistent(),
+      (_record['original_state_receipt'] as Map)['manifest'],
+    )) {
+      throw const FormatException(
+        'prepared state changed before app maintenance',
+      );
+    }
+    await _originalApp.verify(
+      (_record['original_app_receipt'] as Map)['manifest']
+          as Map<String, Object?>,
+      nativeMetadata: true,
+    );
+    await _verifyOutput();
+    await _verifyNamespace();
   }
 
   Future<void> _verifyNamespace() async {

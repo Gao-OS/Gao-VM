@@ -19,6 +19,7 @@ final class _AppRetirement {
   OwnedImageDirectory _root;
   final Map<String, Object?> _intent;
   final List<int> _bytes;
+  _CandidatePublication? _publication;
   bool _closed = false;
   String get sourceAppPath => _intent['source_app'] as String;
 
@@ -35,6 +36,13 @@ final class _AppRetirement {
     required ReleaseInspectionHost host,
     required MacOsOpenReferences observer,
     required Future<DriverInventorySnapshot> Function(String) inventory,
+    ({
+      OwnedImageDirectory storage,
+      String name,
+      String version,
+      int catalogSchema,
+    })?
+    publication,
   }) async {
     _validateName(name);
     await _private(storage);
@@ -103,6 +111,17 @@ final class _AppRetirement {
         );
       }
       retirement = _AppRetirement(parent, sourceParent, lock, root, intent);
+      if (publication != null) {
+        retirement._publication = await _CandidatePublication.open(
+          retirement,
+          stateRoot,
+          fence,
+          publication.storage,
+          publication.name,
+          version: publication.version,
+          catalogSchema: publication.catalogSchema,
+        );
+      }
       app = await MaintenanceTree.open(Directory('${root.path}/GaoVM.app'));
       // Bind all paths/inodes and complete bytes BEFORE executing any helper.
       await retirement.verify(app);
@@ -124,7 +143,7 @@ final class _AppRetirement {
         appPath: originalApp.path,
       );
       await retirement.verify(app);
-      return MacOsColdStateHost._(
+      final recovered = MacOsColdStateHost._(
         app,
         release,
         host,
@@ -132,6 +151,9 @@ final class _AppRetirement {
         inventory,
         retirement,
       );
+      await retirement._publication?.validateNative(recovered);
+      await retirement.verify(app);
+      return recovered;
     } catch (_) {
       app?.close();
       if (retirement != null) {
@@ -329,7 +351,9 @@ final class _AppRetirement {
       throw const FormatException('retired app is outside fixed journal child');
     }
     await _verifyNamespace(moved: true);
-    if (maintenancePathEntryExists(sourceAppPath)) {
+    if (_publication case final publication?) {
+      await publication.verify();
+    } else if (maintenancePathEntryExists(sourceAppPath)) {
       throw const FormatException('original installation slot is occupied');
     }
     await _verifySourceIdentity(app.path);
@@ -501,6 +525,7 @@ final class _AppRetirement {
   void close() {
     if (_closed) return;
     _closed = true;
+    _publication?.close();
     _root.close();
     try {
       _lock.close();

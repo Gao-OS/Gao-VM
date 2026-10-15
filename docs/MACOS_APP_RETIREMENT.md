@@ -23,8 +23,8 @@ is the fixed original installation slot; `appPath` is the currently verified
 observed app. The existing state lock is neither closed nor reacquired during
 the move or subsequent host adoption. The original state inode and fence's
 original app/bundle binding are unchanged; this does not admit a replacement
-state directory. Closing a lease while retirement/adoption is pending refuses
-without releasing ownership. Callers must await its actual terminal result.
+state directory. Closing a lease while retirement/adoption/publication is pending
+refuses without releasing ownership. Callers must await its actual terminal result.
 
 ## Intent before movement
 
@@ -77,12 +77,15 @@ private canonical storage, original parent/workspace/app identities, original
 state/fence binding, native metadata and complete content. It repeats fresh
 signature/component/reference checks and filesystem validation after callbacks.
 
-The original installation slot must be absent. An occupied slot is unknown
-input, **not** an inferred candidate, and is never replaced. Copies, substituted
+For `openRetired`, the original installation slot must be absent. An occupied slot
+is unknown input, **not** an inferred candidate, and is never replaced. Copies, substituted
 inodes, damaged/foreign records, changed locks, unexpected entries, mismatched
 operator expectations and concurrent recovery are refused without repair.
 Partial-only or intent-only pre-move output is not promoted or automatically
 continued; inspect and retain it alongside the still-original app.
+The separate [`openPublished` recovery](MACOS_CANDIDATE_PUBLICATION.md) admits
+only the exact independently staged candidate under its matching typed journal;
+it does not weaken `openRetired` or infer a candidate from an occupied slot.
 
 After a maintenance process exits, reopen the persistent state fence and this
 retired host, then `ColdStateLease.acquire(..., maintenanceFence: fence)` must
@@ -106,13 +109,14 @@ observations are explicit fixtures. They cover prepared-state integration,
 reopen, continuous ownership, post-move inspection failure and typed adoption,
 pending-close refusal, late state writes, app references, unresolved processes
 at both locations, foreign-slot preservation and record/lock/inode tampering.
-The integrated test has its own three-minute limit; existing test limits are
-unchanged. Cleanup retains inputs/owners if retirement work has not settled.
+The integrated test now also exercises independent candidate publication with
+its own five-minute limit. Cleanup retains inputs/owners if work has not settled.
 
 This is recovery of the **old-app retirement gap**, not replacement-generation
-or full transaction recovery. Independent staged candidate publication,
-candidate fence-cooperation evidence, activation/write isolation through explicit
-validation/commit, whole-state/app rollback with rewind acknowledgement,
+or full transaction recovery. Independent staged candidate publication and
+candidate fence-cooperation evidence now have a separate
+[implementation](MACOS_CANDIDATE_PUBLICATION.md). Activation/write isolation through
+explicit validation/commit, whole-state/app rollback with rewind acknowledgement,
 data-preserving uninstall and the operator command remain unfinished. Full
 process-crash/fsync/low-disk lifecycle and genuine signed installed-product
 acceptance are unproved. Apple Silicon/VZ/GaoOS execution remains assigned to
