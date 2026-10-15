@@ -7,8 +7,10 @@ import 'package:gaovm_models/gaovm_models.dart';
 import 'package:sqlite3/sqlite3.dart';
 
 import 'cold_state_lease.dart';
+import 'driver_runtime_metadata.dart';
 import 'image_filesystem.dart';
 import 'image_manifest.dart';
+import 'macos_driver_inventory.dart';
 import 'macos_open_references.dart';
 import 'maintenance_tree.dart';
 import 'vm_bundle_manifest.dart';
@@ -16,6 +18,7 @@ import 'vm_provisioning_plan.dart';
 
 part 'cold_file_references.dart';
 part 'cold_managed_assets.dart';
+part 'cold_runtime_inspection.dart';
 
 /// Facts from a private catalog copy, not a full cold/upgrade certificate.
 /// Never pass the inspection copy to a restore operation: SQLite may change its

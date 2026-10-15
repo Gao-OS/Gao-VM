@@ -244,10 +244,9 @@ on failure until explicit close; the caller always owns the state lease lifetime
 Their JSON formats are `gaovm.cold-catalog-inspection.v1` and
 `gaovm.cold-file-references.v1`. Every referenced-file record says
 `backed_up: false`: no external backup/restore or lasting writer fence is supplied.
-Managed assets have the separate read-only inspection below. Legacy inputs,
-retired runtime generations, safe `run/` exclusion, complete paired snapshots,
-transaction fencing/journal,
-publication/validation/commit, rollback/recovery and uninstall still need the
+Managed assets and runtime namespaces have separate read-only inspections below.
+Legacy inputs, safe `run/` exclusion, complete paired snapshots, transaction
+fencing/journal, publication/validation/commit, rollback/recovery and uninstall still need the
 full workflow. These internal checks do not change the public API or authorize
 installed mutations, service actions, VZ boot, push or release.
 
@@ -299,7 +298,60 @@ The result format is `gaovm.cold-managed-assets.v1`. File evidence still says
 checks the original cold lease before and after tree reads, using held readers.
 Failure does not release the caller's state ownership, and explicit close
 releases only this inspection's readers. These checks provide neither a lasting
-writer/startup fence nor a
-complete cold boundary. Retired runtime/legacy handling, safe `run/` treatment,
-paired snapshots, publication, durable transaction recovery, activation/commit,
-whole-state rollback and uninstall still require the full M8 workflow.
+writer/startup fence nor a complete cold boundary. Runtime observations below
+remain a separate prerequisite.
+Legacy handling, safe `run/` treatment, paired snapshots, publication, durable
+transaction recovery, activation/commit, whole-state rollback and uninstall still
+require the full M8 workflow.
+
+## Runtime namespaces and retired executable observations
+
+The internal [`ColdRuntimeInspection`](../daemon/gaovmd/lib/src/cold_runtime_inspection.dart)
+starts from the original held cold lease and private-copy catalog facts. It
+checks every retained generation directory, not just the current generation.
+VM namespaces must match catalog identities, including tombstoned VMs; each
+generation must be canonical, positive and no greater than the recorded driver
+generation. Every present generation requires valid bounded diagnostic metadata
+whose VM/generation, bundle and socket paths match those derived bindings.
+An optional recorded process identity must have the owning UID. Metadata is
+capped at 64 KiB and the whole fixed-depth namespace at 4,096 entries.
+
+Private owned directories, empty recognized ownership markers and singly linked
+regular metadata without unsafe write permissions or ACL grants are required.
+Missing/invalid metadata, future generations, unbound VMs, unknown entries,
+unsafe paths or nonempty ownership markers refuse preparation without cleanup.
+An absent `run/` is recorded and not created; later appearance fails revalidation.
+Absence alone is not evidence that historical processes exited.
+
+Known driver/guest sockets and the public API's `api.sock`/private generation
+aliases are inspected without connecting, reading socket bytes or unlinking.
+The Darwin reader uses no-follow `fstatat` relative to the held parent, requires
+the owning UID/private mode/no ACL, and checks inode/stat facts around the
+no-follow ACL lookup and parent binding. API socket hardlinks may share an inode;
+a regular file or symlink using a socket name is refused, not followed or opened.
+Socket facts bind an observation, not liveness or complete restorable metadata.
+They do not change the general snapshot primitive's special-file refusal.
+
+The native census includes the inspected app's current driver and all distinct
+executable paths recorded by retained generations, including retired paths.
+These paths select read-only observations only: they are not independently
+trusted executable identities and never authorize execution, signaling or
+filesystem mutation. No metadata PID, basename, missing executable, socket or
+timeout can substitute for the existing native census. Live or unresolved
+processes refuse progress; unavailable native observations propagate rather
+than becoming an empty inventory.
+
+Held directory/file identities and byte/native metadata evidence are rechecked
+around the census, with the original catalog and cold lease checked before and
+afterward. Changed records, sockets or directory contents fail closed. Failed
+revalidation retains the caller's ownership; explicit close releases only this
+inspection's readers. Exported `gaovm.cold-runtime-inspection.v1` JSON is detached
+diagnostic evidence, not a recovery authority, and always reports
+`run_omission_authorized: false`.
+
+This component does not establish the complete cold boundary or a lasting
+startup/writer fence. Legacy/external boundaries, complete paired snapshots,
+safe `run/` omission, publication, durable journal/recovery, activation/commit,
+whole-state rollback and uninstall still require the composed M8 workflow.
+Fixture process/service observations plus genuine local filesystem/socket/ACL
+checks do not prove installed lifecycle, ARM64, VZ or GaoOS acceptance.

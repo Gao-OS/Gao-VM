@@ -52,7 +52,8 @@ release publication or remote push is authorized by this ledger.
    adds signed identity/layout and whole-tree checks, not applied database or
    negotiated runtime evidence. Held cold preparation, metadata-preserving tree
    copies and [catalog/referenced-file inspections](MACOS_RELEASE_INSPECTION.md#source-read-only-catalog-and-referenced-file-inspections),
-   plus [managed asset checks](MACOS_RELEASE_INSPECTION.md#managed-images-bundle-provenance-and-current-writable-bytes),
+   [managed asset checks](MACOS_RELEASE_INSPECTION.md#managed-images-bundle-provenance-and-current-writable-bytes)
+   and [retained runtime observations](MACOS_RELEASE_INSPECTION.md#runtime-namespaces-and-retired-executable-observations)
    now cover separate prerequisites, not their full transaction composition.
    The development-package trust choice, complete cold boundary, writer fencing,
    whole-state rollback and native acceptance remain
@@ -695,3 +696,48 @@ Full cold acquisition still needs retired runtimes/legacy boundaries and safe
 durable journal/recovery, activation/commit, whole-state rollback and uninstall
 remain unfinished. No installed app/state, real service, remote ref or hardware
 was changed; the full M8/PRD goal is not complete.
+
+## 2026-10-15 runtime namespace checkpoint
+
+On top of `e1779a7`, [retained runtime inspection](MACOS_RELEASE_INSPECTION.md#runtime-namespaces-and-retired-executable-observations)
+binds every present generation to the private-copy catalog, including deleted
+VMs and old executable paths. Missing/invalid metadata, unbound/future
+generations, contradictory UID or derived paths, unknown data and unsafe
+permissions/ACLs refuse without cleanup. The original cold lease is checked
+before runtime reads and after observation; failures never release caller
+ownership. Diagnostic executable paths select native census only, not code
+execution, trusted-release identity, signaling or mutation authority.
+
+Known socket entries use real no-follow Darwin stat/ACL observations, with parent
+and inode/stat rechecks; the inspector never connects, reads socket bytes or
+unlinks them. API hardlink aliases remain intact. A socket-name regular file or
+symlink, ACL grants and replacement during verification all refuse progress.
+Socket facts are neither liveness nor complete restorable metadata. The result
+always says `run_omission_authorized: false`; existing snapshot special-file
+refusal is unchanged. An absent `run/` is recorded, not initialized or treated
+as proof that historical processes exited.
+
+The **316-test** combined focused run passed with **concurrency 1**, zero
+failures/skips, across **27** files. This includes **31 new tests**, the prior
+263-test group and existing runtime discovery/metadata/path-binding/native
+inventory tests. New checks cover old/current live or unresolved observations,
+changed records during census, unavailable evidence, typed/path/UID mismatches,
+missing/future/unknown entries, deleted-VM records, real stale sockets and API
+aliases, ACL rejection, detached exported evidence, absent-directory appearance,
+closed leases/readers and retained socket generations. The terminal report is
+`focused.jsonl` under `/private/tmp/gaovm-runtime-inspection.0qxQbl/`.
+
+Dart analysis, pinned formatting (**286** files), JSON Schema/OpenAPI validation,
+scoped Markdown file links and `git diff --check` passed. The unrelated UI
+lockfile stays unchanged and excluded. Full daemon regression was not rerun;
+these focused results do not supersede the earlier failed broad regressions.
+No new Swift, hardware, CI or installed lifecycle pass is claimed. Process and
+service success observations used by this inspector remain fixture boundaries;
+separate native inventory component tests and local socket/ACL checks do not
+establish an installed cold boundary or Developer ID/ARM64/VZ/GaoOS acceptance.
+
+Legacy inputs, complete external-file/snapshot composition, safe `run/` omission,
+persistent startup/writer fencing, paired app/state publication, durable
+journal/recovery, activation/commit, whole-state rollback and uninstall remain
+unfinished. No installed app/state, real service, remote ref or hardware was
+changed; M8 and the full PRD/development-plan goal remain open.

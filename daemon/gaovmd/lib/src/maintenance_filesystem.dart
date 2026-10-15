@@ -6,6 +6,104 @@ extension MaintenanceDirectoryCopy on OwnedImageDirectory {
     return _maintenanceMetadata(_fd);
   }
 
+  /// Inspect a known runtime socket without connecting, reading or unlinking.
+  /// This binds one pathname observation, not socket liveness or cleanup rights.
+  Future<Map<String, Object?>> maintenanceSocketMetadata(String name) async {
+    _requireOpen();
+    _validateChildName(name);
+    if (!Platform.isMacOS)
+      throw UnsupportedError('Darwin socket metadata required');
+    await verifyPathBinding();
+    final native = name.toNativeUtf8();
+    final absolute = '$path/$name'.toNativeUtf8();
+    final buffer = calloc<Uint8>(144);
+    Pointer<Void> acl = nullptr;
+    final entry = calloc<Pointer<Void>>();
+    try {
+      final stat = _libc
+          .lookupFunction<
+            Int32 Function(Int32, Pointer<Utf8>, Pointer<Uint8>, Int32),
+            int Function(int, Pointer<Utf8>, Pointer<Uint8>, int)
+          >(Abi.current() == Abi.macosX64 ? 'fstatat\$INODE64' : 'fstatat');
+      Map<String, Object?> facts() {
+        // AT_SYMLINK_NOFOLLOW; child lookup remains relative to the held parent.
+        if (stat(_fd, native, buffer, 0x20) != 0) {
+          throw FileSystemException(
+            'cannot stat runtime socket',
+            '$path/$name',
+            OSError('fstatat failed', _currentErrno()),
+          );
+        }
+        final value = ByteData.sublistView(buffer.asTypedList(144));
+        final mode = value.getUint16(4, Endian.host);
+        if (value.getUint32(16, Endian.host) != _getuid() ||
+            mode & 0xf000 != 0xc000 ||
+            mode & 0xc3f != 0 ||
+            value.getUint16(6, Endian.host) < 1) {
+          throw const FormatException('private owned runtime socket required');
+        }
+        return {
+          'kind': 'socket',
+          'device': value.getUint32(0, Endian.host),
+          'inode': value.getUint64(8, Endian.host),
+          'links': value.getUint16(6, Endian.host),
+          'uid': value.getUint32(16, Endian.host),
+          'gid': value.getUint32(20, Endian.host),
+          'mode': mode & 0xfff,
+          'flags': value.getUint32(116, Endian.host),
+          for (final (key, offset) in [
+            ('modified', 48),
+            ('changed', 64),
+            ('created', 80),
+          ])
+            key: [
+              value.getInt64(offset, Endian.host),
+              value.getInt64(offset + 8, Endian.host),
+            ],
+        };
+      }
+
+      final before = facts();
+      // Sockets cannot be opened as ordinary files. The no-follow ACL lookup is
+      // bracketed by parent binding and inode/stat checks, without a connection.
+      acl = _libc
+          .lookupFunction<
+            Pointer<Void> Function(Pointer<Utf8>, Int32),
+            Pointer<Void> Function(Pointer<Utf8>, int)
+          >('acl_get_link_np')(absolute, 0x100);
+      if (acl == nullptr && _currentErrno() != 2) {
+        throw FileSystemException(
+          'cannot inspect socket ACL',
+          '$path/$name',
+          OSError('acl_get_link_np failed', _currentErrno()),
+        );
+      }
+      if (acl != nullptr &&
+          _libc.lookupFunction<
+                Int32 Function(Pointer<Void>, Int32, Pointer<Pointer<Void>>),
+                int Function(Pointer<Void>, int, Pointer<Pointer<Void>>)
+              >('acl_get_entry')(acl, 0, entry) ==
+              0) {
+        throw const FormatException('runtime socket grants ACL access');
+      }
+      if (jsonEncode(facts()) != jsonEncode(before)) {
+        throw const FormatException('runtime socket changed during inspection');
+      }
+      await verifyPathBinding();
+      return Map.unmodifiable({...before, 'has_acl': false});
+    } finally {
+      if (acl != nullptr)
+        _libc.lookupFunction<
+          Int32 Function(Pointer<Void>),
+          int Function(Pointer<Void>)
+        >('acl_free')(acl);
+      calloc.free(entry);
+      calloc.free(buffer);
+      malloc.free(absolute);
+      malloc.free(native);
+    }
+  }
+
   /// Apply only to the caller's new, exclusively owned staging directory,
   /// after copying all its children so final directory times stay intact.
   Future<void> copyMetadataForMaintenance(
