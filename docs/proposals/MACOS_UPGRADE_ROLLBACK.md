@@ -1,15 +1,15 @@
 ---
 title: macOS cold upgrade and whole-state rollback
-status: proposed
-updated: 2026-10-13
+status: accepted
+updated: 2026-10-15
 ---
 
 # macOS cold upgrade and whole-state rollback
 
-This proposal resolves the implementation boundary for development-plan
-[M8.2/M8.3](../DEVELOPMENT_PLAN.md#m82-packaging). It is **not accepted or
-implemented**. The user is choosing between an explicit cold operator workflow
-and an automatically orchestrated workflow; no default option is approval.
+This accepted design resolves the implementation boundary for development-plan
+[M8.2/M8.3](../DEVELOPMENT_PLAN.md#m82-packaging). On 2026-10-15 the user selected
+the **explicit cold operator workflow**, not automatic orchestration. The
+transaction implementation and its acceptance remain unfinished.
 Neither this document nor that implementation choice authorizes this agent to
 replace an installed app/state tree or register/unregister a real service.
 
@@ -37,12 +37,17 @@ The accepted plan requires a failed-upgrade rollback workflow, but does not
 require *automatic* rollback. Either interface below must implement the same
 data and ownership guarantees and still pass native lifecycle acceptance.
 
-## Interface choice awaiting the user
+## Accepted interface
 
 | Choice | Who establishes shutdown/activation | What the new tool must do |
 | --- | --- | --- |
 | Explicit cold operator workflow | Operator stops VMs/clients and unregisters the owning service; operator later approves startup/commit or requests rollback | Independently verify the cold boundary, snapshot, publish the candidate, retain old app/data, and perform explicit whole-state rollback only after a fresh cold check |
 | Automatically orchestrated workflow | Tool previews required downtime and performs public VM actions and owning-helper service actions after explicit operator confirmation | All cold-workflow guarantees plus terminal Operation waits, authenticated readiness/compatibility probes, consent handling and failed-activation rollback |
+
+Only the first choice is in the accepted implementation scope. The second is
+retained here to identify the unselected alternative, not as additional work or
+authority. The user also accepted one release cycle of public-API-only legacy
+CLI compatibility; neither choice permits a second VM runtime or driver passthrough.
 
 The maintenance implementation is separate from the `gaovm` public-API client.
 VM actions, if orchestrated, still use the public API; do not add private driver
