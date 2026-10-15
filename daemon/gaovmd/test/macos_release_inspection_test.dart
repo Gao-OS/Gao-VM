@@ -1659,6 +1659,426 @@ void main() {
       },
     );
 
+    for (final invalidNetwork in [false, true]) {
+      group(
+        'pre-catalog candidate validation ${invalidNetwork ? "invalid-network" : "successful"}',
+        () {
+          late Directory legacyTemporary,
+              legacyApp,
+              legacyState,
+              legacyWork,
+              legacyInspection;
+          final legacyHost = _NativeBoundary();
+          late Map<String, String> originals;
+          late List<String> selectors;
+          late File kernel, initrd, disk;
+          var active = 0;
+          var retain = false;
+          var enteredDoctor = false;
+          setUpAll(() async {
+            active++;
+            activeRetirementChecks++;
+            try {
+              legacyTemporary = Directory(
+                await (await Directory(
+                  '/private/tmp',
+                ).createTemp('gvm-legacy-validation-')).resolveSymbolicLinks(),
+              );
+              imageFileMode(legacyTemporary.path, 0x1c0);
+              legacyApp = Directory('${legacyTemporary.path}/GaoVM.app');
+              final candidate = Directory(
+                '${legacyTemporary.path}/Candidate.app',
+              );
+              await _fixture(legacyApp);
+              await _fixture(candidate);
+              legacyState = await Directory(
+                '${legacyTemporary.path}/state',
+              ).create();
+              legacyWork = await Directory(
+                '${legacyTemporary.path}/work',
+              ).create();
+              final inspection = await Directory(
+                '${legacyTemporary.path}/publication-inspection',
+              ).create();
+              legacyInspection = await Directory(
+                '${legacyTemporary.path}/validation-inspection',
+              ).create();
+              for (final directory in [
+                legacyState,
+                legacyWork,
+                inspection,
+                legacyInspection,
+              ])
+                imageFileMode(directory.path, 0x1c0);
+              kernel = await File(
+                '${legacyTemporary.path}/kernel',
+              ).writeAsString('original kernel bytes');
+              initrd = await File(
+                '${legacyTemporary.path}/initrd',
+              ).writeAsString('original initrd bytes');
+              disk = await File(
+                '${legacyTemporary.path}/disk.raw',
+              ).writeAsString('original guest-mutated disk');
+              for (final file in [kernel, initrd, disk]) {
+                imageFileMode(file.path, 0x180);
+              }
+              final config = {
+                'cpu': 2,
+                'memory': 268435456,
+                'boot': {
+                  'loader': 'linux',
+                  'kernelPath': kernel.path,
+                  'initrdPath': initrd.path,
+                  'commandLine': 'console=hvc0',
+                },
+                'disk': {'path': disk.path, 'sizeMiB': 8192},
+                'network': {'mode': invalidNetwork ? 'unsupported' : 'shared'},
+                'graphics': {'enabled': false, 'width': 1280, 'height': 800},
+              };
+              originals = {
+                'config.json': jsonEncode(config),
+                'pending_config.json': jsonEncode({...config, 'cpu': 3}),
+                'desired_state.json': jsonEncode({'desired': 'stopped'}),
+                'daemon_state.json': jsonEncode({'actual': 'stopped'}),
+                'unknown-data': 'retain original legacy bytes',
+              };
+              for (final entry in originals.entries) {
+                final file = await File(
+                  '${legacyState.path}/${entry.key}',
+                ).writeAsString(entry.value);
+                imageFileMode(file.path, 0x180);
+              }
+              selectors = [
+                '--app',
+                legacyApp.path,
+                '--state-dir',
+                legacyState.path,
+                '--work-dir',
+                legacyWork.path,
+                '--bundle-id',
+                'org.gaovm.tests.Release',
+                '--old-version',
+                '0.1.0',
+                '--new-version',
+                '0.1.0',
+                '--team-id',
+                'ABCDEFGHIJ',
+              ];
+              final published = await runMacOsColdPublication(
+                [
+                  'publish-upgrade',
+                  ...selectors,
+                  '--candidate-app',
+                  candidate.path,
+                  '--inspection-dir',
+                  inspection.path,
+                ],
+                host: legacyHost,
+                observer: MacOsOpenReferences(
+                  command: (_, _) async => ProcessResult(pid, 1, '', ''),
+                ),
+                inventory: (_) async => DriverInventorySnapshot(
+                  processes: [],
+                  unresolvedProcessIds: [],
+                ),
+              );
+              expect(published['observed_catalog_schema'], isNull);
+              expect(
+                await File('${legacyState.path}/gaovm.db').exists(),
+                false,
+              );
+            } catch (_) {
+              retain = true;
+              rethrow;
+            } finally {
+              activeRetirementChecks--;
+              active--;
+            }
+          });
+          tearDownAll(() async {
+            if (retain || active != 0 || legacyHost.retainInputs) {
+              throw StateError(
+                'retain legacy validation fixture ${legacyTemporary.path}',
+              );
+            }
+            await legacyTemporary.delete(recursive: true);
+          });
+          Future<Map<String, Object?>> validate({Directory? inspection}) =>
+              runMacOsCandidateValidation(
+                [
+                  'validate-upgrade',
+                  ...selectors,
+                  '--inspection-dir',
+                  (inspection ?? legacyInspection).path,
+                  '--catalog-schema',
+                  '0',
+                ],
+                host: legacyHost,
+                currentExecutable: () async =>
+                    '${legacyApp.path}/Contents/MacOS/gaovmd',
+                doctorHost: _ValidationDoctorHost(() async {
+                  enteredDoctor = true;
+                }),
+                observer: MacOsOpenReferences(
+                  command: (_, _) async => ProcessResult(pid, 1, '', ''),
+                ),
+                inventory: (path) async => DriverInventorySnapshot(
+                  processes: path == '${legacyApp.path}/Contents/MacOS/gaovmd'
+                      ? [
+                          DriverProcessIdentity(
+                            pid: pid,
+                            uid: 501,
+                            executablePath: path,
+                            startedAtMicroseconds: 1,
+                            pidVersion: 1,
+                          ),
+                        ]
+                      : [],
+                  unresolvedProcessIds: [],
+                ),
+              );
+          if (!invalidNetwork)
+            test(
+              'migrates legacy inputs without changing the retained rollback pair',
+              () async {
+                active++;
+                activeRetirementChecks++;
+                MaintenanceTree? pair;
+                try {
+                  pair = await MaintenanceTree.open(
+                    Directory('${legacyWork.path}/preparation'),
+                  );
+                  final originalPair = await pair.capture(nativeMetadata: true);
+                  final report = await validate();
+                  expect(enteredDoctor, true);
+                  expect(report['phase'], 'candidate_validated');
+                  expect(report['applied_catalog_schema'], 21);
+                  final ids = report['catalog_identity'] as Map;
+                  expect(ids['vm_ids'], hasLength(1));
+                  expect(ids['image_ids'], hasLength(2));
+                  expect(ids['operation_ids'], hasLength(1));
+                  final reader = await GaoVmDatabase.openReadOnly(
+                    '${legacyState.path}/gaovm.db',
+                  );
+                  try {
+                    final vm = (await SqliteVmRepository(reader).list()).single;
+                    expect(
+                      vm.metadata.id.value,
+                      (ids['vm_ids'] as List).single,
+                    );
+                    expect(vm.metadata.name, 'migrated-default');
+                    expect(vm.spec.cpu, 3);
+                    expect(vm.status.desiredState, DesiredState.stopped);
+                    expect(vm.status.phase, VmPhase.stopped);
+                    expect(
+                      vm.spec.disks.single.source,
+                      ExternalDiskSource(disk.path),
+                    );
+                  } finally {
+                    reader.close();
+                  }
+                  await pair.verify(originalPair, nativeMetadata: true);
+                  for (final entry in originals.entries) {
+                    expect(
+                      await File(
+                        '${legacyState.path}/${entry.key}',
+                      ).readAsString(),
+                      entry.value,
+                    );
+                    expect(
+                      await File(
+                        '${legacyWork.path}/preparation/original-state/payload/${entry.key}',
+                      ).readAsString(),
+                      entry.value,
+                    );
+                    if (entry.key != 'unknown-data') {
+                      expect(
+                        await File(
+                          '${legacyState.path}/legacy-v1-backup/${entry.key}',
+                        ).readAsString(),
+                        entry.value,
+                      );
+                    }
+                  }
+                  expect(
+                    await File(
+                      '${legacyWork.path}/preparation/original-state/payload/gaovm.db',
+                    ).exists(),
+                    false,
+                  );
+                  expect(await kernel.readAsString(), 'original kernel bytes');
+                  expect(await initrd.readAsString(), 'original initrd bytes');
+                  expect(
+                    await disk.readAsString(),
+                    'original guest-mutated disk',
+                  );
+                  expect(report['background_workers_started'], false);
+                  expect(report['driver_sessions_started'], false);
+                  expect(report['committed'], false);
+                  await expectLater(
+                    MaintenanceStateFence.requireUnfenced(legacyState),
+                    throwsA(isA<MaintenanceFenceActive>()),
+                  );
+                } catch (_) {
+                  retain = true;
+                  rethrow;
+                } finally {
+                  pair?.close();
+                  activeRetirementChecks--;
+                  active--;
+                }
+              },
+              timeout: const Timeout(Duration(minutes: 8)),
+            );
+          if (invalidNetwork)
+            test(
+              'retains a real migration failure and refuses a blind repeat',
+              () async {
+                active++;
+                activeRetirementChecks++;
+                MaintenanceTree? pair, changedState, retainedWork;
+                try {
+                  pair = await MaintenanceTree.open(
+                    Directory('${legacyWork.path}/preparation'),
+                  );
+                  final originalPair = await pair.capture(nativeMetadata: true);
+                  await expectLater(
+                    validate(),
+                    throwsA(
+                      isA<ColdPublicationFailure>()
+                          .having(
+                            (error) => error.stage,
+                            'stage',
+                            'controlled_validation',
+                          )
+                          .having(
+                            (error) => error.cause,
+                            'cause',
+                            isA<FormatException>().having(
+                              (error) => error.message,
+                              'reason',
+                              'unsupported legacy network mode',
+                            ),
+                          ),
+                    ),
+                  );
+                  expect(enteredDoctor, false);
+                  expect(
+                    await File(
+                      '${legacyWork.path}/validation/intent.json',
+                    ).exists(),
+                    true,
+                  );
+                  expect(
+                    await FileSystemEntity.type(
+                      '${legacyWork.path}/validation/completed',
+                      followLinks: false,
+                    ),
+                    FileSystemEntityType.notFound,
+                  );
+                  expect(
+                    await FileSystemEntity.type(
+                      '${legacyState.path}/run/api.sock',
+                      followLinks: false,
+                    ),
+                    FileSystemEntityType.notFound,
+                  );
+                  final reader = await GaoVmDatabase.openReadOnly(
+                    '${legacyState.path}/gaovm.db',
+                  );
+                  try {
+                    expect(await SqliteVmRepository(reader).list(), isEmpty);
+                    expect(
+                      await ImageStore(
+                        reader,
+                        Directory('${legacyState.path}/images'),
+                      ).list(),
+                      hasLength(2),
+                    );
+                  } finally {
+                    reader.close();
+                  }
+                  await pair.verify(originalPair, nativeMetadata: true);
+                  for (final entry in originals.entries) {
+                    expect(
+                      await File(
+                        '${legacyState.path}/${entry.key}',
+                      ).readAsString(),
+                      entry.value,
+                    );
+                  }
+                  expect(await kernel.readAsString(), 'original kernel bytes');
+                  expect(await initrd.readAsString(), 'original initrd bytes');
+                  expect(
+                    await disk.readAsString(),
+                    'original guest-mutated disk',
+                  );
+                  await expectLater(
+                    MaintenanceStateFence.requireUnfenced(legacyState),
+                    throwsA(isA<MaintenanceFenceActive>()),
+                  );
+                  changedState = await MaintenanceTree.open(legacyState);
+                  retainedWork = await MaintenanceTree.open(legacyWork);
+                  final stateBeforeRetry = await changedState.capture(
+                    nativeMetadata: true,
+                  );
+                  final workBeforeRetry = await retainedWork.capture(
+                    nativeMetadata: true,
+                  );
+                  final fresh = await Directory(
+                    '${legacyTemporary.path}/repeat-inspection',
+                  ).create();
+                  imageFileMode(fresh.path, 0x1c0);
+                  final executions = legacyHost.executedRoles.length;
+                  await expectLater(
+                    validate(inspection: fresh),
+                    throwsA(
+                      isA<ColdPublicationFailure>()
+                          .having(
+                            (error) => error.stage,
+                            'stage',
+                            'candidate_admission',
+                          )
+                          .having(
+                            (error) => error.cause,
+                            'cause',
+                            isA<FormatException>().having(
+                              (error) => error.message,
+                              'reason',
+                              'unknown, missing or partial maintenance work; retain for investigation',
+                            ),
+                          ),
+                    ),
+                  );
+                  expect(legacyHost.executedRoles.length, executions);
+                  expect(enteredDoctor, false);
+                  expect(await fresh.list().toList(), isEmpty);
+                  await changedState.verify(
+                    stateBeforeRetry,
+                    nativeMetadata: true,
+                  );
+                  await retainedWork.verify(
+                    workBeforeRetry,
+                    nativeMetadata: true,
+                  );
+                } catch (_) {
+                  retain = true;
+                  rethrow;
+                } finally {
+                  retainedWork?.close();
+                  changedState?.close();
+                  pair?.close();
+                  activeRetirementChecks--;
+                  active--;
+                }
+              },
+              timeout: const Timeout(Duration(minutes: 8)),
+            );
+        },
+        timeout: const Timeout(Duration(minutes: 8)),
+      );
+    }
+
     group('candidate validation', () {
       late Directory publishedTemporary,
           publishedApp,

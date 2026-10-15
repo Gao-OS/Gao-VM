@@ -5,10 +5,10 @@ accepted [cold upgrade workflow](proposals/MACOS_UPGRADE_ROLLBACK.md). It is not
 normal activation or an upgrade commit. Ordinary daemon admission still rejects
 the persistent startup fence; ordinary startup/worker policy is unchanged.
 
-The full candidate-validation command passes against a private, populated
-schema-21 fixture, including retained post-validation state and its sealed
-completion record. Native identity/signature/service/ARM64 boundaries remain
-fixtures; this is not installed native acceptance or a complete upgrade.
+The full candidate-validation command passes against private populated schema-21
+and pre-catalog legacy fixtures, including retained post-validation state and
+its sealed completion record. Native identity/signature/service/ARM64 boundaries
+remain fixtures; this is not installed native acceptance or a complete upgrade.
 Earlier timed-out inputs remain retained. See the current
 [acceptance ledger](MVP_ACCEPTANCE.md).
 
@@ -147,11 +147,25 @@ fixtures reject missing/unversioned/changed self identity, other/unresolved
 daemons and live/unresolved drivers before migration or validation-intent writes.
 These fixtures do not attest actual native process identity or VZ/Guest execution.
 
+The pre-catalog fixture has no source database. Cold publication independently
+reports a missing catalog, then candidate validation imports the original Linux
+kernel/initrd and migrates exactly one stopped VM with the pending CPU setting.
+Original JSON inputs, their legacy backups, unknown private data and external
+disk bytes remain intact. The complete pre-upgrade app/state rollback pair is
+unchanged and its state snapshot still has no catalog.
+
+A real unsupported legacy network mode fails controlled migration after the
+boot images have been imported. The partial catalog, validation intent, startup
+fence and original rollback pair remain; no completion record or API listener
+appears. A blind repeat is refused before native component execution or new
+inspection output, with both persistent state and work manifests unchanged.
+This is one migration-error checkpoint, not the complete crash/recovery matrix.
+
 This candidate-only composition is not a production-ready upgrade transaction.
 An independently verified outside-app launcher, explicit cold validation
 recovery/commit, activation and paired whole-state/app rollback remain unfinished.
-Historical/pre-catalog migration through the new composition and its complete
-failure/crash/low-disk matrix also need dedicated integration evidence. A green
+Historical nonzero-schema migration through the new composition and the complete
+failure/crash/low-disk matrix still need dedicated integration evidence. A green
 diagnostic report is not product readiness or VZ/Guest execution. First install
 and native lifecycle acceptance remain unfinished; Apple Silicon/VZ/GaoOS
 execution remains assigned to the user.

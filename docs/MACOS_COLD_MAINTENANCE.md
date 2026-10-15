@@ -144,10 +144,13 @@ revalidates the same candidate without replacing it. No automatic undo occurs.
 
 ## Candidate-only validation
 
-The published-candidate integration passes with a private, populated schema-21
-catalog and real managed files, restricted HTTP UDS and retained snapshots.
-Signature/service/ARM64/process boundaries are fixtures, not an installed native
-upgrade result. Earlier timed-out inputs remain retained; see the
+The published-candidate integration passes with private populated schema-21 and
+pre-catalog legacy state, real managed files, restricted HTTP UDS and retained
+snapshots. Legacy migration preserves the complete pre-upgrade rollback pair,
+original JSON and external disk bytes. An unsupported legacy network mode keeps
+partial migration output and refuses a blind repeat without further state/work
+changes. Signature/service/ARM64/process boundaries are fixtures, not an
+installed native upgrade result. Earlier timed-out inputs remain retained; see the
 [acceptance ledger](MVP_ACCEPTANCE.md). The complete upgrade transaction is still
 unfinished.
 
