@@ -46,6 +46,8 @@ var _memoryDatabaseSequence = 0;
 final class GaoVmDatabase {
   GaoVmDatabase._(this._database, this._transactionGate);
 
+  static const latestSchemaVersion = _latestSchemaVersion;
+
   static Future<GaoVmDatabase> open(
     String path, {
     Duration busyTimeout = const Duration(seconds: 5),

@@ -1,6 +1,6 @@
 import Foundation
 
-enum ServiceAction: String {
+enum ServiceAction: String, CaseIterable {
   case status, register, unregister
 }
 

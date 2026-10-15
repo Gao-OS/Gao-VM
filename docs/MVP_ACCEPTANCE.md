@@ -46,9 +46,10 @@ release publication or remote push is authorized by this ledger.
    install/update/uninstall and failed-upgrade rollback workflow. The plan does
    not require automatic rollback; the user accepted the [explicit cold operator
    lifecycle](proposals/MACOS_UPGRADE_ROLLBACK.md) on 2026-10-15, not automatic
-   orchestration. Its
-   component/version, writer-fencing, whole-state rollback and native acceptance
-   work packages remain unimplemented, not waived by the proposal.
+   orchestration. [Executable component probes](COMPONENT_PROBES.md) and internal
+   role/contract compatibility checks now provide a tested prerequisite. The
+   complete signed-release inspector, cold boundary, writer fencing, whole-state
+   rollback and native acceptance remain unfinished, not waived by the proposal.
 
 These are not all interchangeable with “tests not run”. In particular, a green
 native boot would not itself complete Guest/TestRun acceptance, prove installed
@@ -440,3 +441,32 @@ format checks passed. These checks include existing compiled CLI launch cases,
 but are not a new daemon/Swift/Guest matrix or installed/native acceptance run.
 The unrelated UI lockfile is unchanged. The cold upgrade transaction remains
 implementation work, not a passed gate.
+
+## 2026-10-15 executable component evidence checkpoint
+
+On top of `52d146e`, all four product entry points implement the standalone
+read-only `--component-info` probe before state/runtime/service creation. The
+[diagnostic contract and limits](COMPONENT_PROBES.md) distinguish actual component
+roles/versions from bundle metadata, current database state and authenticated
+runtime negotiation. Bounded subprocess capture confirms its own child's exit;
+owned-file probes bind the parsed role to observed executable SHA-256 bytes.
+Internal compatibility checks reject missing roles, mismatched versions/contracts,
+unsupported catalog versions and development-only capabilities used as default
+requirements. Frozen public/driver schemas and normal authentication are unchanged.
+
+Local verification passed:
+
+- Models: **103** tests; CLI: **168** tests, both unfiltered with zero skips.
+- Daemon: **1,468** passed, **1** platform skip, zero failures. The same three
+  installed/native-process exclusions documented above remain excluded; none is
+  counted as passing. The Rust host publication fixture was enabled.
+- Swift driver: **146** tests; service helper: **17**, zero failures. These are
+  Intel process/queue/component checks, not VZ or Service Management activation.
+- Dart analysis and pinned formatting, changed Swift strict formatting, public
+  JSON Schema/OpenAPI validation and `git diff --check` passed.
+
+Dart reports and the complete driver log are under
+`/private/tmp/gaovm-component-probe.soVj3m/`; all Dart reports ended with
+`success: true`. The UI lockfile remains unchanged. Probe/compatibility fixtures
+do not certify a signed product release, applied catalog version, installed
+upgrade, whole-state rollback, Guest readiness or native lifecycle acceptance.

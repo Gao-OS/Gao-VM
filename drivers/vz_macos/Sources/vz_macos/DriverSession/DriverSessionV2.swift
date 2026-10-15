@@ -71,16 +71,19 @@ final class DriverSessionV2 {
   private var fatalError: Error?
   private var terminalExit = DriverTerminalExitGate()
 
-  private static let requiredCapabilities: [DriverProtocolV2.Capability] = [
+  static let requiredCapabilities: [DriverProtocolV2.Capability] = [
     .runtimeConfigure, .runtimeStart, .runtimeStop, .runtimeKill, .runtimeStatus,
   ]
-  private static let runtimeCapabilities =
+  static let runtimeCapabilities =
     requiredCapabilities + [
       DriverProtocolV2.Capability.displayOpen, .displayClose, .displayStatus, .consoleStatus,
     ]
 
+  static let developmentCapabilities: [DriverProtocolV2.Capability] = [.guestStatus]
+
   private var offeredCapabilities: [DriverProtocolV2.Capability] {
-    Self.runtimeCapabilities + (config.guestDevelopmentAcceptance ? [.guestStatus] : [])
+    Self.runtimeCapabilities
+      + (config.guestDevelopmentAcceptance ? Self.developmentCapabilities : [])
   }
 
   init(config: Config, logger: RotatingLogger) {
@@ -183,7 +186,7 @@ final class DriverSessionV2 {
       authToken: config.authToken,
       offeredCapabilities: offeredCapabilities,
       requiredCapabilities: Self.requiredCapabilities,
-      implementation: .init(name: "gaovm-driver-vz", version: "0.1.0"))
+      implementation: .init(name: "gaovm-driver-vz", version: DriverComponentInfo.version))
   }
 
   private func handle(_ message: DriverProtocolV2.Message) throws {

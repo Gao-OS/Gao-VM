@@ -5,6 +5,12 @@ import Foundation
 struct GaoVMService {
   static func main() async {
     let arguments = Array(CommandLine.arguments.dropFirst())
+    if arguments == ["--component-info"] {
+      do {
+        try FileHandle.standardOutput.write(contentsOf: ServiceComponentInfo.encoded() + Data([10]))
+      } catch { exit(1) }
+      return
+    }
     if arguments == ["--help"] {
       print(
         """

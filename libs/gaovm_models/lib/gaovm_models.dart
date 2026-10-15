@@ -3,6 +3,7 @@ library;
 export 'src/artifact.dart';
 export 'src/common.dart'
     show Architecture, ErrorCode, ResourceType, VmPhase, parseVmPhase;
+export 'src/component_info.dart';
 export 'src/doctor.dart';
 export 'src/event.dart';
 export 'src/image.dart';

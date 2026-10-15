@@ -1,10 +1,16 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:gaovmd/gaovmd.dart';
 import 'package:gaovmd/src/daemon_launch_configuration.dart';
+import 'package:gaovmd/src/daemon_component_info.dart';
 
 Future<void> main(List<String> args) async {
+  if (args.length == 1 && args.single == '--component-info') {
+    stdout.writeln(jsonEncode(daemonComponentInfo().toJson()));
+    return;
+  }
   if (args.contains('--help')) {
     stdout.writeln(
       'Usage: gaovmd [--state-dir PATH] [--socket-path PATH] '

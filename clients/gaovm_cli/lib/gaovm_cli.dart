@@ -32,6 +32,19 @@ Future<int> runCli(
   }
 
   try {
+    if (args.length == 1 && args.single == '--component-info') {
+      write(
+        jsonEncode(
+          ComponentInfo(
+            role: ComponentRole.cli,
+            version: gaovmImplementationVersion,
+            publicApi: 'v1',
+            vmSpec: vmApiVersion,
+          ).toJson(),
+        ),
+      );
+      return 0;
+    }
     final options = _Options.parse(args, environment ?? Platform.environment);
     if (options.help) {
       write(

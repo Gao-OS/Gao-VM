@@ -139,6 +139,13 @@ func parseArgs(_ args: [String]) throws -> DriverLaunchMode {
       guestDevelopmentAcceptance: guestDevelopmentAcceptance ?? false))
 }
 
+if Array(CommandLine.arguments.dropFirst()) == ["--component-info"] {
+  do {
+    try FileHandle.standardOutput.write(contentsOf: DriverComponentInfo.encoded() + Data([10]))
+  } catch { Foundation.exit(1) }
+  Foundation.exit(0)
+}
+
 do {
   let launch = try parseArgs(CommandLine.arguments)
   let logger = launch.makeLogger()

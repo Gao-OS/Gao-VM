@@ -53,9 +53,12 @@ final class DriverProtocolV2 {
         'driver_generation': correlation.driverGeneration,
         'operation_id': null,
         'auth_token': authToken,
-        'offered_capabilities': _encodeCapabilities(offered),
-        'required_capabilities': _encodeCapabilities(required),
-        'implementation': {'name': 'gaovmd', 'version': '0.1.0'},
+        'offered_capabilities': capabilityNames(offered),
+        'required_capabilities': capabilityNames(required),
+        'implementation': {
+          'name': 'gaovmd',
+          'version': gaovmImplementationVersion,
+        },
       },
     };
   }
@@ -143,7 +146,7 @@ final class DriverProtocolV2 {
       'vm_id': correlation.vmId.value,
       'driver_generation': correlation.driverGeneration,
       'operation_id': null,
-      'accepted_capabilities': _encodeCapabilities(accepted),
+      'accepted_capabilities': capabilityNames(accepted),
     },
   };
 
@@ -532,7 +535,7 @@ final class DriverProtocolV2 {
     },
   };
 
-  static List<String> _encodeCapabilities(DriverCapabilities value) =>
+  static List<String> capabilityNames(DriverCapabilities value) =>
       value.values.map(_capabilityName).toList()..sort();
 
   static DriverCapabilities _decodeCapabilities(Object? value) {

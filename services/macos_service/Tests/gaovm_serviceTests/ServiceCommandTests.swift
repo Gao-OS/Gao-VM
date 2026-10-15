@@ -5,6 +5,18 @@ import XCTest
 @testable import gaovm_service
 
 final class ServiceCommandTests: XCTestCase {
+  func testComponentProbeRunsWithoutBundleHomeOrServiceAccess() throws {
+    let result = try runHelper(["--component-info"], environment: [:])
+    XCTAssertEqual(result.status, 0, result.output + result.error)
+    let json = try result.json
+    XCTAssertEqual(json["format"] as? String, "gaovm.component.v1")
+    XCTAssertEqual(json["role"] as? String, "service")
+    XCTAssertEqual(json["version"] as? String, "0.1.0")
+    XCTAssertTrue(json["catalog_schema"] is NSNull)
+    XCTAssertEqual(json["service_actions"] as? [String], ["register", "status", "unregister"])
+    XCTAssertEqual(result.error, "")
+  }
+
   func testHelperMustBeHardenedAndHaveNoEntitlementException() throws {
     for hardened in [false, true] {
       let fixture = try SignedServiceBundle()
