@@ -26,6 +26,7 @@ void main() {
   late _NativeBoundary host;
   _RealNativeBoundary? realHost;
   var retainInputs = false;
+  var activeRetirementChecks = 0;
   setUp(() async {
     final created = await Directory.systemTemp.createTemp(
       'gvm-release-inspection-',
@@ -39,7 +40,9 @@ void main() {
     retainInputs = false;
   });
   tearDown(() async {
-    if (realHost?.retainInputs == true || retainInputs) {
+    if (realHost?.retainInputs == true ||
+        retainInputs ||
+        activeRetirementChecks != 0) {
       throw StateError(
         'retaining inputs for unconfirmed native child: ${temporary.path}',
       );
@@ -382,6 +385,533 @@ void main() {
     },
     skip: !Platform.isMacOS,
   );
+  group('native cold app retirement', () {
+    late Directory state;
+    late OwnedImageDirectory storage;
+    late ColdStateLease lease;
+    late MaintenanceStateFence fence;
+    late MacOsColdStateHost original;
+    final recoveredHosts = <MacOsColdStateHost>[];
+    final inventoryPaths = <String>[];
+    String? referencedApp;
+    String? unresolvedExecutable;
+    Future<DriverInventorySnapshot> inventory(String path) async {
+      inventoryPaths.add(path);
+      return DriverInventorySnapshot(
+        processes: [],
+        unresolvedProcessIds: unresolvedExecutable == path ? [pid + 51] : [],
+      );
+    }
+
+    MacOsOpenReferences observer() => MacOsOpenReferences(
+      command: (_, arguments) async => ProcessResult(
+        pid,
+        referencedApp == arguments.last ? 0 : 1,
+        referencedApp == arguments.last ? 'p${pid + 50}\x00ftxt\x00\n' : '',
+        '',
+      ),
+    );
+    Future<T> check<T>(Future<T> Function() action) async {
+      activeRetirementChecks++;
+      try {
+        return await action();
+      } finally {
+        activeRetirementChecks--;
+      }
+    }
+
+    Future<Map<String, Object?>> retire() async {
+      final tree = await MaintenanceTree.open(state);
+      try {
+        final manifest = await tree.capture(nativeMetadata: true);
+        return await lease.retireApp(
+          fence,
+          storage,
+          'old',
+          verifyPreparedInputs: () =>
+              tree.verify(manifest, nativeMetadata: true),
+        );
+      } finally {
+        tree.close();
+      }
+    }
+
+    Future<MacOsColdStateHost> reopen({
+      String version = '0.1.0',
+      String bundle = 'org.gaovm.tests.Release',
+      String team = 'ABCDEFGHIJ',
+      int schema = 0,
+    }) async {
+      final recovered = await MacOsColdStateHost.openRetired(
+        app,
+        state,
+        fence,
+        storage,
+        'old',
+        bundleIdentifier: bundle,
+        version: version,
+        teamIdentifier: team,
+        catalogSchema: schema,
+        host: host,
+        observer: observer(),
+        inventory: inventory,
+      );
+      recoveredHosts.add(recovered);
+      return recovered;
+    }
+
+    Future<void> assertStateOwner() async {
+      final root = await OwnedImageDirectory.open(state);
+      try {
+        expect(
+          await DaemonOwnership.tryAcquireForMaintenance(root, fence),
+          isNull,
+        );
+      } finally {
+        root.close();
+      }
+    }
+
+    setUp(() async {
+      inventoryPaths.clear();
+      referencedApp = null;
+      unresolvedExecutable = null;
+      state = await Directory('${temporary.path}/state').create();
+      imageFileMode(state.path, 0x1c0);
+      await File(
+        '${state.path}/unknown-data',
+      ).writeAsString('keep original state');
+      imageFileMode('${state.path}/unknown-data', 0x180);
+      final directory = await Directory(
+        '${temporary.path}/retirements',
+      ).create();
+      imageFileMode(directory.path, 0x1c0);
+      storage = await OwnedImageDirectory.open(directory);
+      original = await MacOsColdStateHost.open(
+        app,
+        bundleIdentifier: 'org.gaovm.tests.Release',
+        version: '0.1.0',
+        teamIdentifier: 'ABCDEFGHIJ',
+        catalogSchema: 0,
+        host: host,
+        observer: observer(),
+        inventory: inventory,
+      );
+      lease = await ColdStateLease.acquire(
+        state,
+        bundleIdentifier: 'org.gaovm.tests.Release',
+        host: original,
+      );
+      fence = await MaintenanceStateFence.begin(lease);
+    });
+    tearDown(() async {
+      if (activeRetirementChecks != 0) {
+        retainInputs = true;
+        return;
+      }
+      lease.close();
+      fence.close();
+      original.close();
+      for (final recovered in recoveredHosts) {
+        recovered.close();
+      }
+      recoveredHosts.clear();
+      storage.close();
+    });
+
+    test(
+      'retired app recovery reacquires the original state lock under its fence',
+      () => check(() async {
+        await retire();
+        lease.close();
+        fence.close();
+        original.close();
+        fence = await MaintenanceStateFence.open(state);
+        final recovered = await MacOsColdStateHost.openRetired(
+          app,
+          state,
+          fence,
+          storage,
+          'old',
+          bundleIdentifier: 'org.gaovm.tests.Release',
+          version: '0.1.0',
+          teamIdentifier: 'ABCDEFGHIJ',
+          catalogSchema: 0,
+          host: host,
+          observer: observer(),
+          inventory: inventory,
+        );
+        recoveredHosts.add(recovered);
+        lease = await ColdStateLease.acquire(
+          state,
+          bundleIdentifier: 'org.gaovm.tests.Release',
+          host: recovered,
+          maintenanceFence: fence,
+        );
+        expect(lease.installationPath, app.path);
+        expect(lease.appPath, '${storage.path}/old/GaoVM.app');
+        inventoryPaths.clear();
+        await lease.verify();
+        expect(inventoryPaths.toSet(), {
+          '${app.path}/Contents/MacOS/gaovmd',
+          '${app.path}/Contents/Helpers/gaovm-driver-vz',
+          '${lease.appPath}/Contents/MacOS/gaovmd',
+          '${lease.appPath}/Contents/Helpers/gaovm-driver-vz',
+        });
+        final root = await OwnedImageDirectory.open(state);
+        try {
+          expect(
+            await DaemonOwnership.tryAcquireForMaintenance(root, fence),
+            isNull,
+          );
+        } finally {
+          root.close();
+        }
+        expect(
+          await File('${state.path}/unknown-data').readAsString(),
+          'keep original state',
+        );
+        await expectLater(
+          MaintenanceStateFence.requireUnfenced(state),
+          throwsA(isA<MaintenanceFenceActive>()),
+        );
+      }),
+      timeout: const Timeout(Duration(minutes: 2)),
+    );
+
+    test(
+      'last cold callback changing persistent state refuses retirement before app movement',
+      () => check(() async {
+        var changed = false;
+        host.onStatus = () async {
+          if (!changed &&
+              await File('${storage.path}/old/intent.json').exists()) {
+            changed = true;
+            await File(
+              '${state.path}/unknown-data',
+            ).writeAsString('late unknown state');
+          }
+        };
+        await expectLater(retire(), throwsA(isA<FormatException>()));
+        expect(changed, true);
+        expect(maintenancePathEntryExists(app.path), true);
+        expect(
+          maintenancePathEntryExists('${storage.path}/old/GaoVM.app'),
+          false,
+        );
+        expect(await File('${storage.path}/old/intent.json').exists(), true);
+        expect(
+          await File('${state.path}/unknown-data').readAsString(),
+          'late unknown state',
+        );
+        await lease.verify();
+      }),
+      timeout: const Timeout(Duration(minutes: 2)),
+    );
+
+    test(
+      'a retired app reference refuses cold verification without releasing state ownership',
+      () => check(() async {
+        await retire();
+        referencedApp = lease.appPath;
+        await expectLater(
+          lease.verify(),
+          throwsA(
+            isA<ColdStateFailure>().having(
+              (e) => e.stage,
+              'stage',
+              'app_references',
+            ),
+          ),
+        );
+        final root = await OwnedImageDirectory.open(state);
+        try {
+          expect(
+            await DaemonOwnership.tryAcquireForMaintenance(root, fence),
+            isNull,
+          );
+        } finally {
+          root.close();
+        }
+        referencedApp = null;
+        await lease.verify();
+      }),
+      timeout: const Timeout(Duration(minutes: 2)),
+    );
+
+    test(
+      'a pending app retirement refuses close before its final native callback settles',
+      () => check(() async {
+        final reached = Completer<void>(), finish = Completer<void>();
+        host.onProbe = () async {
+          if (!maintenancePathEntryExists(app.path) && !reached.isCompleted) {
+            reached.complete();
+            await finish.future;
+          }
+        };
+        final moving = retire();
+        try {
+          await reached.future;
+          expect(lease.close, throwsStateError);
+          final root = await OwnedImageDirectory.open(state);
+          try {
+            expect(
+              await DaemonOwnership.tryAcquireForMaintenance(root, fence),
+              isNull,
+            );
+          } finally {
+            root.close();
+          }
+        } finally {
+          finish.complete();
+          await moving;
+        }
+        await lease.verify();
+      }),
+      timeout: const Timeout(Duration(minutes: 2)),
+    );
+
+    test(
+      'post-move inspection failure retains the state lock for typed in-process recovery',
+      () => check(() async {
+        host.onProbe = () async {
+          if (!maintenancePathEntryExists(app.path))
+            throw StateError('injected after app move');
+        };
+        await expectLater(retire(), throwsStateError);
+        expect(maintenancePathEntryExists(app.path), false);
+        expect(await File('${storage.path}/old/intent.json').exists(), true);
+        expect(
+          await File(
+            '${storage.path}/old/GaoVM.app/Contents/MacOS/gaovmd',
+          ).exists(),
+          true,
+        );
+        final root = await OwnedImageDirectory.open(state);
+        try {
+          expect(
+            await DaemonOwnership.tryAcquireForMaintenance(root, fence),
+            isNull,
+          );
+        } finally {
+          root.close();
+        }
+        host.onProbe = null;
+        final recovered = await MacOsColdStateHost.openRetired(
+          app,
+          state,
+          fence,
+          storage,
+          'old',
+          bundleIdentifier: 'org.gaovm.tests.Release',
+          version: '0.1.0',
+          teamIdentifier: 'ABCDEFGHIJ',
+          catalogSchema: 0,
+          host: host,
+          observer: observer(),
+          inventory: inventory,
+        );
+        recoveredHosts.add(recovered);
+        await lease.adoptRetiredApp(recovered, fence);
+        await lease.verify();
+        expect(lease.installationPath, app.path);
+        expect(lease.appPath, recovered.appPath);
+        expect(
+          await File('${state.path}/unknown-data').readAsString(),
+          'keep original state',
+        );
+      }),
+      timeout: const Timeout(Duration(minutes: 2)),
+    );
+
+    for (final retiredPath in [false, true]) {
+      for (final driver in [false, true]) {
+        test(
+          'unresolved ${driver ? 'driver' : 'daemon'} at ${retiredPath ? 'retired app' : 'missing original slot'} blocks verification',
+          () => check(() async {
+            await retire();
+            final path = retiredPath ? lease.appPath : lease.installationPath;
+            unresolvedExecutable = driver
+                ? '$path/Contents/Helpers/gaovm-driver-vz'
+                : '$path/Contents/MacOS/gaovmd';
+            await expectLater(
+              lease.verify(),
+              throwsA(
+                isA<ColdStateFailure>().having(
+                  (e) => e.stage,
+                  'stage',
+                  driver ? 'driver_processes' : 'daemon_processes',
+                ),
+              ),
+            );
+            await assertStateOwner();
+            unresolvedExecutable = null;
+            await lease.verify();
+          }),
+          timeout: const Timeout(Duration(minutes: 2)),
+        );
+      }
+    }
+
+    test(
+      'an occupied original slot is retained and never treated as a published candidate',
+      () => check(() async {
+        await retire();
+        await app.create();
+        imageFileMode(app.path, 0x1ed);
+        await File('${app.path}/foreign-data').writeAsString('do not replace');
+        final foreign = await OwnedImageDirectory.open(app);
+        try {
+          final identity = await foreign.maintenanceIdentity();
+          await expectLater(lease.verify(), throwsA(isA<FormatException>()));
+          await assertStateOwner();
+          lease.close();
+          final executions = host.executedRoles.length;
+          await expectLater(reopen(), throwsA(isA<FormatException>()));
+          expect(host.executedRoles.length, executions);
+          expect(await foreign.maintenanceIdentity(), identity);
+          expect(
+            await File('${app.path}/foreign-data').readAsString(),
+            'do not replace',
+          );
+          expect(
+            await File(
+              '${storage.path}/old/GaoVM.app/Contents/MacOS/gaovmd',
+            ).exists(),
+            true,
+          );
+        } finally {
+          foreign.close();
+        }
+      }),
+      timeout: const Timeout(Duration(minutes: 2)),
+    );
+
+    for (final mutation in [
+      'unknown_entry',
+      'intent_mode',
+      'intent_target',
+      'lock_content',
+      'missing_lock',
+      'workspace_mode',
+      'app_inode',
+    ]) {
+      test(
+        'retirement recovery refuses $mutation before executing any helper',
+        () => check(() async {
+          await retire();
+          final journal = '${storage.path}/old';
+          switch (mutation) {
+            case 'unknown_entry':
+              await File('$journal/foreign').writeAsString('keep me');
+            case 'intent_mode':
+              imageFileMode('$journal/intent.json', 0x180);
+            case 'intent_target':
+              final file = File('$journal/intent.json');
+              final value = jsonDecode(await file.readAsString()) as Map;
+              value['source_state'] = '/test-only/never-follow-journal-paths';
+              imageFileMode(file.path, 0x180);
+              await file.writeAsString('${jsonEncode(value)}\n');
+              imageFileMode(file.path, 0x100);
+            case 'lock_content':
+              await File(
+                '${storage.path}/.gaovm-app-retirement.lock',
+              ).writeAsString('unknown owner');
+            case 'missing_lock':
+              await File(
+                '${storage.path}/.gaovm-app-retirement.lock',
+              ).rename('${storage.path}/retained-lock');
+            case 'workspace_mode':
+              imageFileMode(journal, 0x1ed);
+            case 'app_inode':
+              await Directory(
+                '$journal/GaoVM.app',
+              ).rename('${storage.path}/retained-original.app');
+              await _fixture(Directory('$journal/GaoVM.app'));
+          }
+          await expectLater(
+            lease.verify(),
+            throwsA(
+              mutation == 'missing_lock'
+                  ? isA<FileSystemException>()
+                  : isA<FormatException>(),
+            ),
+          );
+          await assertStateOwner();
+          lease.close();
+          final executions = host.executedRoles.length;
+          await expectLater(
+            reopen(),
+            throwsA(
+              mutation == 'missing_lock'
+                  ? isA<FileSystemException>()
+                  : isA<FormatException>(),
+            ),
+          );
+          expect(host.executedRoles.length, executions);
+          expect(await File('$journal/intent.json').exists(), true);
+          expect(
+            await File('${state.path}/unknown-data').readAsString(),
+            'keep original state',
+          );
+          expect(maintenancePathEntryExists(app.path), false);
+          if (mutation == 'missing_lock') {
+            expect(
+              maintenancePathEntryExists(
+                '${storage.path}/.gaovm-app-retirement.lock',
+              ),
+              false,
+            );
+            expect(await File('${storage.path}/retained-lock').exists(), true);
+          }
+          if (mutation == 'app_inode')
+            expect(
+              await Directory('${storage.path}/retained-original.app').exists(),
+              true,
+            );
+        }),
+        timeout: const Timeout(Duration(minutes: 2)),
+      );
+    }
+
+    for (final mismatch in ['version', 'bundle', 'team', 'catalog']) {
+      test(
+        'retirement recovery requires explicit matching $mismatch',
+        () => check(() async {
+          await retire();
+          lease.close();
+          final executions = host.executedRoles.length;
+          await expectLater(
+            reopen(
+              version: mismatch == 'version' ? '0.2.0' : '0.1.0',
+              bundle: mismatch == 'bundle'
+                  ? 'org.foreign.Release'
+                  : 'org.gaovm.tests.Release',
+              team: mismatch == 'team' ? 'KLMNOPQRST' : 'ABCDEFGHIJ',
+              schema: mismatch == 'catalog' ? 1 : 0,
+            ),
+            throwsA(isA<FormatException>()),
+          );
+          expect(host.executedRoles.length, executions);
+          final recovered = await reopen();
+          expect(recovered.installationPath, app.path);
+        }),
+        timeout: const Timeout(Duration(minutes: 2)),
+      );
+    }
+
+    test(
+      'retirement recovery cannot share a live namespace lock',
+      () => check(() async {
+        await retire();
+        await expectLater(reopen(), throwsStateError);
+        await assertStateOwner();
+        await lease.verify();
+      }),
+      timeout: const Timeout(Duration(minutes: 2)),
+    );
+  }, skip: !Platform.isMacOS);
+
   group('cold paired snapshots', () {
     late Directory state;
     late OwnedImageDirectory inspection;
@@ -419,6 +949,10 @@ void main() {
       );
     });
     tearDown(() async {
+      if (activeRetirementChecks != 0) {
+        retainInputs = true;
+        return;
+      }
       for (final child in children) {
         if (!await child.terminate()) retainInputs = true;
       }
@@ -472,7 +1006,9 @@ void main() {
 
     Future<(ColdStateSnapshot, MaintenanceStateFence)> guardedState() async {
       final fence = await MaintenanceStateFence.begin(lease);
-      addTearDown(fence.close);
+      addTearDown(() {
+        if (activeRetirementChecks == 0) fence.close();
+      });
       final prepared = await ColdStateSnapshot.prepare(
         lease,
         inspection,
@@ -482,7 +1018,9 @@ void main() {
         inventory: (_) async =>
             DriverInventorySnapshot(processes: [], unresolvedProcessIds: []),
       );
-      addTearDown(prepared.close);
+      addTearDown(() {
+        if (activeRetirementChecks == 0) prepared.close();
+      });
       return (prepared, fence);
     }
 
@@ -505,9 +1043,139 @@ void main() {
           command: (_, _) async => ProcessResult(pid, 1, '', ''),
         ),
       );
-      addTearDown(transaction.close);
+      addTearDown(() {
+        if (activeRetirementChecks == 0) transaction.close();
+      });
       return (prepared, fence, transaction);
     }
+
+    test(
+      'prepared upgrade retires the exact old app without releasing state ownership',
+      () async {
+        activeRetirementChecks++;
+        try {
+          lease.close();
+          var finalAppObservation = false;
+          host.onStatus = () async {
+            if (finalAppObservation && maintenancePathEntryExists(app.path)) {
+              throw StateError(
+                'native callback after final filesystem boundary',
+              );
+            }
+          };
+          final nativeHost = await MacOsColdStateHost.open(
+            app,
+            bundleIdentifier: 'org.gaovm.tests.Release',
+            version: '0.1.0',
+            teamIdentifier: 'ABCDEFGHIJ',
+            catalogSchema: 21,
+            host: host,
+            observer: MacOsOpenReferences(
+              command: (_, arguments) async {
+                if (arguments.last == app.path &&
+                    maintenancePathEntryExists(
+                      '${temporary.path}/retirements/old/intent.json',
+                    )) {
+                  finalAppObservation = true;
+                }
+                return ProcessResult(pid, 1, '', '');
+              },
+            ),
+            inventory: (_) async => DriverInventorySnapshot(
+              processes: [],
+              unresolvedProcessIds: [],
+            ),
+          );
+          addTearDown(() {
+            if (activeRetirementChecks == 0) nativeHost.close();
+          });
+          lease = await ColdStateLease.acquire(
+            state,
+            bundleIdentifier: 'org.gaovm.tests.Release',
+            host: nativeHost,
+          );
+          final (prepared, fence, transaction) = await fencedPreparation();
+          final retirementDirectory = await Directory(
+            '${temporary.path}/retirements',
+          ).create();
+          imageFileMode(retirementDirectory.path, 0x1c0);
+          final retirement = await OwnedImageDirectory.open(
+            retirementDirectory,
+          );
+          final source = await OwnedImageDirectory.open(app);
+          final stateRoot = await OwnedImageDirectory.open(state);
+          try {
+            final oldIdentity = await source.maintenanceIdentity();
+            final result = await transaction.retireOriginalApp(
+              retirement,
+              'old',
+            );
+            expect(result['phase'], 'old_app_retired');
+            expect(finalAppObservation, true);
+            expect(result['installed_candidate_published'], false);
+            expect(lease.installationPath, app.path);
+            expect(lease.appPath, '${retirement.path}/old/GaoVM.app');
+            expect(maintenancePathEntryExists(app.path), false);
+            final moved = await OwnedImageDirectory.open(
+              Directory(lease.appPath),
+            );
+            try {
+              expect(await moved.maintenanceIdentity(), oldIdentity);
+            } finally {
+              moved.close();
+            }
+            expect(
+              await DaemonOwnership.tryAcquireForMaintenance(stateRoot, fence),
+              isNull,
+            );
+            await lease.verify();
+            await transaction.verify();
+            expect(
+              await File('${state.path}/unknown-data').readAsString(),
+              'preserve state',
+            );
+            expect(
+              await File(
+                '${transaction.path}/original-app/payload.app/Contents/Resources/pair-only',
+              ).readAsString(),
+              'preserve unknown app resource',
+            );
+            await expectLater(
+              MaintenanceStateFence.requireUnfenced(state),
+              throwsA(isA<MaintenanceFenceActive>()),
+            );
+            transaction.close();
+            final reopened = await ColdUpgradePreparation.open(
+              prepared,
+              fence,
+              backups,
+              'upgrade',
+              oldVersion: '0.1.0',
+              newVersion: '0.1.0',
+              teamIdentifier: 'ABCDEFGHIJ',
+              host: host,
+              observer: MacOsOpenReferences(
+                command: (_, _) async => ProcessResult(pid, 1, '', ''),
+              ),
+            );
+            try {
+              // The original checkpoint stays immutable, not a commit record.
+              expect(reopened.toJson()['phase'], 'candidate_prepared');
+              expect(reopened.toJson()['installed_candidate_published'], false);
+            } finally {
+              reopened.close();
+            }
+          } finally {
+            source.close();
+            stateRoot.close();
+            retirement.close();
+          }
+        } finally {
+          activeRetirementChecks--;
+        }
+      },
+      timeout: const Timeout(Duration(minutes: 3)),
+    );
 
     test(
       'fenced candidate preparation journals matching old state without installing it',
@@ -1668,7 +2336,7 @@ final class _NativeBoundary implements ReleaseInspectionHost {
   final extraEntitlements = <String, Object?>{};
   bool rejectSignature = false, nativeArm64 = true, runtimeFlag = true;
   String metadataTeam = 'ABCDEFGHIJ';
-  Future<void> Function()? onProbe;
+  Future<void> Function()? onProbe, onStatus;
   @override
   bool get canExecuteArm64 => nativeArm64;
   @override
@@ -1747,6 +2415,7 @@ final class _NativeBoundary implements ReleaseInspectionHost {
       expect(executable, endsWith('/Contents/MacOS/gaovm-service'));
       expect(verifiedFor(executable), 5);
       statusCalls++;
+      await onStatus?.call();
       output = jsonEncode({
         'action': 'status',
         'bundle_identifier': 'org.gaovm.tests.Release',

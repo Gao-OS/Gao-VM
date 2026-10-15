@@ -1040,3 +1040,72 @@ and data-preserving uninstall remain unfinished. Native fsync/crash/low-disk
 injection and full installed lifecycle acceptance are not proved by the new tests.
 No real installed app/state/service or remote ref was changed; no Apple Silicon,
 VZ/GaoOS, Swift/CI or whole-MVP pass is claimed.
+
+## 2026-10-16 old-app retirement and continuous cold ownership
+
+On top of `677dfe9`, [old-app retirement](MACOS_APP_RETIREMENT.md) now composes
+the prepared snapshot, original state kernel lock, typed persistent fence and
+bound directory move. It seals/fsyncs and publishes intent before moving the
+exact original app into a fixed private journal child, then freshly inspects
+the relocated signed release and adopts a new native observation host without
+closing/reacquiring state ownership. Original state, snapshots and candidate
+payloads are retained. The maintenance executable must remain outside moved
+trees; no service registration, stop, PID signal or activation is orchestrated.
+
+The fixed installation slot and observed retired-app path are separate. The
+original fence/state-inode rules are unchanged. Daemon/driver inventory checks
+both locations, including unresolved processes at an absent original slot;
+other processes' references to the retired app are blockers too. The original
+slot must remain absent: foreign contents are never inferred to be a candidate
+or overwritten. Pending retirement/adoption refuses lease close rather than
+dropping its actual kernel lock before native work settles.
+
+Explicit gap recovery verifies caller-selected targets/expectations, exact
+sealed records/entries, parent/workspace/app/state identities, complete native
+manifests and fresh signing/component/reference evidence before returning a
+typed host. Imported journal paths cannot select mutation targets. A new process
+must still reopen the typed state fence and acquire the real original state
+kernel lock; an existing failed mover can explicitly adopt the reverified host
+while retaining its old lock. Partial/intent-only pre-move output is not promoted,
+and an occupied slot or changed record/lock/inode refuses without repair.
+
+New red/green checks reproduced premature lease-close ownership loss, missing
+retired-app reference checks and late unknown state writes being accepted before
+movement. Final prepared-input reads cover full persistent state, held external
+dependencies, runtime, original app and independent checkpoint output after the
+last external callback. Review removed a legacy verifier whose internal context
+would invoke more native callbacks; the integrated test now asserts that no
+service callback occurs between the final app observation/file boundary and
+movement. The prepared checkpoint remains immutable and can be reopened after
+the old app moves; `candidate_prepared` is not installed/committed status.
+
+Verification: **547 tests across 36 files**, concurrency 1, zero failures/skips,
+terminal success and confirmed runner exit (`verified.jsonl`, 562.504 seconds).
+After the final callback-purity adjustment, the full affected release-inspection
+file was rerun: **88 passed**, zero failures/skips, terminal success and confirmed
+exit (`post-review.jsonl`, 333.627 seconds). Both reports are retained under
+`/private/tmp/gaovm-app-retirement.gVGDF0/`. These runs include **23 new checks**
+(22 native-boundary retirement checks plus prepared-state integration); they
+are not a new whole-daemon/default-concurrency pass. The same three installed/
+startup checks were explicitly filtered from the combined run and never started,
+not counted as passes/skips. Earlier broad daemon failures remain unresolved.
+
+The initial new integration test exceeded the ordinary 30-second limit; fixture
+cleanup raced its unfinished preparation. In-flight teardown guards now retain
+inputs/owners, and only the new longer integration/retirement checks declare
+their own lifecycle time limits; existing limits were not loosened. The final
+runs confirm completion before cleanup. Daemon analysis, pinned Dart 3.9.0
+formatting (**297 files**, zero changes), JSON Schema/OpenAPI validation and
+scoped local Markdown file-target checks passed. Root analysis exited 0 with
+nine existing UI `RegExp` informational notices, not a clean zero-diagnostic
+result. The unrelated UI lockfile remains unchanged and excluded.
+
+This implements only the old-app retirement/host-handoff gap, not candidate
+publication or full transaction recovery. Independent staged candidate
+installation/fence-cooperation evidence, operator command, activation/write
+isolation through explicit validation/commit, whole-state/app rollback with
+rewind acknowledgement, and data-preserving uninstall remain unfinished. Native
+power-loss/fsync/low-disk/full process-crash and genuine signed installed-product
+lifecycle acceptance are not proved by boundary fixtures. No real installed
+app/state/service or remote ref was changed. No new Swift/CI/Apple Silicon/VZ/
+GaoOS or M8/MVP completion is claimed; Apple Silicon execution stays with the user.

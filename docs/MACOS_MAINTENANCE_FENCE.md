@@ -76,6 +76,12 @@ state-reference checks. Native callbacks are followed by another fence/identity
 check. A copied replacement root is refused; closing the fence invalidates its
 dependent lease. Normal daemon startup has no recovery/bypass option.
 
+The separate [old-app retirement phase](MACOS_APP_RETIREMENT.md) preserves this
+original state inode and original app-slot binding. A freshly verified typed
+retired host distinguishes the fixed installation slot from the observed old
+app path; explicit adoption retains the same state kernel lock. This does not
+widen `verifyFor` to copied/replacement state roots or clear ordinary admission.
+
 This is cooperative admission for this daemon build, not an ACL barrier against
 privileged/malicious writers, an old non-cooperating binary, or arbitrary external
 renaming of the containing namespace. The future transaction must retain and
@@ -99,5 +105,6 @@ does not arm this guard and still reports `replacement_startup_fenced: false`.
 The separate [candidate preparation](MACOS_UPGRADE_PREPARATION.md) requires an
 already-held typed guard and retains it; its durable `candidate_prepared`
 checkpoint is not installed publication or replacement-generation recovery.
+Its old-app retirement/gap-recovery step is separate from those later phases.
 Full lifecycle crash/low-disk, genuine signed installed-product, ARM64/VZ and
 GaoOS acceptance remain separate; this component does not complete M8.

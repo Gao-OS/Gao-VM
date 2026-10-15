@@ -3,8 +3,10 @@
 The internal [`ColdUpgradePreparation`](../daemon/gaovmd/lib/src/cold_upgrade_preparation.dart)
 composes a caller-held [cold state snapshot](MACOS_RELEASE_INSPECTION.md#guarded-persistent-state-snapshots)
 and [persistent admission fence](MACOS_MAINTENANCE_FENCE.md). It creates and
-reopens a `candidate_prepared` checkpoint. It does **not** replace the installed
-app/state, activate a service, authorize rollback, or complete an upgrade.
+reopens a `candidate_prepared` checkpoint. Its separate
+[`retireOriginalApp` step](MACOS_APP_RETIREMENT.md) can retain the exact old app
+while keeping state ownership. Neither step publishes a candidate/replacement
+state, activates a service, authorizes rollback, or completes an upgrade.
 There is no preparation/install CLI yet. The read-only release inspector's
 command remains unchanged.
 
@@ -17,6 +19,9 @@ same-user storage, and explicit candidate/expected identities. Source app,
 state, inspection scratch, candidate and output must be disjoint. Names are
 1–128 ASCII letters/digits/dots/underscores/hyphens, start with a letter/digit,
 and cannot end in `.partial`. Hidden staging names are not recovery targets.
+`create` is the original, pre-retirement preparation step. After retirement,
+reopen the existing checkpoint against the typed retired host; do not start a
+second preparation from the relocated app.
 
 It derives the catalog requirement from the independently inspected source
 catalog, not a caller-provided schema. A pre-catalog state requires schema 0;
@@ -101,12 +106,19 @@ do not simulate a complete upgrade process crash, low-disk lifecycle, real
 installed publication or migration.
 
 The [accepted cold operator workflow](proposals/MACOS_UPGRADE_ROLLBACK.md) still
-needs a maintenance executable outside renamed trees, original-app retirement
-and cross-parent candidate publication, identity-safe interrupted replacement
+needs a maintenance executable/command outside renamed trees, cross-parent
+candidate publication, identity-safe interrupted replacement
 recovery, activation/write isolation through validation/commit, fresh-cold
 whole-state/app rollback with rewind acknowledgement, and data-preserving
 uninstall. Genuine signed installed-product and ARM64/VZ/GaoOS acceptance remain
 unproved. This preparation component does not complete M8 or the MVP goal.
+
+Old-app retirement and typed host/ownership handoff are now a separate
+[implemented phase](MACOS_APP_RETIREMENT.md). Preparation can verify/reopen
+against that retired host using the fixed original installation slot for fence
+binding and the observed retired path for fresh app checks. The immutable
+checkpoint still reports its original preparation phase, not current installed
+publication/commit status. No snapshot payload is moved out of the checkpoint.
 
 ## Bound cross-parent directory move prerequisite
 

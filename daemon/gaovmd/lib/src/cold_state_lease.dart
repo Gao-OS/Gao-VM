@@ -4,6 +4,7 @@ import 'dart:io';
 import 'daemon_ownership.dart';
 import 'image_filesystem.dart';
 import 'macos_driver_inventory.dart';
+import 'macos_cold_state_host.dart';
 import 'maintenance_state_fence.dart';
 
 /// External observations only. The native implementation binds these to the
@@ -33,15 +34,22 @@ final class ColdStateLease {
     this._bundleIdentifier,
     this._host,
     this._maintenanceFence,
-  );
+  ) : installationPath = _host is MacOsColdStateHost
+          ? _host.installationPath
+          : _host.appPath;
   final OwnedImageDirectory _root;
   final DaemonOwnership _ownership;
   final String _bundleIdentifier;
-  final ColdStateHost _host;
-  final MaintenanceStateFence? _maintenanceFence;
+  ColdStateHost _host;
+  MaintenanceStateFence? _maintenanceFence;
+  MacOsColdStateHost? _ownedRetiredHost;
+  bool _retiring = false;
   bool _closed = false;
   String get path => _root.path;
   String get appPath => _host.appPath;
+
+  /// Fixed logical installation slot; [appPath] is the currently observed app.
+  final String installationPath;
   String get bundleIdentifier => _bundleIdentifier;
 
   static Future<ColdStateLease> acquire(
@@ -84,7 +92,20 @@ final class ColdStateLease {
         await maintenanceFence.verifyFor(
           root,
           bundleIdentifier: bundleIdentifier,
-          appPath: host.appPath,
+          appPath: host is MacOsColdStateHost
+              ? host.installationPath
+              : host.appPath,
+        );
+      }
+      if (host is MacOsColdStateHost && host.isRetired) {
+        if (maintenanceFence == null) {
+          throw const FormatException('retired app requires its held fence');
+        }
+        await host.verifyRetirementFor(
+          root,
+          maintenanceFence,
+          bundleIdentifier: bundleIdentifier,
+          installationPath: host.installationPath,
         );
       }
       ownership = maintenanceFence == null
@@ -119,9 +140,10 @@ final class ColdStateLease {
     await _maintenanceFence?.verifyFor(
       _root,
       bundleIdentifier: _bundleIdentifier,
-      appPath: appPath,
+      appPath: installationPath,
     );
     await _ownership.verify();
+    await _verifyRetirement();
     await _verifyService();
     for (final driver in [false, true]) {
       final inventory = await _host.inventory(driver: driver);
@@ -145,8 +167,98 @@ final class ColdStateLease {
     await _maintenanceFence?.verifyFor(
       _root,
       bundleIdentifier: _bundleIdentifier,
-      appPath: appPath,
+      appPath: installationPath,
     );
+    await _verifyRetirement();
+  }
+
+  Future<void> _verifyRetirement() async {
+    final host = _host;
+    if (host is MacOsColdStateHost && host.isRetired) {
+      final fence = _maintenanceFence;
+      if (fence == null) throw StateError('retirement fence is missing');
+      await host.verifyRetirementFor(
+        _root,
+        fence,
+        bundleIdentifier: _bundleIdentifier,
+        installationPath: installationPath,
+      );
+    }
+  }
+
+  /// Consumes the new native host while retaining this exact state kernel lock.
+  /// Failure retains the lock, marker and all app/journal bytes, including when
+  /// the physical rename completed before a later verification failed.
+  /// The preparation coordinator's callback must re-read all persistent and
+  /// external inputs/output using filesystem checks only, after native observers.
+  Future<Map<String, Object?>> retireApp(
+    MaintenanceStateFence fence,
+    OwnedImageDirectory storage,
+    String name, {
+    required Future<void> Function() verifyPreparedInputs,
+  }) async {
+    if (_closed || _retiring) throw StateError('cold lease is unavailable');
+    final host = _host;
+    if (host is! MacOsColdStateHost || host.isRetired) {
+      throw StateError('fresh native owning-app host required');
+    }
+    _retiring = true;
+    try {
+      await verify();
+      await fence.verifyFor(
+        _root,
+        bundleIdentifier: _bundleIdentifier,
+        appPath: installationPath,
+      );
+      _maintenanceFence = fence;
+      final retired = await host.retireForMaintenance(
+        this,
+        fence,
+        storage,
+        name,
+        verifyPreparedInputs: verifyPreparedInputs,
+      );
+      _ownedRetiredHost = retired;
+      _host = retired;
+      await verify();
+      return retired.retirementEvidence;
+    } finally {
+      _retiring = false;
+    }
+  }
+
+  /// Explicit recovery after a move completed but this lease's old host could
+  /// not finish inspection. Consumes the freshly reopened typed host only after
+  /// it matches the original slot, state inode, held fence and retained lock.
+  /// No ownership release/reacquire window and no arbitrary path override.
+  Future<void> adoptRetiredApp(
+    MacOsColdStateHost retired,
+    MaintenanceStateFence fence,
+  ) async {
+    if (_closed ||
+        _retiring ||
+        !retired.isRetired ||
+        _host is! MacOsColdStateHost ||
+        (_host as MacOsColdStateHost).isRetired) {
+      throw StateError('original held native lease and retired host required');
+    }
+    _retiring = true;
+    try {
+      await _ownership.verify();
+      await retired.verifyRetirementFor(
+        _root,
+        fence,
+        bundleIdentifier: _bundleIdentifier,
+        installationPath: installationPath,
+      );
+      await _ownership.verify();
+      _maintenanceFence = fence;
+      _ownedRetiredHost = retired;
+      _host = retired;
+      await verify();
+    } finally {
+      _retiring = false;
+    }
   }
 
   Future<void> _verifyService() async {
@@ -179,8 +291,14 @@ final class ColdStateLease {
 
   void close() {
     if (_closed) return;
+    if (_retiring)
+      throw StateError('await pending app retirement before close');
     _closed = true;
-    _ownership.close();
-    _root.close();
+    try {
+      _ownership.close();
+    } finally {
+      _root.close();
+      _ownedRetiredHost?.close();
+    }
   }
 }

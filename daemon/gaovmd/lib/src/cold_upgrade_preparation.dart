@@ -24,7 +24,7 @@ final class ColdUpgradePreparation {
   final OwnedImageDirectory _parent;
   final OwnedImageLock _lock;
   OwnedImageDirectory _root;
-  final MaintenanceTree _originalApp;
+  MaintenanceTree _originalApp;
   final Map<String, Object?> _intent;
   final Map<String, Object?> _record;
   final ReleaseInspectionHost _host;
@@ -91,7 +91,7 @@ final class ColdUpgradePreparation {
       }
       if (intent.length != 13 ||
           intent['format'] != 'gaovm.cold-upgrade-intent.v1' ||
-          intent['source_app'] != state._state.appPath ||
+          intent['source_app'] != state._state.installationPath ||
           intent['source_state'] != state._state.path ||
           intent['bundle_identifier'] != state._state.bundleIdentifier ||
           intent['old_version'] != oldVersion ||
@@ -451,6 +451,75 @@ final class ColdUpgradePreparation {
     await _verifyNamespace();
   }
 
+  /// Retire only the exact prepared original app while the existing state lease
+  /// keeps its kernel ownership. The immutable checkpoint and candidate copies
+  /// stay put. The returned observation is not candidate publication or commit.
+  Future<Map<String, Object?>> retireOriginalApp(
+    OwnedImageDirectory storage,
+    String name,
+  ) async {
+    await verify();
+    for (final protected in [path, _state._inspectionPath]) {
+      for (final target in [
+        '${storage.path}/$name',
+        '${storage.path}/.$name.partial',
+      ]) {
+        if (_overlap(target, protected) ||
+            storage.path == protected ||
+            storage.path.startsWith('$protected/')) {
+          throw const FormatException('app retirement overlaps preparation');
+        }
+      }
+    }
+    final result = await _state._state.retireApp(
+      _fence,
+      storage,
+      name,
+      verifyPreparedInputs: () async {
+        // Filesystem-only reads after the LAST native observer. Check every
+        // held external dependency too: it is not part of the state snapshot.
+        final files = <_HeldReference>{
+          ...?_state._references?._files.values,
+          ...?_state._assets?._files._files.values,
+          ..._state._legacy._files.values,
+        };
+        for (final held in files) {
+          await held.parent.verifyPathBinding();
+          if (JsonValue.fromJson(await _seal(held.file)) != held.evidence) {
+            throw const ColdStateFailure(
+              'app_retirement',
+              'external input changed',
+            );
+          }
+        }
+        await _state._runtime?._verifyTree();
+        // The complete persistent manifest also covers legacy files/backups.
+        // Do not call legacy._verifyInputs here: its _context invokes native
+        // observations and could change dependencies we just finished reading.
+        if (!_equal(
+          await _state._capturePersistent(),
+          (_record['original_state_receipt'] as Map)['manifest'],
+        )) {
+          throw const FormatException(
+            'prepared state changed before app retirement',
+          );
+        }
+        await _originalApp.verify(
+          (_record['original_app_receipt'] as Map)['manifest']
+              as Map<String, Object?>,
+          nativeMetadata: true,
+        );
+        await _verifyOutput();
+        await _verifyNamespace();
+      },
+    );
+    final moved = await MaintenanceTree.open(Directory(_state._state.appPath));
+    _originalApp.close();
+    _originalApp = moved;
+    await verify();
+    return result;
+  }
+
   Future<void> _verifyNamespace() async {
     await _verifyPrivate(_parent);
     _lock.verifyPathBinding();
@@ -578,7 +647,7 @@ final class ColdUpgradePreparation {
       await fence.verifyFor(
         root,
         bundleIdentifier: state._state.bundleIdentifier,
-        appPath: state._state.appPath,
+        appPath: state._state.installationPath,
       );
     } finally {
       root.close();
