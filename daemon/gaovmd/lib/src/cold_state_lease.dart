@@ -38,6 +38,7 @@ final class ColdStateLease {
   final ColdStateHost _host;
   bool _closed = false;
   String get path => _root.path;
+  String get appPath => _host.appPath;
 
   static Future<ColdStateLease> acquire(
     Directory state, {

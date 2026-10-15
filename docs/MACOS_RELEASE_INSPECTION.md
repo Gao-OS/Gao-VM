@@ -124,10 +124,12 @@ the [lsof project's exit-status FAQ](https://github.com/lsof-org/lsof/blob/maste
 This same-user observation is not protection against privileged or malicious
 writers, nor a lasting fence against uncooperative new processes.
 
-This is a preparation prerequisite, **not a complete cold-boundary certificate**
-or an installed maintenance command. It does not yet check catalog work/leases,
-external disks/EFI, copy a complete durable app/state snapshot, or provide
-startup fencing across state-directory replacement. It must not justify omitting
+This lease alone is a preparation prerequisite, **not a complete cold-boundary
+certificate** or an installed maintenance command. It does not itself check
+catalog work/leases or external disks/EFI; the separate inspections below now
+cover those component boundaries. Complete durable paired app/state snapshots
+and startup fencing across state-directory replacement remain unimplemented.
+These components must not justify omitting
 `run/`, moving installed trees, or declaring M8 complete. Normal daemon startup
 and public API behavior remain unchanged. Real service registration/unregistration
 and native ARM64 product acceptance remain outside this component's tests.
@@ -181,7 +183,69 @@ than assuming nothing was published. This receipt is not a recovery journal.
 
 Local Intel tests use real private files, native metadata/ACL/resource-fork APIs,
 and a closed SQLite database with committed WAL/SHM sidecars. SQLite validation
-opens only the disposable copy, never the original catalog. These are component
-checks, not signed-app, actual catalog/lease quiescence, external-disk accounting,
-paired snapshot, crash/low-disk injection, writer fencing, upgrade, rollback or
-native ARM64 lifecycle acceptance. Those M8 requirements remain unfinished.
+opens only the disposable copy, never the original catalog. These snapshot tests
+do not prove the separate inspections below, a paired snapshot, crash/low-disk
+injection, writer fencing, upgrade, rollback, signed-product or native ARM64
+lifecycle acceptance. The full M8 transaction remains unfinished.
+
+## Source-read-only catalog and referenced-file inspections
+
+The internal [`ColdCatalogInspection`](../daemon/gaovmd/lib/src/cold_catalog_inspection.dart)
+requires an existing held `ColdStateLease` and a new empty, private inspection
+directory, disjoint from both state and owning app. It copies only `gaovm.db`
+and existing WAL/SHM sidecars through owned descriptors, independently checks
+their bytes/native metadata, and verifies original inputs and cold observations
+again. The inspection directory and remaining output are retained. Existing
+output, unsafe files, unknown rollback journals and observed path substitution
+refuse progress; nothing is deleted, repaired or retried in place.
+
+**SQLite never opens the original catalog.** Only the disposable copy is opened
+read/write so its WAL shared memory can initialize, with SQL `query_only` and
+`trusted_schema=OFF` before inspection. This follows SQLite's
+[WAL read-only constraints](https://www.sqlite.org/wal.html#read_only_databases).
+Copy-side SHM creation/recovery or checkpointing is permitted. No migration runs;
+the original schema is reported. This partial, SQLite-modified inspection copy
+is **not a backup or restore input**.
+
+The reader explicitly understands schemas 1–21, requires matching known tables
+and a contiguous migration ledger, and checks SQLite integrity/foreign keys,
+VM IDs/generations and required bounded VmSpecs. Unknown/newer layouts fail;
+schema 0 is observable but blocks upgrade preparation pending a separate
+initialization/legacy workflow. A future daemon migration does not automatically
+extend maintenance compatibility. Nonempty WAL files must have a supported,
+checksummed header, matching database page size and complete frame layout, per
+the [SQLite file format](https://www.sqlite.org/fileformat.html#wal_file_format).
+This checks SQLite's recovered read view, not every WAL frame independently.
+Raw original sidecar hashes remain bound in the evidence.
+
+`requireQuiescent()` refuses running intents, non-cold phases, unapplied intent
+revisions, deletion in progress, nonterminal Operations/TestRuns, running steps,
+unfinished provisioning/legacy migration/guest execution/diagnostic/collection/
+artifact work, and **all** resource leases, including expired or unknown holds.
+Unpublished `events` rows may await replay; every other unpublished outbox topic
+is unfinished work. Terminal failed/cancelled history remains intact. Exact
+counts accompany at most 32 sample identities per blocker. VM and reference
+evidence is bounded to 16,384 entries; each decoded VmSpec to 1 MiB.
+
+The separate [`ColdFileReferences`](../daemon/gaovmd/lib/src/cold_file_references.dart)
+uses that quiescent inspection's nondeleted current, observed and execution
+VmSpecs, not just the latest generation. It holds and hashes actual external
+disk/EFI consumers, deduplicates shared paths while retaining their bindings,
+and distinguishes paths inside state from those outside it. Canonical, owned,
+nonempty regular files are required; links, unsafe write permissions and ACLs
+are refused without normalization. Same-UID native reference observation cannot
+account for ACL-granted writers belonging to other users. Other observed
+processes, incomplete native evidence, byte/metadata changes or path replacement
+also refuse progress. The native observer never acts on an observed PID.
+
+Both objects revalidate against the original held lease; serialized JSON cannot
+construct a trusted inspection. Referenced-file revalidation retains its handles
+on failure until explicit close; the caller always owns the state lease lifetime.
+Their JSON formats are `gaovm.cold-catalog-inspection.v1` and
+`gaovm.cold-file-references.v1`. Every referenced-file record says
+`backed_up: false`: no external backup/restore or lasting writer fence is supplied.
+Managed image/bundle validation, legacy inputs, retired runtime generations,
+safe `run/` exclusion, complete paired snapshots, transaction fencing/journal,
+publication/validation/commit, rollback/recovery and uninstall still need the
+full workflow. These internal checks do not change the public API or authorize
+installed mutations, service actions, VZ boot, push or release.

@@ -50,8 +50,11 @@ release publication or remote push is authorized by this ledger.
    role/contract compatibility checks now provide a tested prerequisite. A
    [read-only Developer ID inspection entry point](MACOS_RELEASE_INSPECTION.md)
    adds signed identity/layout and whole-tree checks, not applied database or
-   negotiated runtime evidence. The development-package trust choice, cold
-   boundary, writer fencing, whole-state rollback and native acceptance remain
+   negotiated runtime evidence. Held cold preparation, metadata-preserving tree
+   copies and [catalog/referenced-file inspections](MACOS_RELEASE_INSPECTION.md#source-read-only-catalog-and-referenced-file-inspections)
+   now cover separate prerequisites, not their full transaction composition.
+   The development-package trust choice, complete cold boundary, writer fencing,
+   whole-state rollback and native acceptance remain
    unfinished, not waived by the proposal.
 
 These are not all interchangeable with “tests not run”. In particular, a green
@@ -597,3 +600,53 @@ catalog/lease checks, retired runtimes, external disks/EFI, startup/writer fenci
 crash/low-disk injection, publication/commit, whole-state rollback/recovery and
 uninstall remain unfinished M8 work. No installed app/state or real service was
 changed, and neither M8 nor the overall goal is complete.
+
+## 2026-10-15 cold catalog and referenced-file checkpoint
+
+On top of `db8499d`, the internal
+[catalog and referenced-file inspections](MACOS_RELEASE_INSPECTION.md#source-read-only-catalog-and-referenced-file-inspections)
+bind a private catalog copy to the original held cold lease. SQLite opens only
+the copy; the source catalog is neither migrated nor checkpointed. Known schema
+tables/ledger, SQLite integrity/foreign keys, VM identities/generations and
+current/observed/execution VmSpecs are checked. Active durable work, unapplied
+intents, all resource leases and non-event unpublished outbox rows block
+preparation without deleting history or releasing unknown ownership.
+
+Actual disk/EFI consumers have retained descriptors, native metadata/digests
+and same-UID open-reference observations. Shared consumers retain every binding;
+unsafe/unknown files, ACLs, observed writers and changed paths/bytes/metadata
+refuse progress. These are revalidatable facts, **not external backups** or a
+lasting writer fence. Neither imported JSON nor a partial SQLite inspection
+copy can authorize restore or installed mutation.
+
+The **154-test** focused suite passed with **concurrency 1**, zero failures or
+skips, across 14 files. Its **52 new tests** include real native SQLite WAL-only
+committed work with unchanged source DB/WAL/SHM metadata, schema 1/20/21 reads,
+blocked schema-0 preparation, exact bounded blocker samples, a running execution
+checkpoint despite stopped public intent, unchanged failed TestRun history,
+stale catalog detection, actual disk/EFI hashing, deduplication,
+ACL/hardlink/referrer refusal and file replacement/change detection. The owning
+app/service/process observations are fixture boundaries, not formal ARM64 or
+installed-service acceptance; the file metadata, SQLite and positive reference
+reader use native local operations.
+
+Three red cases demonstrated that SQLite could ignore damaged WAL input and
+produce an older apparently idle read view. The new supported-header/checksum,
+page-size and complete-frame-layout checks refuse those inputs before SQLite
+opens the copy. SQLite still decides valid frame visibility; this is not an
+independent forensic validation of every frame. Original bytes are retained.
+The terminal report is `focused-final.jsonl` under
+`/private/tmp/gaovm-cold-catalog.lseM0i/`.
+
+Dart analysis, pinned formatting (**282** files), JSON Schema/OpenAPI validation,
+scoped Markdown file links and staged `git diff --check` passed. The unrelated
+UI lockfile remains unchanged and outside this component. Broad daemon
+regression was not rerun here; the failed broad runs above remain unresolved,
+not superseded by this focused pass. No new Swift, hardware, CI, signed-product
+or installed lifecycle pass is claimed.
+
+Retired generations/legacy boundaries, managed bundle/image validation, safe
+`run/` handling, paired app/state publication, startup/writer fencing and durable
+transaction recovery/commit/rollback/uninstall remain unfinished. No installed
+app/state, real service, Chrome integration or remote ref was changed. M8 and
+the complete PRD/development-plan goal remain open.
