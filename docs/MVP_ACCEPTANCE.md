@@ -1414,3 +1414,62 @@ lifecycle acceptance also remain unfinished. This slice does not complete M8/MVP
 no real installed app/state/service or remote ref changed, and no new Swift/Apple
 Silicon/VZ/GaoOS result is claimed. Apple Silicon execution remains assigned to
 the user.
+
+## 2026-10-16 restricted request drain; candidate validation still incomplete
+
+Local commit `dbb25f6` fixes restricted-listener ownership lifetime. HTTP response
+timeouts do not cancel original application futures. Maintenance close now drains
+the original handlers/health calls and request writers before returning, outside
+the socket observation gate needed by diagnostic callbacks. New restricted
+requests and restart are refused during drain. Ordinary API access is unchanged.
+Test-first checks reproduced early close and a socket-observation deadlock; both
+checks pass with their original response/observation deadlines unchanged.
+
+The wider working-tree regression is **549 checks across 47 files**, concurrency
+1, zero failures/skips, terminal success and confirmed runner exit (**199.428
+seconds**). Native JSON is retained at
+`/private/tmp/gaovm-candidate-validation.rHIpkk/verified.jsonl`. This includes
+uncommitted candidate-entry/ownership/doctor prerequisites; it does not certify
+the candidate validation transaction or every daemon test. The previously unrun
+installed/startup scenarios, full release-inspection suite, broader/default-
+concurrency failures and remote CI remain unrun/unresolved, not waived.
+
+The initial same-cohort run failed one existing ten-second maintenance-fence
+fixture startup. Adding the API/application composition to the low-level lease
+had pulled its dependency graph into that source child. The composition was
+moved to a separate library and the lease now grants only a guarded scoped
+borrow of the actual owner/root. The callback must drain before returning;
+close/other app maintenance remains fenced while it is active. The original
+ten-second child check then passed in about six seconds; the full 39-check fence
+file and the complete 549-check cohort passed without extending that deadline.
+
+Candidate-only admission, controlled actual-catalog migration, restricted UDS
+reads, idle/non-started workers and sealed validation evidence are **uncommitted
+work in progress**, not a passing activation/upgrade. The full new integration
+reached post-validation snapshot retention but failed its eight-minute test
+deadline (reported at runner elapsed 20:38); active-fixture retention guards also
+correctly refused teardown. Its original runner PID 77577 exited. External
+signature/ARM64/service/census boundaries were fixtures; no real service or VM
+was operated. An earlier combined test also timed out, and its teardown removed
+a still-used test fixture; the new active-work guards prevent repeating that
+cleanup error. No installed or user state was involved in either test.
+
+Retain `/private/tmp/gvm-validation-Gkeo1f` and the outer fixture
+`/private/var/folders/s0/hl1d3jkx5jx3gs69033nc6d80000gp/T/gvm-release-inspection-aicStN`.
+The former includes the old app, original-state/candidate preparation, persistent
+fence, validation intent, inspection copies and `.validated-state.partial`.
+There is no completed validation/commit receipt. Do not delete or promote that
+partial output, clear the fence, or retry blindly. Diagnose the repeated full
+cold/snapshot verification cost with the retained inputs before another full run.
+
+Latest daemon analysis has no issues and pinned Dart 3.9.0 non-UI formatting
+checks **387 files with zero changes**. Contract validation and scoped
+CI/Markdown checks passed. Intel AOT builds/help and non-candidate entry refusal
+were also exercised; they are not signed installed ARM64 evidence, and the later
+uncommitted post-session digest binding has not had a complete positive
+integration or a fresh AOT run. actionlint was unavailable. The unrelated UI
+lockfile stayed byte-identical and excluded. No push, PR, release, real installed
+app/state/service operation, machine switch, Swift/VZ/GaoOS or Apple Silicon
+execution occurred. Explicit validation recovery/commit, verified outside-app
+launcher, activation, paired whole-state/app rollback, first install and the full
+native/crash/low-disk acceptance remain unfinished. M8/MVP and the goal remain open.
