@@ -840,3 +840,65 @@ whole-state rollback, uninstall and full lifecycle crash/low-disk/native install
 acceptance remain unfinished. No real app/state/service or remote ref was changed;
 Apple Silicon/VZ/GaoOS work remains assigned to the user. This component is not
 M8 completion or proof of the full PRD/development-plan goal.
+
+## 2026-10-15 paired old-app/state snapshot checkpoint
+
+On top of `a2dd2d1`, [paired snapshot creation](MACOS_RELEASE_INSPECTION.md#paired-old-app-and-state-snapshots)
+now retains the freshly inspected matching old app and complete private state in
+one durable private wrapper. The source app path and bundle identifier come from
+the original held cold lease; the required catalog schema comes from the private
+inspection copy, never a caller-supplied schema or imported JSON receipt.
+Formal signatures, exact roles/build identities, public/VmSpec/driver contracts
+and catalog range must pass the existing release inspector. Unavailable native
+evidence remains unverified. Pre-catalog legacy state requires schema-0 component
+support and is retained without creating or migrating an original database.
+
+Both full app and persistent-state native manifests are retained, including
+unknown resources/data, current writable files and empty directories. Existing
+guarded state `run/` semantics and external-file checks remain in force. App ACL
+grants refuse rather than being normalized. Fresh source-app reference checks
+also refuse other PIDs; a state-only reference check is not enough. The original
+lease stays caller-owned on success/failure, including after readers close.
+
+The pair uses unused disjoint private storage, a namespace lock, initial combined
+space estimates plus per-copy checks, metadata-preserving copies, fsync, exact
+nested/outer receipts and atomic no-replace storage publication. Unknown wrapper
+entries and changed payloads/receipts refuse without cleanup. After the final
+native callbacks, filesystem-only checks compare the complete original state and
+app, including unknown state changed after the nested copy. Independent output
+checks follow, before and after publication. Post-publication failure retains the
+final pair but never reports success. Nested staging paths are provenance; fixed
+contained relative payload names identify the published contents.
+
+The outer `gaovm.cold-upgrade-snapshot.v1` receipt reports a paired app, but still
+denies external-file backup, candidate-publication, replacement-startup-fence and
+rollback authority. External disks/EFI are separately accounted without backup/
+rewind authority; files physically inside state still follow full-tree preservation.
+A copied ownership file does not transfer the original kernel lock. A stored receipt is
+not a durable transaction/recovery journal or transferable cold certificate.
+
+The **33 new tests** passed in the final combined **430-test** run with
+**concurrency 1**, zero failures/skips, across **31** files (243.061 seconds).
+It includes the prior 397-test group. The unsafe
+`unresolved native census rejects startup before legacy migration` case was
+explicitly excluded, not run or counted as a passing/skipped test. The final
+terminal report is `verified.jsonl` under
+`/private/tmp/gaovm-paired-snapshot.vJnXNt/`; the earlier `focused.jsonl` is a
+pre-final-checkpoint run, not evidence for the subsequently reproduced/fixed
+late unknown source-state window.
+
+The new native holder test confirms its owned child's exit before fixture
+cleanup; other positive signing/component/service/process observations use
+explicit boundary fixtures, not genuine signed-product or installed acceptance.
+Dart analysis, pinned formatting (**291** files, zero changes), JSON Schema/
+OpenAPI validation, scoped Markdown file links and staged `git diff --check`
+passed. The unrelated UI lockfile is unchanged and excluded. Full daemon
+regression was not rerun and the earlier broad failures remain unresolved; no
+new Swift, CI, installed lifecycle, ARM64/VZ or GaoOS pass is claimed.
+
+Persistent startup/writer fencing across replacement, the maintenance executable
+outside renamed trees, durable transaction/recovery, candidate publication,
+explicit activation/commit, whole-state rollback, uninstall and full lifecycle
+crash/low-disk/native installed acceptance remain unfinished. No real installed
+app/state/service or remote ref was changed. Apple Silicon/VZ/GaoOS work remains
+assigned to the user; this checkpoint does not complete M8 or the full goal.

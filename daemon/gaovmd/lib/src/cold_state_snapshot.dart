@@ -154,28 +154,38 @@ final class ColdStateSnapshot {
         );
       }
     }
-    return _tree.snapshotStateDataTo(
-      parent,
-      name,
-      verifyBoundary: () async {
-        await verify();
-        return {
-          'format': 'gaovm.cold-state-boundary.v1',
-          'source_state': _state.path,
-          'owning_app': _state.appPath,
-          'catalog': _catalog?.toJson(),
-          'managed_assets': _assets?.toJson(),
-          'external_files': _references?.toJson(),
-          'legacy': _legacy.toJson(),
-          'runtime': _runtime?.toJson(),
-          'pre_catalog_run_absent': _catalog == null,
-          'paired_app_snapshot': false,
-          'external_files_backed_up': false,
-          'candidate_publication_authorized': false,
-          'replacement_startup_fenced': false,
-        };
-      },
-    );
+    return _tree.snapshotStateDataTo(parent, name, verifyBoundary: _boundary);
+  }
+
+  Future<Map<String, Object?>> _capture() =>
+      _tree.captureStateData(verifyBoundary: _boundary);
+
+  // Run last in each coordinator verification pass, after native observations.
+  // Filesystem-only source read, not a cold permit or replacement-tree fence.
+  Future<Map<String, Object?>> _capturePersistent() => _tree.captureStateData(
+    verifyBoundary: () async {
+      if (_closed) throw StateError('state snapshot preparation is closed');
+      return {'source_state': _state.path};
+    },
+  );
+
+  Future<Map<String, Object?>> _boundary() async {
+    await verify();
+    return {
+      'format': 'gaovm.cold-state-boundary.v1',
+      'source_state': _state.path,
+      'owning_app': _state.appPath,
+      'catalog': _catalog?.toJson(),
+      'managed_assets': _assets?.toJson(),
+      'external_files': _references?.toJson(),
+      'legacy': _legacy.toJson(),
+      'runtime': _runtime?.toJson(),
+      'pre_catalog_run_absent': _catalog == null,
+      'paired_app_snapshot': false,
+      'external_files_backed_up': false,
+      'candidate_publication_authorized': false,
+      'replacement_startup_fenced': false,
+    };
   }
 
   void close() {

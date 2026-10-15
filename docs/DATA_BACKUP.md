@@ -69,6 +69,13 @@ installed maintenance command, app/state pair, external-file backup or rollback
 transaction. Its fixture acceptance does not authorize this operator recipe
 against a live installation or replace the native lifecycle gates.
 
+A separate internal [paired snapshot component](MACOS_RELEASE_INSPECTION.md#paired-old-app-and-state-snapshots)
+now retains the freshly inspected matching signed app alongside complete private
+state and verifies both before/after snapshot-storage publication. It still does
+not back up external disks/EFI, fence a replacement tree, authorize restore or
+provide an installed upgrade/rollback command. The manual recipe below and native
+lifecycle acceptance remain distinct from those component tests.
+
 ## Create and check a private archive
 
 The following is an operator recipe for macOS. Replace both placeholders with

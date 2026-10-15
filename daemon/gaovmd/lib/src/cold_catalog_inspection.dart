@@ -12,6 +12,7 @@ import 'image_filesystem.dart';
 import 'image_manifest.dart';
 import 'macos_driver_inventory.dart';
 import 'macos_open_references.dart';
+import 'macos_release_inspection.dart';
 import 'maintenance_tree.dart';
 import 'vm_bundle_manifest.dart';
 import 'vm_provisioning_plan.dart';
@@ -21,6 +22,7 @@ part 'cold_legacy_inspection.dart';
 part 'cold_managed_assets.dart';
 part 'cold_runtime_inspection.dart';
 part 'cold_state_snapshot.dart';
+part 'cold_upgrade_snapshot.dart';
 
 /// Facts from a private catalog copy, not a full cold/upgrade certificate.
 /// Never pass the inspection copy to a restore operation: SQLite may change its

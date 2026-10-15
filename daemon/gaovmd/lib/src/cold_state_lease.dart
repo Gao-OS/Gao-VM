@@ -39,6 +39,7 @@ final class ColdStateLease {
   bool _closed = false;
   String get path => _root.path;
   String get appPath => _host.appPath;
+  String get bundleIdentifier => _bundleIdentifier;
 
   static Future<ColdStateLease> acquire(
     Directory state, {

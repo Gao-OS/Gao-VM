@@ -180,6 +180,41 @@ final class MaintenanceTree {
     required Future<Map<String, Object?>> Function() verifyBoundary,
   }) => MaintenanceTree._(_root, verifyBoundary).snapshotTo(parent, name);
 
+  /// Fixed guarded state view for paired-snapshot capacity/source checks.
+  /// The coordinator must establish and hold the original cold boundary.
+  Future<Map<String, Object?>> captureStateData({
+    required Future<Map<String, Object?>> Function() verifyBoundary,
+  }) => MaintenanceTree._(_root, verifyBoundary).capture(nativeMetadata: true);
+
+  /// Verify contained bytes/native metadata against caller-held observations.
+  /// Imported receipts confer no coldness, ownership or restore authority.
+  static Future<void> verifySnapshotContents(
+    OwnedImageDirectory snapshot,
+    Map<String, Object?> receipt,
+  ) async {
+    final payloadName = receipt['payload_name'];
+    if (payloadName != 'payload' && payloadName != 'payload.app') {
+      throw const FormatException('unknown snapshot payload');
+    }
+    await snapshot.verifyPathBinding();
+    final names = await Directory(snapshot.path)
+        .list(followLinks: false)
+        .take(3)
+        .map((entry) => entry.uri.pathSegments.where((s) => s.isNotEmpty).last)
+        .toList();
+    if (names.length != 2 ||
+        !names.contains(payloadName) ||
+        !names.contains('receipt.json')) {
+      throw const FormatException('snapshot wrapper entries changed');
+    }
+    await _verifyStateOutput(
+      snapshot,
+      payloadName as String,
+      (receipt['manifest'] as Map).cast<String, Object?>(),
+      utf8.encode('${jsonEncode(receipt)}\n'),
+    );
+  }
+
   Future<void> verify(
     Map<String, Object?> expected, {
     bool nativeMetadata = false,

@@ -1,21 +1,30 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 import 'package:gaovm_models/gaovm_models.dart';
+import 'package:gaovmd/gaovmd.dart';
+import 'package:gaovmd/src/cold_catalog_inspection.dart';
+import 'package:gaovmd/src/cold_state_lease.dart';
 import 'package:gaovmd/src/daemon_component_info.dart';
-import 'package:gaovmd/src/image_filesystem.dart' show imageFileMode;
+import 'package:gaovmd/src/image_filesystem.dart';
 import 'package:gaovmd/src/macos_release_inspection.dart';
 import 'package:gaovmd/src/macos_cold_state_host.dart';
+import 'package:gaovmd/src/macos_open_references.dart';
 import 'package:gaovmd/src/maintenance_command.dart';
+import 'package:gaovmd/src/maintenance_tree.dart';
 import 'package:test/test.dart';
+
+import 'helpers/owned_test_process.dart';
 
 void main() {
   late Directory temporary;
   late Directory app;
   late _NativeBoundary host;
   _RealNativeBoundary? realHost;
+  var retainInputs = false;
   setUp(() async {
     final created = await Directory.systemTemp.createTemp(
       'gvm-release-inspection-',
@@ -26,9 +35,10 @@ void main() {
     await _fixture(app);
     host = _NativeBoundary();
     realHost = null;
+    retainInputs = false;
   });
   tearDown(() async {
-    if (realHost?.retainInputs == true) {
+    if (realHost?.retainInputs == true || retainInputs) {
       throw StateError(
         'retaining inputs for unconfirmed native child: ${temporary.path}',
       );
@@ -371,6 +381,637 @@ void main() {
     },
     skip: !Platform.isMacOS,
   );
+  group('cold paired snapshots', () {
+    late Directory state;
+    late OwnedImageDirectory inspection;
+    late OwnedImageDirectory backups;
+    late ColdStateLease lease;
+    late _SnapshotHost coldHost;
+    final children = <OwnedTestProcess>[];
+    setUp(() async {
+      await File(
+        '${app.path}/Contents/Resources/pair-only',
+      ).writeAsString('preserve unknown app resource');
+      imageFileMode('${app.path}/Contents/Resources/pair-only', 0x180);
+      state = await Directory('${temporary.path}/state').create();
+      imageFileMode(state.path, 0x1c0);
+      final database = await GaoVmDatabase.open('${state.path}/gaovm.db');
+      database.close();
+      imageFileMode('${state.path}/gaovm.db', 0x180);
+      await File('${state.path}/unknown-data').writeAsString('preserve state');
+      imageFileMode('${state.path}/unknown-data', 0x180);
+      for (final name in ['inspection', 'backups']) {
+        final directory = await Directory('${temporary.path}/$name').create();
+        imageFileMode(directory.path, 0x1c0);
+      }
+      inspection = await OwnedImageDirectory.open(
+        Directory('${temporary.path}/inspection'),
+      );
+      backups = await OwnedImageDirectory.open(
+        Directory('${temporary.path}/backups'),
+      );
+      coldHost = _SnapshotHost(app.path);
+      lease = await ColdStateLease.acquire(
+        state,
+        bundleIdentifier: 'org.gaovm.tests.Release',
+        host: coldHost,
+      );
+    });
+    tearDown(() async {
+      for (final child in children) {
+        if (!await child.terminate()) retainInputs = true;
+      }
+      children.clear();
+      lease.close();
+      inspection.close();
+      backups.close();
+    });
+
+    Future<ProcessResult> command(
+      String executable,
+      List<String> arguments,
+    ) async {
+      try {
+        return await runMaintenanceCommand(executable, arguments);
+      } on MaintenanceCommandFailure catch (error) {
+        if (!error.exitConfirmed) retainInputs = true;
+        rethrow;
+      }
+    }
+
+    Future<void> assertOwnership() async {
+      await lease.verify();
+      final root = await OwnedImageDirectory.open(state);
+      try {
+        expect(await DaemonOwnership.tryAcquire(root), isNull);
+      } finally {
+        root.close();
+      }
+    }
+
+    Future<Map<String, Object?>> snapshot({
+      MacOsOpenReferences? observer,
+      OwnedImageDirectory? storage,
+    }) => ColdUpgradeSnapshot.create(
+      lease,
+      inspection,
+      storage ?? backups,
+      'before',
+      version: '0.1.0',
+      teamIdentifier: 'ABCDEFGHIJ',
+      host: host,
+      observer:
+          observer ??
+          MacOsOpenReferences(
+            command: (_, _) async => ProcessResult(pid, 1, '', ''),
+          ),
+      inventory: (_) async =>
+          DriverInventorySnapshot(processes: [], unresolvedProcessIds: []),
+    );
+
+    test('another app reference refuses before paired staging', () async {
+      final observer = MacOsOpenReferences(
+        command: (_, arguments) async => ProcessResult(
+          pid,
+          1,
+          arguments.last == app.path ? 'p123\x00\nf8\x00\n' : '',
+          '',
+        ),
+      );
+      await expectLater(
+        snapshot(observer: observer).then((_) => true),
+        throwsA(isA<ColdStateFailure>()),
+      );
+      expect(
+        await Directory('${backups.path}/.before.partial').exists(),
+        false,
+      );
+      expect(await Directory('${backups.path}/before').exists(), false);
+      await lease.verify();
+    });
+
+    test(
+      'matching app and complete state publish as one durable pair',
+      () async {
+        final sourceApp = await MaintenanceTree.open(app);
+        final sourceState = await MaintenanceTree.open(state);
+        try {
+          final appBefore = await sourceApp.capture(nativeMetadata: true);
+          final stateBefore = await sourceState.capture(nativeMetadata: true);
+          final result = await snapshot();
+          expect(result['format'], 'gaovm.cold-upgrade-snapshot.v1');
+          expect(result['paired_app_snapshot'], true);
+          expect(result['external_files_backed_up'], false);
+          expect(result['candidate_publication_authorized'], false);
+          expect(result['replacement_startup_fenced'], false);
+          expect(result['rollback_authorized'], false);
+          expect(result['source_app'], app.path);
+          expect(result['source_state'], state.path);
+          expect(result['catalog_schema'], 21);
+          expect(
+            await File(
+              '${backups.path}/before/state/payload/unknown-data',
+            ).readAsString(),
+            'preserve state',
+          );
+          expect(
+            await File(
+              '${backups.path}/before/app/payload.app/Contents/MacOS/gaovmd',
+            ).readAsBytes(),
+            await File('${app.path}/Contents/MacOS/gaovmd').readAsBytes(),
+          );
+          expect(
+            jsonDecode(
+              await File('${backups.path}/before/receipt.json').readAsString(),
+            ),
+            result,
+          );
+          expect(
+            await Directory('${backups.path}/.before.partial').exists(),
+            false,
+          );
+          await sourceApp.verify(appBefore, nativeMetadata: true);
+          await sourceState.verify(stateBefore, nativeMetadata: true);
+          await lease.verify();
+        } finally {
+          sourceApp.close();
+          sourceState.close();
+        }
+      },
+    );
+    test('unexpected pair wrapper entries refuse without cleanup', () async {
+      var changed = false;
+      final target = '${backups.path}/.before.partial/unknown-after-check';
+      coldHost.onStatus = () async {
+        if (!changed &&
+            await File(
+              '${backups.path}/.before.partial/receipt.json',
+            ).exists()) {
+          changed = true;
+          await File(target).writeAsString('retain unexpected pair evidence');
+        }
+      };
+      await expectLater(
+        snapshot().then((_) => true),
+        throwsA(isA<MaintenanceSnapshotFailure>()),
+      );
+      expect(changed, true);
+      expect(
+        await File(target).readAsString(),
+        'retain unexpected pair evidence',
+      );
+      expect(await Directory('${backups.path}/before').exists(), false);
+      await lease.verify();
+    });
+    test(
+      'app ACL grants refuse rather than weakening source metadata',
+      () async {
+        final user = (await command('/usr/bin/id', [
+          '-un',
+        ])).stdout.toString().trim();
+        final file = File('${app.path}/Contents/Resources/pair-only');
+        expect(
+          (await command('/bin/chmod', [
+            '+a',
+            'user:$user allow read',
+            file.path,
+          ])).exitCode,
+          0,
+        );
+        await expectLater(
+          snapshot().then((_) => true),
+          throwsA(isA<ColdStateFailure>()),
+        );
+        final held = await OwnedImageFile.open(file);
+        try {
+          expect((await held.maintenanceMetadata())['has_acl'], true);
+        } finally {
+          held.close();
+        }
+        expect(
+          await Directory('${backups.path}/.before.partial').exists(),
+          false,
+        );
+        await lease.verify();
+      },
+    );
+    for (final failure in [
+      'signature',
+      'role',
+      'public API',
+      'catalog range',
+      'native evidence',
+    ]) {
+      test('$failure refusal retains original inputs and ownership', () async {
+        if (failure == 'signature') host.rejectSignature = true;
+        if (failure == 'role')
+          host.componentChanges['cli'] = {'role': 'daemon'};
+        if (failure == 'public API')
+          host.componentChanges['cli'] = {'public_api': 'v2'};
+        if (failure == 'catalog range')
+          host.componentChanges['daemon'] = {
+            'catalog_schema': {'minimum': 22, 'maximum': 22},
+          };
+        if (failure == 'native evidence') host.nativeArm64 = false;
+        final tree = await MaintenanceTree.open(state);
+        try {
+          final before = await tree.capture(nativeMetadata: true);
+          await expectLater(
+            snapshot().then((_) => true),
+            throwsA(
+              isA<ReleaseInspectionFailure>().having(
+                (e) => e.status,
+                'status',
+                failure == 'native evidence' ? 'unverified' : 'incompatible',
+              ),
+            ),
+          );
+          expect(
+            await Directory('${backups.path}/.before.partial').exists(),
+            false,
+          );
+          expect(await Directory('${backups.path}/before').exists(), false);
+          await tree.verify(before, nativeMetadata: true);
+          await assertOwnership();
+        } finally {
+          tree.close();
+        }
+      });
+    }
+    for (final phase in ['partial', 'final']) {
+      for (final target in [
+        'app/payload.app/Contents/Resources/pair-only',
+        'state/payload/unknown-data',
+        'app/receipt.json',
+        'state/receipt.json',
+        'receipt.json',
+      ]) {
+        test('$phase $target tampering never returns a valid pair', () async {
+          var changed = false;
+          final root =
+              '${backups.path}/${phase == 'partial' ? '.before.partial' : 'before'}';
+          final file = File('$root/$target');
+          coldHost.onStatus = () async {
+            if (!changed && await File('$root/receipt.json').exists()) {
+              changed = true;
+              imageFileMode(file.path, 0x180);
+              await file.writeAsString('retain tampered pair evidence');
+            }
+          };
+          await expectLater(
+            snapshot().then((_) => true),
+            throwsA(isA<MaintenanceSnapshotFailure>()),
+          );
+          expect(changed, true);
+          expect(await file.readAsString(), 'retain tampered pair evidence');
+          expect(
+            await Directory('${backups.path}/before').exists(),
+            phase == 'final',
+          );
+          expect(
+            await File('${state.path}/unknown-data').readAsString(),
+            'preserve state',
+          );
+          expect(
+            await File(
+              '${app.path}/Contents/Resources/pair-only',
+            ).readAsString(),
+            'preserve unknown app resource',
+          );
+          await assertOwnership();
+        });
+      }
+    }
+    for (final target in ['before', '.before.partial']) {
+      test(
+        'existing $target is retained without inspection or overwrite',
+        () async {
+          final directory = await Directory('${backups.path}/$target').create();
+          imageFileMode(directory.path, 0x1c0);
+          await File(
+            '${directory.path}/keep',
+          ).writeAsString('previous snapshot');
+          await expectLater(
+            snapshot().then((_) => true),
+            throwsFormatException,
+          );
+          expect(
+            await File('${directory.path}/keep').readAsString(),
+            'previous snapshot',
+          );
+          expect(await Directory(inspection.path).list().isEmpty, true);
+          expect(host.executedRoles, isEmpty);
+          await assertOwnership();
+        },
+      );
+    }
+    for (final input in ['app', 'inspection', 'state']) {
+      test('storage inside $input refuses without source mutation', () async {
+        final storage = input == 'inspection'
+            ? inspection
+            : await OwnedImageDirectory.open(input == 'app' ? app : state);
+        try {
+          await expectLater(
+            snapshot(storage: storage).then((_) => true),
+            throwsFormatException,
+          );
+          expect(await Directory('${storage.path}/before').exists(), false);
+          expect(host.executedRoles, isEmpty);
+          await assertOwnership();
+        } finally {
+          if (input != 'inspection') storage.close();
+        }
+      });
+    }
+    test(
+      'pre-catalog legacy pair does not initialize or migrate original data',
+      () async {
+        lease.close();
+        final retained = await state.rename(
+          '${temporary.path}/retained-modern-state',
+        );
+        state = await Directory('${temporary.path}/state').create();
+        imageFileMode(state.path, 0x1c0);
+        final kernel = await File(
+          '${temporary.path}/legacy-kernel',
+        ).writeAsString('legacy kernel');
+        final disk = await File(
+          '${temporary.path}/legacy-disk',
+        ).writeAsString('guest-mutated legacy disk');
+        for (final file in [kernel, disk]) imageFileMode(file.path, 0x180);
+        final config = jsonEncode({
+          'boot': {'loader': 'linux', 'kernelPath': kernel.path},
+          'disk': {'path': disk.path},
+        });
+        await File('${state.path}/config.json').writeAsString(config);
+        imageFileMode('${state.path}/config.json', 0x180);
+        lease = await ColdStateLease.acquire(
+          state,
+          bundleIdentifier: 'org.gaovm.tests.Release',
+          host: coldHost,
+        );
+        final result = await snapshot();
+        expect(result['catalog_schema'], isNull);
+        expect((result['app_release'] as Map)['required_catalog_schema'], 0);
+        expect(
+          await File(
+            '${backups.path}/before/state/payload/config.json',
+          ).readAsString(),
+          config,
+        );
+        for (final name in [
+          'gaovm.db',
+          'gaovm.db-wal',
+          'gaovm.db-shm',
+          'run',
+        ]) {
+          expect(
+            await FileSystemEntity.type(
+              '${state.path}/$name',
+              followLinks: false,
+            ),
+            FileSystemEntityType.notFound,
+          );
+          expect(
+            await FileSystemEntity.type(
+              '${backups.path}/before/state/payload/$name',
+              followLinks: false,
+            ),
+            FileSystemEntityType.notFound,
+          );
+        }
+        expect(await File('${retained.path}/gaovm.db').exists(), true);
+        expect(await disk.readAsString(), 'guest-mutated legacy disk');
+        expect(result['external_files_backed_up'], false);
+        await assertOwnership();
+      },
+    );
+    test(
+      'closed caller lease refuses before output or inspection I/O',
+      () async {
+        lease.close();
+        await expectLater(snapshot().then((_) => true), throwsStateError);
+        expect(await Directory(backups.path).list().isEmpty, true);
+        expect(await Directory(inspection.path).list().isEmpty, true);
+        expect(host.executedRoles, isEmpty);
+      },
+    );
+    test(
+      'unrecognized namespace lock is not normalized or overwritten',
+      () async {
+        final file = await File(
+          '${backups.path}/.gaovm-maintenance.lock',
+        ).writeAsString('operator evidence');
+        imageFileMode(file.path, 0x1c0);
+        await expectLater(snapshot().then((_) => true), throwsFormatException);
+        expect(await file.readAsString(), 'operator evidence');
+        expect((await file.stat()).mode & 0xfff, 0x1c0);
+        expect(await Directory(inspection.path).list().isEmpty, true);
+        await assertOwnership();
+      },
+    );
+    test(
+      'source app change after its copy retains partial and refuses pairing',
+      () async {
+        var changed = false;
+        final file = File('${app.path}/Contents/Resources/pair-only');
+        coldHost.onStatus = () async {
+          if (!changed &&
+              await File(
+                '${backups.path}/.before.partial/app/receipt.json',
+              ).exists()) {
+            changed = true;
+            await file.writeAsString('source changed after app copy');
+          }
+        };
+        await expectLater(
+          snapshot().then((_) => true),
+          throwsA(isA<MaintenanceSnapshotFailure>()),
+        );
+        expect(changed, true);
+        expect(await file.readAsString(), 'source changed after app copy');
+        expect(
+          await File(
+            '${backups.path}/.before.partial/app/payload.app/Contents/Resources/pair-only',
+          ).readAsString(),
+          'preserve unknown app resource',
+        );
+        expect(await Directory('${backups.path}/before').exists(), false);
+        await assertOwnership();
+      },
+    );
+    for (final phase in ['partial', 'final']) {
+      test('$phase late unknown source-state changes refuse pairing', () async {
+        var changed = false;
+        final root =
+            '${backups.path}/${phase == 'partial' ? '.before.partial' : 'before'}';
+        coldHost.onStatus = () async {
+          if (!changed && await File('$root/receipt.json').exists()) {
+            changed = true;
+            await File(
+              '${state.path}/unknown-data',
+            ).writeAsString('source changed after state copy');
+          }
+        };
+        await expectLater(
+          snapshot().then((_) => true),
+          throwsA(isA<MaintenanceSnapshotFailure>()),
+        );
+        expect(changed, true);
+        expect(
+          await File('${state.path}/unknown-data').readAsString(),
+          'source changed after state copy',
+        );
+        expect(
+          await File('$root/state/payload/unknown-data').readAsString(),
+          'preserve state',
+        );
+        expect(
+          await Directory('${backups.path}/before').exists(),
+          phase == 'final',
+        );
+        await assertOwnership();
+      });
+    }
+    test(
+      'a post-publication cold failure retains final but is not success',
+      () async {
+        coldHost.onStatus = () async {
+          if (await File('${backups.path}/before/receipt.json').exists())
+            coldHost.registered = true;
+        };
+        await expectLater(
+          snapshot().then((_) => true),
+          throwsA(
+            isA<MaintenanceSnapshotFailure>().having(
+              (e) => e.cause,
+              'cause',
+              isA<ColdStateFailure>(),
+            ),
+          ),
+        );
+        expect(await Directory('${backups.path}/before').exists(), true);
+        expect(
+          await File(
+            '${backups.path}/before/state/payload/unknown-data',
+          ).readAsString(),
+          'preserve state',
+        );
+        coldHost.onStatus = null;
+        coldHost.registered = false;
+        await assertOwnership();
+      },
+    );
+    test(
+      'last native callback cannot hide an unknown source-state change',
+      () async {
+        var observations = 0;
+        final observer = MacOsOpenReferences(
+          command: (_, arguments) async {
+            if (arguments.last == app.path &&
+                await File('${backups.path}/before/receipt.json').exists()) {
+              observations++;
+              if (observations == 2) {
+                await File(
+                  '${state.path}/unknown-data',
+                ).writeAsString('changed in final native callback');
+              }
+            }
+            return ProcessResult(pid, 1, '', '');
+          },
+        );
+        await expectLater(
+          snapshot(observer: observer).then((_) => true),
+          throwsA(isA<MaintenanceSnapshotFailure>()),
+        );
+        expect(observations, 2);
+        expect(
+          await File('${state.path}/unknown-data').readAsString(),
+          'changed in final native callback',
+        );
+        expect(
+          await File(
+            '${backups.path}/before/state/payload/unknown-data',
+          ).readAsString(),
+          'preserve state',
+        );
+        await assertOwnership();
+      },
+    );
+    test(
+      'a real native app holder blocks pairing until its owned exit',
+      () async {
+        final process = await Process.start(Platform.resolvedExecutable, [
+          '--packages=${Directory.current.path}/.dart_tool/package_config.json',
+          '${Directory.current.path}/test/fixtures/hold_maintenance_file.dart',
+          '${app.path}/Contents/Resources/pair-only',
+        ]);
+        final ready = Completer<void>();
+        final output = process.stdout
+            .transform(utf8.decoder)
+            .transform(const LineSplitter())
+            .map((line) {
+              if (line == 'held' && !ready.isCompleted) ready.complete();
+              return line;
+            })
+            .join('\n');
+        final child = OwnedTestProcess(process, stdoutCapture: output);
+        children.add(child);
+        await ready.future.timeout(const Duration(seconds: 10));
+        final observer = MacOsOpenReferences(command: command);
+        await expectLater(
+          snapshot(observer: observer).then((_) => true),
+          throwsA(
+            isA<ColdStateFailure>().having(
+              (e) => e.stage,
+              'stage',
+              'app_references',
+            ),
+          ),
+        );
+        expect(
+          await Directory('${backups.path}/.before.partial').exists(),
+          false,
+        );
+        await process.stdin.close();
+        expect((await child.result()).exitCode, 0);
+        expect(child.exitConfirmed, true);
+        expect(await observer.directory(app), isNot(contains(child.pid)));
+        await assertOwnership();
+      },
+    );
+  }, skip: !Platform.isMacOS);
+}
+
+final class _SnapshotHost implements ColdStateHost {
+  _SnapshotHost(this.appPath);
+  @override
+  final String appPath;
+  bool registered = false;
+  Future<void> Function()? onStatus;
+  @override
+  Future<DriverInventorySnapshot> inventory({required bool driver}) async =>
+      DriverInventorySnapshot(processes: [], unresolvedProcessIds: []);
+  @override
+  Future<Set<int>> stateReferences(Directory state) async => {pid};
+  @override
+  Future<ProcessResult> serviceStatus() async {
+    await onStatus?.call();
+    return ProcessResult(
+      pid,
+      0,
+      jsonEncode({
+        'action': 'status',
+        'bundle_identifier': 'org.gaovm.tests.Release',
+        'plist_name': 'gaovmd.plist',
+        'authorization_state': registered ? 'enabled' : 'notRegistered',
+        'native_status': 0,
+        'outcome': 'observed',
+        'error_code': null,
+      }),
+      '',
+    );
+  }
 }
 
 final class _RealNativeBoundary implements ReleaseInspectionHost {
