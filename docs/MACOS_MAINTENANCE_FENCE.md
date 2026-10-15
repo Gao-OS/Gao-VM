@@ -96,5 +96,8 @@ There is no begin/recover/clear CLI yet, no replacement-generation checkpoint,
 activation/write isolation, validated commit/retirement, whole-state rollback or
 uninstall transaction. The separate [paired snapshot](MACOS_RELEASE_INSPECTION.md#paired-old-app-and-state-snapshots)
 does not arm this guard and still reports `replacement_startup_fenced: false`.
+The separate [candidate preparation](MACOS_UPGRADE_PREPARATION.md) requires an
+already-held typed guard and retains it; its durable `candidate_prepared`
+checkpoint is not installed publication or replacement-generation recovery.
 Full lifecycle crash/low-disk, genuine signed installed-product, ARM64/VZ and
 GaoOS acceptance remain separate; this component does not complete M8.

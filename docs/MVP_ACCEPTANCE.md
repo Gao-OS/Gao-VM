@@ -955,3 +955,50 @@ explicit activation/validation/commit, fresh-cold whole-state rollback, uninstal
 and full lifecycle crash/low-disk/native acceptance remain unfinished. No real
 installed app/state/service or remote ref was changed; Apple Silicon/VZ/GaoOS
 execution remains assigned to the user. This does not complete M8 or the full goal.
+
+## 2026-10-15 fenced candidate-preparation checkpoint
+
+On top of `a3a255b`, the internal [candidate preparation](MACOS_UPGRADE_PREPARATION.md)
+composes the original held cold snapshot and persistent admission fence. It
+durably writes intent before copying, retains matching old app/complete state
+and a verified candidate copy, then publishes an immutable `candidate_prepared`
+checkpoint and workspace without replacement. Original installed app/state
+paths remain unchanged. Observed catalog schema, signatures, actual roles and
+component compatibility are checked, not inferred from a caller schema or label.
+
+Reopening requires explicit original app/state, expected old/new versions and
+Team ID, a newly valid held cold boundary and the original workspace's native
+identity. The candidate download directory need not survive; recovery verifies
+the fixed retained payload. Receipts cannot select filesystem targets or grant
+ownership. Unknown/partial/copy-substituted workspaces and altered inputs are
+refused without cleanup. Final-directory presence is not success after failed
+post-publication cold validation; explicit revalidation remains necessary.
+
+New red/green checks reproduced and fixed namespace-lock content tampering
+passing held-inode checks, hidden staging being accepted as a final recovery
+name, and changed snapshot-wrapper privacy being accepted. Full source reads
+after the last native callbacks and independent pre/post-publication payload/
+record checks cover late unknown state writes. Closing the preparation object
+releases only its own readers/storage lock and never clears the admission fence.
+
+The **16 new checks** passed in the final **499-test**, **35-file** combined run
+with concurrency 1, zero failures/skips, terminal success and confirmed test
+process exit. The report is `verified.jsonl` under
+`/private/tmp/gaovm-upgrade-preparation.0NzhrY/`. The same three previously
+excluded installed/startup checks were explicitly filtered and did not start;
+they are not counted as passes or skips. Dart analysis, pinned formatting
+(**294** files, zero changes), JSON Schema/OpenAPI validation, **89** scoped
+local Markdown targets and `git diff --check` passed. The unrelated UI lockfile
+remains unchanged and excluded. The broader daemon regressions and earlier
+failures were not rerun/resolved. No new Swift/CI/native installed/ARM64/VZ/GaoOS
+pass is claimed; positive signing, component and cold native observations use
+explicit boundary fixtures, not genuine signed-product lifecycle evidence.
+
+Only the preparation phase is implemented here. There is still no maintenance
+install/upgrade command outside renamed trees, original-app retirement,
+cross-parent candidate installation, replacement-generation recovery, activation/
+write isolation through explicit validation/commit, whole-state/app rollback
+with rewind acknowledgement, or data-preserving uninstall transaction. Full
+lifecycle crash/low-disk and genuine signed installed-product acceptance remain
+unproved. No real installed app/state/service or remote ref was changed; Apple
+Silicon/VZ/GaoOS work remains assigned to the user. This is not M8/MVP completion.

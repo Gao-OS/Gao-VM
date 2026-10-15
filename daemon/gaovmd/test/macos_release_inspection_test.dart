@@ -15,6 +15,7 @@ import 'package:gaovmd/src/macos_cold_state_host.dart';
 import 'package:gaovmd/src/macos_open_references.dart';
 import 'package:gaovmd/src/maintenance_command.dart';
 import 'package:gaovmd/src/maintenance_tree.dart';
+import 'package:gaovmd/src/maintenance_state_fence.dart';
 import 'package:test/test.dart';
 
 import 'helpers/owned_test_process.dart';
@@ -467,6 +468,624 @@ void main() {
           ),
       inventory: (_) async =>
           DriverInventorySnapshot(processes: [], unresolvedProcessIds: []),
+    );
+
+    Future<(ColdStateSnapshot, MaintenanceStateFence)> guardedState() async {
+      final fence = await MaintenanceStateFence.begin(lease);
+      addTearDown(fence.close);
+      final prepared = await ColdStateSnapshot.prepare(
+        lease,
+        inspection,
+        observer: MacOsOpenReferences(
+          command: (_, _) async => ProcessResult(pid, 1, '', ''),
+        ),
+        inventory: (_) async =>
+            DriverInventorySnapshot(processes: [], unresolvedProcessIds: []),
+      );
+      addTearDown(prepared.close);
+      return (prepared, fence);
+    }
+
+    Future<(ColdStateSnapshot, MaintenanceStateFence, ColdUpgradePreparation)>
+    fencedPreparation() async {
+      final candidate = Directory('${temporary.path}/Candidate.app');
+      await _fixture(candidate);
+      final (prepared, fence) = await guardedState();
+      final transaction = await ColdUpgradePreparation.create(
+        prepared,
+        fence,
+        backups,
+        'upgrade',
+        candidateApp: candidate,
+        oldVersion: '0.1.0',
+        newVersion: '0.1.0',
+        teamIdentifier: 'ABCDEFGHIJ',
+        host: host,
+        observer: MacOsOpenReferences(
+          command: (_, _) async => ProcessResult(pid, 1, '', ''),
+        ),
+      );
+      addTearDown(transaction.close);
+      return (prepared, fence, transaction);
+    }
+
+    test(
+      'fenced candidate preparation journals matching old state without installing it',
+      () async {
+        final candidate = Directory('${temporary.path}/Candidate.app');
+        await _fixture(candidate);
+        await File(
+          '${candidate.path}/Contents/Resources/candidate-only',
+        ).writeAsString('new candidate resource');
+        final fence = await MaintenanceStateFence.begin(lease);
+        ColdStateSnapshot? prepared;
+        ColdUpgradePreparation? transaction;
+        final appTree = await MaintenanceTree.open(app);
+        final stateTree = await MaintenanceTree.open(state);
+        try {
+          final oldApp = await appTree.capture(nativeMetadata: true);
+          final oldState = await stateTree.capture(nativeMetadata: true);
+          prepared = await ColdStateSnapshot.prepare(
+            lease,
+            inspection,
+            observer: MacOsOpenReferences(
+              command: (_, _) async => ProcessResult(pid, 1, '', ''),
+            ),
+            inventory: (_) async => DriverInventorySnapshot(
+              processes: [],
+              unresolvedProcessIds: [],
+            ),
+          );
+          transaction = await ColdUpgradePreparation.create(
+            prepared,
+            fence,
+            backups,
+            'upgrade',
+            candidateApp: candidate,
+            oldVersion: '0.1.0',
+            newVersion: '0.1.0',
+            teamIdentifier: 'ABCDEFGHIJ',
+            host: host,
+            observer: MacOsOpenReferences(
+              command: (_, _) async => ProcessResult(pid, 1, '', ''),
+            ),
+          );
+          expect(transaction.toJson()['phase'], 'candidate_prepared');
+          expect(transaction.toJson()['catalog_schema'], 21);
+          expect(transaction.toJson()['installed_candidate_published'], false);
+          expect(
+            await File(
+              '${transaction.path}/candidate-app/payload.app/Contents/Resources/candidate-only',
+            ).readAsString(),
+            'new candidate resource',
+          );
+          expect(
+            await File(
+              '${transaction.path}/original-state/payload/unknown-data',
+            ).readAsString(),
+            'preserve state',
+          );
+          expect(
+            await File('${transaction.path}/prepared/record.json').exists(),
+            true,
+          );
+          expect(
+            await Directory('${backups.path}/.upgrade.partial').exists(),
+            false,
+          );
+          await transaction.verify();
+          await appTree.verify(oldApp, nativeMetadata: true);
+          await stateTree.verify(oldState, nativeMetadata: true);
+          await expectLater(
+            MaintenanceStateFence.requireUnfenced(state),
+            throwsA(isA<MaintenanceFenceActive>()),
+          );
+        } finally {
+          transaction?.close();
+          prepared?.close();
+          fence.close();
+          appTree.close();
+          stateTree.close();
+        }
+        await lease.verify();
+      },
+    );
+
+    test(
+      'prepared candidate reopens without the original candidate source',
+      () async {
+        final (prepared, fence, transaction) = await fencedPreparation();
+        transaction.close();
+        await Directory(
+          '${temporary.path}/Candidate.app',
+        ).rename('${temporary.path}/retained-candidate.app');
+        final reopened = await ColdUpgradePreparation.open(
+          prepared,
+          fence,
+          backups,
+          'upgrade',
+          oldVersion: '0.1.0',
+          newVersion: '0.1.0',
+          teamIdentifier: 'ABCDEFGHIJ',
+          host: host,
+          observer: MacOsOpenReferences(
+            command: (_, _) async => ProcessResult(pid, 1, '', ''),
+          ),
+        );
+        try {
+          expect(reopened.toJson()['phase'], 'candidate_prepared');
+          expect(reopened.path, '${backups.path}/upgrade');
+          reopened.toJson()['phase'] = 'committed';
+          expect(reopened.toJson()['phase'], 'candidate_prepared');
+          await reopened.verify();
+        } finally {
+          reopened.close();
+        }
+        await fence.verify();
+        await lease.verify();
+      },
+    );
+
+    test(
+      'active preparation rejects namespace lock tampering without repairing it',
+      () async {
+        final (_, _, transaction) = await fencedPreparation();
+        final lockFile = File('${backups.path}/.gaovm-upgrade.lock');
+        await lockFile.writeAsString('unknown namespace owner');
+        await expectLater(
+          transaction.verify(),
+          throwsA(isA<FormatException>()),
+        );
+        expect(await lockFile.readAsString(), 'unknown namespace owner');
+        await lease.verify();
+      },
+    );
+
+    test(
+      'interrupted candidate preparation retains intent and refuses completed-phase recovery',
+      () async {
+        final candidate = Directory('${temporary.path}/Candidate.app');
+        await _fixture(candidate);
+        final (prepared, fence) = await guardedState();
+        host.onProbe = () async {
+          if (await Directory(
+            '${backups.path}/.upgrade.partial/candidate-app',
+          ).exists()) {
+            throw StateError(
+              'injected interruption after all copies, before checkpoint',
+            );
+          }
+        };
+        await expectLater(
+          ColdUpgradePreparation.create(
+            prepared,
+            fence,
+            backups,
+            'upgrade',
+            candidateApp: candidate,
+            oldVersion: '0.1.0',
+            newVersion: '0.1.0',
+            teamIdentifier: 'ABCDEFGHIJ',
+            host: host,
+            observer: MacOsOpenReferences(
+              command: (_, _) async => ProcessResult(pid, 1, '', ''),
+            ),
+          ),
+          throwsA(isA<MaintenanceSnapshotFailure>()),
+        );
+        host.onProbe = null;
+        final partial = '${backups.path}/.upgrade.partial';
+        expect(await File('$partial/intent.json').exists(), true);
+        expect(
+          await File(
+            '$partial/original-state/payload/unknown-data',
+          ).readAsString(),
+          'preserve state',
+        );
+        expect(await Directory('$partial/prepared').exists(), false);
+        expect(await Directory('${backups.path}/upgrade').exists(), false);
+        await expectLater(
+          ColdUpgradePreparation.open(
+            prepared,
+            fence,
+            backups,
+            'upgrade',
+            oldVersion: '0.1.0',
+            newVersion: '0.1.0',
+            teamIdentifier: 'ABCDEFGHIJ',
+            host: host,
+          ),
+          throwsA(isA<FormatException>()),
+        );
+        expect(await File('$partial/intent.json').exists(), true);
+        expect(
+          await File('${state.path}/unknown-data').readAsString(),
+          'preserve state',
+        );
+        await expectLater(
+          MaintenanceStateFence.requireUnfenced(state),
+          throwsA(isA<MaintenanceFenceActive>()),
+        );
+        await lease.verify();
+      },
+    );
+
+    test(
+      'preparation catches unknown source writes in the last native checkpoint pass',
+      () async {
+        var changed = false;
+        host.onProbe = () async {
+          if (!changed &&
+              await File(
+                '${backups.path}/.upgrade.partial/prepared/record.json',
+              ).exists()) {
+            changed = true;
+            await File(
+              '${state.path}/unknown-data',
+            ).writeAsString('late native callback changed unknown state');
+          }
+        };
+        await expectLater(
+          fencedPreparation(),
+          throwsA(isA<MaintenanceSnapshotFailure>()),
+        );
+        host.onProbe = null;
+        expect(changed, true);
+        expect(await Directory('${backups.path}/upgrade').exists(), false);
+        expect(
+          await File(
+            '${backups.path}/.upgrade.partial/prepared/record.json',
+          ).exists(),
+          true,
+        );
+        expect(
+          await File(
+            '${backups.path}/.upgrade.partial/original-state/payload/unknown-data',
+          ).readAsString(),
+          'preserve state',
+        );
+        expect(
+          await File('${state.path}/unknown-data').readAsString(),
+          'late native callback changed unknown state',
+        );
+        await lease.verify();
+      },
+    );
+
+    test(
+      'prepared candidate recovery requires newly acquired cold ownership and fence',
+      () async {
+        final (prepared, fence, transaction) = await fencedPreparation();
+        transaction.close();
+        prepared.close();
+        lease.close();
+        fence.close();
+        final recoveredFence = await MaintenanceStateFence.open(state);
+        addTearDown(recoveredFence.close);
+        lease = await ColdStateLease.acquire(
+          state,
+          bundleIdentifier: 'org.gaovm.tests.Release',
+          host: coldHost,
+          maintenanceFence: recoveredFence,
+        );
+        final scratch = await Directory(
+          '${temporary.path}/recovery-inspection',
+        ).create();
+        imageFileMode(scratch.path, 0x1c0);
+        final ownedScratch = await OwnedImageDirectory.open(scratch);
+        addTearDown(ownedScratch.close);
+        final recoveredState = await ColdStateSnapshot.prepare(
+          lease,
+          ownedScratch,
+          observer: MacOsOpenReferences(
+            command: (_, _) async => ProcessResult(pid, 1, '', ''),
+          ),
+          inventory: (_) async =>
+              DriverInventorySnapshot(processes: [], unresolvedProcessIds: []),
+        );
+        addTearDown(recoveredState.close);
+        final recovered = await ColdUpgradePreparation.open(
+          recoveredState,
+          recoveredFence,
+          backups,
+          'upgrade',
+          oldVersion: '0.1.0',
+          newVersion: '0.1.0',
+          teamIdentifier: 'ABCDEFGHIJ',
+          host: host,
+          observer: MacOsOpenReferences(
+            command: (_, _) async => ProcessResult(pid, 1, '', ''),
+          ),
+        );
+        try {
+          expect(recovered.toJson()['phase'], 'candidate_prepared');
+          await recovered.verify();
+        } finally {
+          recovered.close();
+        }
+        await recoveredFence.verify();
+        await lease.verify();
+      },
+    );
+
+    test(
+      'prepared candidate refuses concurrent recovery and explicit identity disagreement',
+      () async {
+        final (prepared, fence, transaction) = await fencedPreparation();
+        Future<ColdUpgradePreparation> reopen({
+          String oldVersion = '0.1.0',
+          String newVersion = '0.1.0',
+          String team = 'ABCDEFGHIJ',
+          String name = 'upgrade',
+        }) => ColdUpgradePreparation.open(
+          prepared,
+          fence,
+          backups,
+          name,
+          oldVersion: oldVersion,
+          newVersion: newVersion,
+          teamIdentifier: team,
+          host: host,
+          observer: MacOsOpenReferences(
+            command: (_, _) async => ProcessResult(pid, 1, '', ''),
+          ),
+        );
+        await expectLater(reopen(), throwsA(isA<StateError>()));
+        transaction.close();
+        final probes = host.executedRoles.length;
+        for (final future in [
+          () => reopen(oldVersion: '0.2.0'),
+          () => reopen(newVersion: '0.2.0'),
+          () => reopen(team: 'KLMNOPQRST'),
+        ]) {
+          await expectLater(future(), throwsA(isA<FormatException>()));
+        }
+        expect(host.executedRoles.length, probes);
+        expect(
+          (await command('/bin/cp', [
+            '-pR',
+            '${backups.path}/upgrade',
+            '${backups.path}/copied',
+          ])).exitCode,
+          0,
+        );
+        await expectLater(
+          reopen(name: 'copied'),
+          throwsA(isA<FormatException>()),
+        );
+        expect(host.executedRoles.length, probes);
+        expect(
+          await File('${backups.path}/copied/prepared/record.json').exists(),
+          true,
+        );
+        final valid = await reopen();
+        valid.close();
+        await lease.verify();
+      },
+    );
+
+    for (final failure in [
+      'candidate bytes',
+      'old state bytes',
+      'wrapper privacy',
+      'unknown entry',
+      'phase',
+      'intent path',
+      'signature',
+    ]) {
+      test(
+        'prepared candidate recovery refuses $failure without cleanup',
+        () async {
+          final (prepared, fence, transaction) = await fencedPreparation();
+          transaction.close();
+          final root = '${backups.path}/upgrade';
+          if (failure == 'candidate bytes') {
+            await File(
+              '$root/candidate-app/payload.app/Contents/Resources/unknown',
+            ).writeAsString('preserve changed candidate');
+          } else if (failure == 'old state bytes') {
+            final file = File('$root/original-state/payload/unknown-data');
+            await file.writeAsString('preserve changed backup');
+          } else if (failure == 'wrapper privacy') {
+            imageFileMode('$root/original-state', 0x1ed);
+          } else if (failure == 'unknown entry') {
+            await File(
+              '$root/unknown',
+            ).writeAsString('preserve unknown checkpoint entry');
+          } else if (failure == 'signature') {
+            host.rejectSignature = true;
+          } else {
+            final file = File(
+              failure == 'phase'
+                  ? '$root/prepared/record.json'
+                  : '$root/intent.json',
+            );
+            final value =
+                jsonDecode(await file.readAsString()) as Map<String, Object?>;
+            value[failure == 'phase'
+                ? 'phase'
+                : 'source_state'] = failure == 'phase'
+                ? 'committed'
+                : '${temporary.path}/foreign-state';
+            imageFileMode(file.path, 0x180);
+            await file.writeAsString('${jsonEncode(value)}\n');
+            imageFileMode(file.path, 0x100);
+          }
+          final before = await MaintenanceTree.open(Directory(root));
+          try {
+            final manifest = await before.capture(nativeMetadata: true);
+            await expectLater(
+              ColdUpgradePreparation.open(
+                prepared,
+                fence,
+                backups,
+                'upgrade',
+                oldVersion: '0.1.0',
+                newVersion: '0.1.0',
+                teamIdentifier: 'ABCDEFGHIJ',
+                host: host,
+                observer: MacOsOpenReferences(
+                  command: (_, _) async => ProcessResult(pid, 1, '', ''),
+                ),
+              ).then((unexpected) {
+                unexpected.close();
+                return true;
+              }),
+              throwsA(
+                anyOf(isA<FormatException>(), isA<ReleaseInspectionFailure>()),
+              ),
+            );
+            await before.verify(manifest, nativeMetadata: true);
+          } finally {
+            before.close();
+          }
+          expect(
+            await File('${state.path}/unknown-data').readAsString(),
+            'preserve state',
+          );
+          await fence.verify();
+          await lease.verify();
+        },
+      );
+    }
+
+    test(
+      'prepared checkpoint in retained staging is not recoverable as a published name',
+      () async {
+        final candidate = Directory('${temporary.path}/Candidate.app');
+        await _fixture(candidate);
+        final (prepared, fence) = await guardedState();
+        host.onProbe = () async {
+          if (await File(
+            '${backups.path}/.upgrade.partial/prepared/record.json',
+          ).exists()) {
+            throw StateError('interrupted before outer publication');
+          }
+        };
+        await expectLater(
+          ColdUpgradePreparation.create(
+            prepared,
+            fence,
+            backups,
+            'upgrade',
+            candidateApp: candidate,
+            oldVersion: '0.1.0',
+            newVersion: '0.1.0',
+            teamIdentifier: 'ABCDEFGHIJ',
+            host: host,
+            observer: MacOsOpenReferences(
+              command: (_, _) async => ProcessResult(pid, 1, '', ''),
+            ),
+          ),
+          throwsA(isA<MaintenanceSnapshotFailure>()),
+        );
+        host.onProbe = null;
+        expect(
+          await File(
+            '${backups.path}/.upgrade.partial/prepared/record.json',
+          ).exists(),
+          true,
+        );
+        await expectLater(
+          ColdUpgradePreparation.open(
+            prepared,
+            fence,
+            backups,
+            '.upgrade.partial',
+            oldVersion: '0.1.0',
+            newVersion: '0.1.0',
+            teamIdentifier: 'ABCDEFGHIJ',
+            host: host,
+            observer: MacOsOpenReferences(
+              command: (_, _) async => ProcessResult(pid, 1, '', ''),
+            ),
+          ).then((opened) {
+            opened.close();
+            return true;
+          }),
+          throwsArgumentError,
+        );
+        expect(await Directory('${backups.path}/upgrade').exists(), false);
+        await lease.verify();
+      },
+    );
+
+    test(
+      'prepared candidate after a final cold failure remains uncommitted and requires revalidation',
+      () async {
+        final candidate = Directory('${temporary.path}/Candidate.app');
+        await _fixture(candidate);
+        final (prepared, fence) = await guardedState();
+        coldHost.onStatus = () async {
+          if (await File(
+            '${backups.path}/upgrade/prepared/record.json',
+          ).exists())
+            coldHost.registered = true;
+        };
+        await expectLater(
+          ColdUpgradePreparation.create(
+            prepared,
+            fence,
+            backups,
+            'upgrade',
+            candidateApp: candidate,
+            oldVersion: '0.1.0',
+            newVersion: '0.1.0',
+            teamIdentifier: 'ABCDEFGHIJ',
+            host: host,
+            observer: MacOsOpenReferences(
+              command: (_, _) async => ProcessResult(pid, 1, '', ''),
+            ),
+          ),
+          throwsA(isA<MaintenanceSnapshotFailure>()),
+        );
+        expect(coldHost.registered, true);
+        expect(
+          await Directory('${backups.path}/.upgrade.partial').exists(),
+          false,
+        );
+        expect(
+          await File('${backups.path}/upgrade/prepared/record.json').exists(),
+          true,
+        );
+        coldHost.onStatus = null;
+        await expectLater(
+          ColdUpgradePreparation.open(
+            prepared,
+            fence,
+            backups,
+            'upgrade',
+            oldVersion: '0.1.0',
+            newVersion: '0.1.0',
+            teamIdentifier: 'ABCDEFGHIJ',
+            host: host,
+          ),
+          throwsA(isA<ColdStateFailure>()),
+        );
+        coldHost.registered = false;
+        final recovered = await ColdUpgradePreparation.open(
+          prepared,
+          fence,
+          backups,
+          'upgrade',
+          oldVersion: '0.1.0',
+          newVersion: '0.1.0',
+          teamIdentifier: 'ABCDEFGHIJ',
+          host: host,
+          observer: MacOsOpenReferences(
+            command: (_, _) async => ProcessResult(pid, 1, '', ''),
+          ),
+        );
+        try {
+          expect(recovered.toJson()['phase'], 'candidate_prepared');
+          expect(recovered.toJson()['installed_candidate_published'], false);
+          expect(recovered.toJson()['rollback_authorized'], false);
+        } finally {
+          recovered.close();
+        }
+        await fence.verify();
+        await lease.verify();
+      },
     );
 
     test('another app reference refuses before paired staging', () async {
@@ -1059,6 +1678,13 @@ final class _NativeBoundary implements ReleaseInspectionHost {
     List<int>? input,
   }) async {
     String output = '', error = '';
+    int verifiedFor(String executable) {
+      final root = executable.split('/Contents/').first;
+      return _verified
+          .where((path) => path == root || path.startsWith('$root/Contents/'))
+          .length;
+    }
+
     if (executable == '/usr/bin/plutil') {
       output = input == null
           ? await File(arguments.last).readAsString()
@@ -1119,7 +1745,7 @@ final class _NativeBoundary implements ReleaseInspectionHost {
       }
     } else if (arguments.length == 1 && arguments.single == 'status') {
       expect(executable, endsWith('/Contents/MacOS/gaovm-service'));
-      expect(_verified.length, 5);
+      expect(verifiedFor(executable), 5);
       statusCalls++;
       output = jsonEncode({
         'action': 'status',
@@ -1133,7 +1759,7 @@ final class _NativeBoundary implements ReleaseInspectionHost {
     } else {
       expect(arguments, ['--component-info']);
       expect(
-        _verified.length,
+        verifiedFor(executable),
         5,
         reason: 'all code is verified before any candidate code executes',
       );

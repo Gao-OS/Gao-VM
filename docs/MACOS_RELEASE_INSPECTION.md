@@ -93,6 +93,9 @@ A separate [persistent admission guard](MACOS_MAINTENANCE_FENCE.md) now blocks
 ordinary startup during marked maintenance. Full transaction writer isolation,
 candidate publication, validation/commit, rollback/recovery, uninstall and
 installed cold acquisition remain separate M8 work.
+The internal [fenced preparation checkpoint](MACOS_UPGRADE_PREPARATION.md) now
+combines the original pair and candidate copy, with explicit reopen/revalidation;
+it still does not publish the candidate into the installed app namespace.
 
 ## Cold-state preparation library
 
