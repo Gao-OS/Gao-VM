@@ -10,7 +10,8 @@ upgrade commit, rollback or retained-file cleanup.
 
 **This is not a production-ready upgrade transaction.** A successful publication
 intentionally leaves ordinary startup blocked by a persistent fence. Activation,
-validation/commit and paired whole-state/app rollback are not implemented yet.
+explicit validation recovery/commit and paired whole-state/app rollback remain
+unfinished. The separate candidate-only validation entry below is not activation.
 The command must not be substituted for a complete upgrade, and this document
 does not authorize running it against an actual installation.
 
@@ -140,6 +141,67 @@ and expectations. Journal paths are provenance, not filesystem selectors.
 Unknown entries, incomplete records, a substituted inode, a foreign occupied slot,
 or both/neither candidate locations are refused. Already-published recovery
 revalidates the same candidate without replacing it. No automatic undo occurs.
+
+## Candidate-only validation
+
+The published-candidate integration passes with a private, populated schema-21
+catalog and real managed files, restricted HTTP UDS and retained snapshots.
+Signature/service/ARM64/process boundaries are fixtures, not an installed native
+upgrade result. Earlier timed-out inputs remain retained; see the
+[acceptance ledger](MVP_ACCEPTANCE.md). The complete upgrade transaction is still
+unfinished.
+
+The installed candidate daemon now has a one-shot internal entry. This is not
+an action of the outside-app publication tool, a generic fence bypass or a
+production-ready launcher. An operator must independently establish the trusted
+candidate identity before executing it; an outside-app verified launcher is
+still unfinished. This source interface does not authorize executing any command
+against an actual installation as part of the current development task.
+
+After completed publication, with a new empty private inspection directory and
+the working directory outside all protected trees, the interface is:
+
+```sh
+/absolute/install/GaoVM.app/Contents/MacOS/gaovmd --validate-upgrade \
+  --app /absolute/install/GaoVM.app \
+  --state-dir /absolute/private-state \
+  --work-dir /absolute/private-upgrade-work \
+  --inspection-dir /absolute/private-new-validation-inspection \
+  --bundle-id org.example.GaoVM \
+  --old-version 0.1.0 --new-version 0.1.1 --team-id ABCDEFGHIJ \
+  --catalog-schema 21
+```
+
+The schema input describes the pre-migration catalog, independently rechecked
+against the publication and cold source (0 means pre-catalog). The executable
+must resolve to exactly the explicitly selected installed candidate daemon.
+Source Dart execution, another binary or a staged candidate cannot opt in.
+Native signatures, component/contract identity, publication/preparation receipts,
+service status, unresolved/other processes and real state/work/fence ownership
+are still checked; only the exact versioned candidate self PID is admitted.
+
+The actual catalog is migrated under the original-state lease, its writer closes,
+and the normal read handlers/doctor are exercised over the restricted private
+UDS with a native read-only connection. No normal startup/recovery or background
+workers run. All original request/native probe work drains before ownership is
+released, and the persistent read-only interval is verified unchanged. See the
+[validation composition](MACOS_VALIDATION_ISOLATION.md#candidate-only-controlled-validation)
+for the exact limits and evidence.
+
+Success is one `gaovm.cold-validation-command.v1` JSON object with
+`phase: candidate_validated` and the applied catalog schema. A sealed full record
+is retained at `work/validation/completed/record.json`, with an independent full
+post-validation state snapshot at `work/validation/validated-state`. The original
+rollback pair remains intact. The process exits; ordinary startup stays fenced,
+and `committed`, `activation_authorized` and `rollback_authorized` stay false.
+Neither a green doctor nor this receipt authorizes registration or commit.
+
+Partial/unknown validation output is retained. A blind repeat refuses it;
+explicit interrupted-validation recovery and cold commit are not implemented.
+Do not delete the fence/output to force retry, reuse publication-only recovery
+after migration, or substitute the new snapshot for the original rollback pair.
+The future commit must independently re-establish the cold boundary and validate
+the retained app/state identities and intervening-write boundary.
 
 ## Data-preserving cold uninstall
 

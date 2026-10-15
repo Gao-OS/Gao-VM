@@ -1473,3 +1473,85 @@ app/state/service operation, machine switch, Swift/VZ/GaoOS or Apple Silicon
 execution occurred. Explicit validation recovery/commit, verified outside-app
 launcher, activation, paired whole-state/app rollback, first install and the full
 native/crash/low-disk acceptance remain unfinished. M8/MVP and the goal remain open.
+
+## 2026-10-16 cold snapshot closure and candidate validation composition
+
+Local commit `afbd63b` fixes cold snapshot verification at its last native
+observation boundary. A test-first reproduction changed sealed managed image
+bytes from that observer: the old coordinator incorrectly returned success.
+The coordinator now uses private constituents under the same held lease instead
+of recursively invoking their complete native-context wrappers, then re-reads
+every constituent's persistent evidence after the final native callback.
+Standalone inspection wrappers remain intact; no file evidence is cached or
+native observation kind waived. A fixture profile reduced one composed verify
+from 70 service-status calls to 4. That count is diagnostic evidence, not a
+production performance benchmark; temporary profiling code was removed.
+
+Local commit `ddbd36b` adds the candidate-only controlled validation command.
+The executing installed candidate, versioned self PID, publication/preparation
+receipts, persistent fence and actual original-state owner must agree. It opens
+the actual catalog for controlled migration, closes the writer, reopens natively
+read-only and exercises restricted HTTP UDS resource/doctor/artifact reads.
+Original native/request work drains before directories/catalog/ownership close.
+A complete post-validation state copy and sealed completion record are retained
+separately from the unchanged pre-upgrade rollback pair. Ordinary startup remains
+fenced; activation, rollback and commit authorization remain false.
+
+The light publication/uninstall command graph is separate from this API
+composition. An initial diagnostic cold cohort found 22 ten-second source-child
+startup failures after the heavier graph leaked into those commands. Those
+owned children exited; the mixed-source diagnostic run is not the acceptance
+result. After the split, the fresh full cold cohort passes with the original
+ten-second child deadlines unchanged. No candidate/fence bypass flag was added.
+
+Current terminal successes, each with confirmed runner exit and zero failures
+or skips, use concurrency 1 and retained native JSON under
+`/private/tmp/gaovm-cold-composition.8x6lov`:
+
+- `cold-verified.jsonl`: **286 checks across 12 files**, **374.947 seconds**.
+  Covers catalog, external references, legacy/managed/runtime files, snapshots,
+  leases/backup, maintenance trees/fences and publication command entry checks.
+- `candidate-positive.jsonl`: the original full current-catalog candidate test
+  passes in **254.253 seconds**, without extending its eight-minute timeout.
+- `candidate-populated-final.jsonl`: **9 command checks**, **231.415 seconds**.
+  Uses a real managed image and provisioned stopped VM, terminal cancelled
+  TestRun, Operations/events, linked managed binary artifact, expired retention/
+  idempotency records and unknown private bytes. Verifies resource identity,
+  artifact bytes/digest, read-only persistent state, sealed retained evidence and
+  continuing startup fencing. Seven census cases reject missing/unversioned/
+  changed self identity, another/unresolved daemon and live/unresolved drivers
+  without catalog migration or validation-intent writes; source execution is
+  separately refused before state I/O.
+- `candidate-regression-final.jsonl`: **549 checks across 47 files**,
+  **130.257 seconds**. This re-runs the wider API/catalog/ownership/doctor/runtime
+  cohort against the final implementation; it is not every daemon test.
+
+The expanded fixture initially failed its existing Artifact ownership guard;
+it now establishes the TestRun/VM binding through ordinary repository phases and
+publishes during collection. A later final assertion incorrectly expected
+`defined` instead of the existing provisioning contract's `stopped`. The final
+fresh nine-check run passes after correcting that assertion. No business guard
+or timeout was weakened. Native signature/ARM64/service/process observations
+remain fixtures: real private files/SQLite/HTTP and Intel filesystem primitives
+do not certify installed native identity, activation or VZ/Guest execution.
+
+Daemon analysis has no issues. Root analysis exits 0 with the same nine existing
+UI informational notices. Pinned Dart 3.9.0 non-UI formatting checks **388 files
+with zero changes**. JSON Schema/OpenAPI validation, workflow YAML/two selected
+CI steps with seventeen existing explicit test targets, scoped Markdown file
+targets and `git diff --check` pass. Intel daemon and maintenance AOT builds,
+no-HOME help/component evidence and non-candidate refusal were exercised after
+the implementation split. actionlint, Markdown anchors, remote CI, full UI and
+Swift/Apple Silicon/VZ/GaoOS execution were not run. The unrelated UI lockfile
+remains byte-identical and excluded.
+
+The previous timed-out inputs and `.validated-state.partial` described above
+still exist and were not deleted, promoted or blindly reused. Historical/
+pre-catalog migration through this composition, full release-inspection/native/
+crash/low-disk matrices, the previously unrun installed/startup scenarios and
+earlier broad/default-concurrency failures remain unverified or unresolved.
+Explicit validation recovery/commit, a verified outside-app launcher, activation,
+paired whole-state/app rollback and first install remain unfinished. No push,
+PR, release, installed app/state/service operation or machine switch occurred.
+Apple Silicon execution remains assigned to the user. M8/MVP and the goal remain
+open; this is a validated candidate-composition slice, not a completed upgrade.
