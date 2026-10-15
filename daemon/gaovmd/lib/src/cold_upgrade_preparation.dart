@@ -451,6 +451,114 @@ final class ColdUpgradePreparation {
     await _verifyNamespace();
   }
 
+  /// Controlled migration may change catalog bytes and add managed assets, but
+  /// cannot rewrite pre-existing non-catalog files or the retained old pair.
+  /// This deliberately does not call the pre-migration catalog verifier.
+  Future<void> verifyRetainedValidationInputs() async {
+    if (_closed) throw StateError('upgrade preparation is closed');
+    await _state._state.verify();
+    await _verifyFence(_state, _fence);
+    await _verifyOutput();
+    await _verifyNamespace();
+    await _originalApp.verify(
+      (_record['original_app_receipt'] as Map)['manifest']
+          as Map<String, Object?>,
+      nativeMetadata: true,
+    );
+    if (!_equal(
+          await _identity(_state._state.path),
+          _intent['source_state_identity'],
+        ) ||
+        !_equal(
+          await _identity(_state._state.appPath),
+          _intent['source_app_identity'],
+        )) {
+      throw const FormatException('validation original inode changed');
+    }
+    for (final held in <_HeldReference>{
+      ...?_state._references?._files.values,
+      ..._state._legacy._files.values,
+    }) {
+      if (held.file.path.startsWith('${_state._state.path}/')) continue;
+      if ((await _observer.file(
+            File(held.file.path),
+          )).any((process) => process != pid) ||
+          JsonValue.fromJson(await _seal(held.file)) != held.evidence) {
+        throw const FormatException(
+          'validation changed an original external file',
+        );
+      }
+      await held.parent.verifyPathBinding();
+    }
+    final before =
+        (_record['original_state_receipt'] as Map)['manifest'] as Map;
+    final after = await _state._capturePersistent();
+    for (final entry in before.entries) {
+      if (const {
+        'gaovm.db',
+        'gaovm.db-wal',
+        'gaovm.db-shm',
+      }.contains(entry.key))
+        continue;
+      final original = Map<String, Object?>.from(entry.value as Map);
+      final currentValue = after[entry.key];
+      if (currentValue is! Map<String, Object?>)
+        throw const FormatException('validation removed original state data');
+      final current = Map<String, Object?>.from(currentValue);
+      if (const {'', 'images', 'vms', 'artifacts'}.contains(entry.key) &&
+          original['kind'] == 'directory') {
+        for (final value in [original, current]) {
+          value['metadata'] = Map<String, Object?>.from(
+            value['metadata'] as Map,
+          )..remove('modified');
+        }
+      }
+      if (!_equal(original, current))
+        throw const FormatException(
+          'validation changed original non-catalog data',
+        );
+    }
+    await _verifyOutput();
+    await _verifyNamespace();
+  }
+
+  /// Full post-validation state is retained independently, not substituted for
+  /// the pre-upgrade rollback snapshot. All native observers settle before the
+  /// final filesystem-only source/receipt comparison.
+  Future<Map<String, Object?>> retainValidatedState(
+    OwnedImageDirectory inspection,
+    OwnedImageDirectory storage, {
+    required MacOsOpenReferences observer,
+    required Future<DriverInventorySnapshot> Function(String) inventory,
+  }) async {
+    await verifyRetainedValidationInputs();
+    final post = await ColdStateSnapshot.prepare(
+      _state._state,
+      inspection,
+      observer: observer,
+      inventory: inventory,
+    );
+    try {
+      final receipt = await post.snapshotTo(storage, 'validated-state');
+      await post.verify();
+      await verifyRetainedValidationInputs();
+      final retained = storage.directory('validated-state');
+      try {
+        await MaintenanceTree.verifySnapshotContents(retained, receipt);
+      } finally {
+        retained.close();
+      }
+      if (!_equal(await post._capturePersistent(), receipt['manifest'])) {
+        throw const FormatException(
+          'validated state changed after native observations',
+        );
+      }
+      return receipt;
+    } finally {
+      post.close();
+    }
+  }
+
   /// Retire only the exact prepared original app while the existing state lease
   /// keeps its kernel ownership. The immutable checkpoint and candidate copies
   /// stay put. The returned observation is not candidate publication or commit.

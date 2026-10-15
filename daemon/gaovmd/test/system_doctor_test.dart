@@ -361,6 +361,31 @@ void main() {
     });
   });
   test(
+    'maintenance drain retains the original timed out native observation',
+    () async {
+      await _withDoctor((fixture) async {
+        final release = Completer<HostMetrics>();
+        fixture.host.pendingMetrics = release;
+        Future<void>? draining;
+        try {
+          final response = await fixture.request();
+          expect(DoctorResult.fromJson(response.body).healthy, false);
+          var drained = false;
+          draining = fixture.doctor.drain().then((_) => drained = true);
+          await Future<void>.delayed(const Duration(milliseconds: 150));
+          expect(drained, false);
+          expect(fixture.host.resourceSamples, 1);
+          expect(await fixture.database.read((db) => db.userVersion), 21);
+          expect(() => fixture.doctor.check(), throwsStateError);
+        } finally {
+          release.complete(fixture.host.metrics);
+          await draining;
+        }
+      }, timeout: const Duration(milliseconds: 100));
+    },
+  );
+
+  test(
     'doctor bounds its response and coalesces an unfinished native observation',
     () async {
       await _withDoctor((fixture) async {

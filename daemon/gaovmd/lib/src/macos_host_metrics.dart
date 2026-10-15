@@ -22,6 +22,9 @@ final class MacOsHostMetricsSource implements HostMetricsSource {
   final OwnedImageDirectory storage;
   final FutureOr<int> Function() _countUnmanagedDrivers;
 
+  /// No observation deadline may abandon native work borrowing maintenance roots.
+  Future<HostMetrics> sampleForMaintenance() => _sample();
+
   @override
   Future<HostMetrics> sample() async {
     try {

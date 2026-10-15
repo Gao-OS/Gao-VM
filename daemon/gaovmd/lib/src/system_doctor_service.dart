@@ -66,6 +66,13 @@ final class SystemDoctorService {
     }
   }
 
+  /// A maintenance owner must retain roots/catalog until the original probes
+  /// actually settle, even after a public diagnostic observation times out.
+  Future<void> drain() async {
+    _closed = true;
+    await _scan?.done;
+  }
+
   _DoctorScan _begin() {
     final elapsed = Stopwatch()..start();
     final driver = Future.sync(host.inspectDriver);

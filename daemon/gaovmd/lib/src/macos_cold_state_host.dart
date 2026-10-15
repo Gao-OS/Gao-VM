@@ -32,10 +32,13 @@ final class MacOsColdStateHost implements ColdStateHost {
   final MacOsOpenReferences _observer;
   final Future<DriverInventorySnapshot> Function(String) _inventory;
   final _AppRetirement? _retirement;
+  String? _validationExecutable;
+  DriverProcessIdentity? _validationProcess;
   @override
   String get appPath => _app.path;
   String get installationPath => _retirement?.sourceAppPath ?? appPath;
   bool get isRetired => _retirement != null;
+  bool get isValidatingCandidate => _validationExecutable != null;
   Map<String, Object?> get retirementEvidence {
     final retirement = _retirement;
     if (retirement == null) throw StateError('app has not been retired');
@@ -57,6 +60,33 @@ final class MacOsColdStateHost implements ColdStateHost {
   Map<String, Object?> get publicationEvidence =>
       _retirement?._publication?.evidence ??
       (throw StateError('candidate publication has not been opened'));
+
+  Map<String, Object?> get validationAdmissionEvidence {
+    final publication = _retirement?._publication;
+    final process = _validationProcess;
+    if (!isValidatingCandidate || publication == null || process == null) {
+      throw StateError('verified executing candidate required');
+    }
+    return {
+      ...publication.evidence,
+      'publication_intent_digest':
+          'sha256:${sha256.convert(_AppRetirement._encode(publication._intent))}',
+      'publication_record_digest':
+          'sha256:${sha256.convert(_AppRetirement._encode(publication._record))}',
+      'candidate_manifest_digest':
+          'sha256:${sha256.convert(_AppRetirement._encode(publication._intent['candidate_manifest'] as Map<String, Object?>))}',
+      'candidate_identity': Map<String, Object?>.from(
+        publication._record['candidate_identity'] as Map,
+      ),
+      'executing_process': {
+        'pid': process.pid,
+        'uid': process.uid,
+        'executable_path': process.executablePath,
+        'started_at_microseconds': process.startedAtMicroseconds,
+        'pid_version': process.pidVersion,
+      },
+    };
+  }
 
   static Future<MacOsColdStateHost> open(
     Directory app, {
@@ -170,6 +200,62 @@ final class MacOsColdStateHost implements ColdStateHost {
     ),
   );
 
+  /// Only the executing installed candidate may enter this observation scope.
+  /// Its own exact, versioned daemon identity is expected; no other process or
+  /// unresolved PID is waived. Ordinary cold acquisition is unchanged.
+  static Future<MacOsColdStateHost> openPublishedForValidation(
+    Directory originalApp,
+    Directory state,
+    MaintenanceStateFence fence,
+    OwnedImageDirectory storage, {
+    required String bundleIdentifier,
+    required String oldVersion,
+    required String newVersion,
+    required String teamIdentifier,
+    required int catalogSchema,
+    ReleaseInspectionHost host = const MacOsReleaseInspectionHost(),
+    MacOsOpenReferences? observer,
+    Future<DriverInventorySnapshot> Function(String)? inventory,
+    Future<String> Function()? currentExecutable,
+  }) async {
+    final executing =
+        await (currentExecutable?.call() ??
+            File(Platform.resolvedExecutable).resolveSymbolicLinks());
+    if (executing != '${originalApp.path}/Contents/MacOS/gaovmd') {
+      throw const FormatException(
+        'validation must execute the installed candidate daemon',
+      );
+    }
+    final result = await openPublished(
+      originalApp,
+      state,
+      fence,
+      storage,
+      'retirement',
+      storage,
+      'publication',
+      bundleIdentifier: bundleIdentifier,
+      oldVersion: oldVersion,
+      newVersion: newVersion,
+      teamIdentifier: teamIdentifier,
+      retiredCatalogSchema: 0,
+      catalogSchema: catalogSchema,
+      host: host,
+      observer: observer,
+      inventory: inventory,
+    );
+    try {
+      if (result.publicationEvidence['phase'] != 'candidate_published') {
+        throw const FormatException('installed candidate publication required');
+      }
+      result._validationExecutable = executing;
+      return result;
+    } catch (_) {
+      result.close();
+      rethrow;
+    }
+  }
+
   @override
   Future<ProcessResult> serviceStatus() async {
     await _verifyApp();
@@ -197,6 +283,20 @@ final class MacOsColdStateHost implements ColdStateHost {
       );
       processes.addAll(result.processes);
       unresolved.addAll(result.unresolvedProcessIds);
+    }
+    if (!driver && _validationExecutable != null) {
+      final self = processes.where((process) => process.pid == pid).toList();
+      if (self.length != 1 ||
+          self.single.executablePath != _validationExecutable ||
+          self.single.pidVersion == null ||
+          (_validationProcess != null && self.single != _validationProcess)) {
+        throw const ColdStateFailure(
+          'validation_process',
+          'executing candidate identity is missing or changed',
+        );
+      }
+      _validationProcess ??= self.single;
+      processes.remove(self.single);
     }
     return DriverInventorySnapshot(
       processes: processes,

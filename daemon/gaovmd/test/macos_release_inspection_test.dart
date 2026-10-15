@@ -14,6 +14,7 @@ import 'package:gaovmd/src/macos_release_inspection.dart';
 import 'package:gaovmd/src/macos_cold_state_host.dart';
 import 'package:gaovmd/src/macos_open_references.dart';
 import 'package:gaovmd/src/macos_cold_publication.dart';
+import 'package:gaovmd/src/macos_cold_validation.dart';
 import 'package:gaovmd/src/maintenance_command.dart';
 import 'package:gaovmd/src/maintenance_tree.dart';
 import 'package:gaovmd/src/maintenance_state_fence.dart';
@@ -1628,6 +1629,601 @@ void main() {
       scratch = await Directory('${temporary.path}/$name').create();
       imageFileMode(scratch.path, 0x1c0);
     }
+
+    test(
+      'candidate validation refuses a different executable before native helpers or state admission',
+      () async {
+        final before = await File('${state.path}/gaovm.db').readAsBytes();
+        final args = arguments(from: 'publication')..[0] = 'validate-upgrade';
+        args.removeRange(args.indexOf('--from'), args.indexOf('--from') + 2);
+        await expectLater(
+          runMacOsCandidateValidation(args, host: host),
+          throwsA(
+            isA<ColdPublicationFailure>()
+                .having((error) => error.stage, 'stage', 'candidate_admission')
+                .having(
+                  (error) => error.cause,
+                  'cause',
+                  isA<FormatException>().having(
+                    (error) => error.message,
+                    'reason',
+                    'validation must execute the installed candidate daemon',
+                  ),
+                ),
+          ),
+        );
+        expect(host.executedRoles, isEmpty);
+        expect(await File('${state.path}/gaovm.db').readAsBytes(), before);
+        await MaintenanceStateFence.requireUnfenced(state);
+        expect(await work.list().toList(), isEmpty);
+      },
+    );
+
+    group('candidate validation', () {
+      late Directory publishedTemporary,
+          publishedApp,
+          publishedState,
+          publishedWork,
+          validationInspection;
+      late _NativeBoundary validationHost;
+      late Artifact artifact;
+      late Image validationImage;
+      late VmId validationVm;
+      late TestRun validationRun;
+      late List<String> validateArguments;
+      const payload = [0, 255, 10, 13, 128, 1];
+      var activeValidation = 0;
+      setUpAll(() async {
+        activeValidation++;
+        activeRetirementChecks++;
+        try {
+          final created = await Directory(
+            '/private/tmp',
+          ).createTemp('gvm-validation-');
+          publishedTemporary = Directory(await created.resolveSymbolicLinks());
+          imageFileMode(publishedTemporary.path, 0x1c0);
+          publishedApp = Directory('${publishedTemporary.path}/GaoVM.app');
+          final candidate = Directory(
+            '${publishedTemporary.path}/Candidate.app',
+          );
+          await _fixture(publishedApp);
+          await _fixture(candidate);
+          publishedState = await Directory(
+            '${publishedTemporary.path}/state',
+          ).create();
+          publishedWork = await Directory(
+            '${publishedTemporary.path}/work',
+          ).create();
+          final publicationInspection = await Directory(
+            '${publishedTemporary.path}/publication-inspection',
+          ).create();
+          validationInspection = await Directory(
+            '${publishedTemporary.path}/validation-inspection',
+          ).create();
+          for (final directory in [
+            publishedState,
+            publishedWork,
+            publicationInspection,
+            validationInspection,
+          ]) {
+            imageFileMode(directory.path, 0x1c0);
+          }
+          validationHost = _NativeBoundary();
+          final state = publishedState;
+          final writer = await GaoVmDatabase.open('${state.path}/gaovm.db');
+          imageFileMode('${state.path}/gaovm.db', 0x180);
+          await File('${state.path}/unknown-data').writeAsString('retain me');
+          imageFileMode('${state.path}/unknown-data', 0x180);
+          final artifactDirectory = await Directory(
+            '${state.path}/artifacts',
+          ).create();
+          imageFileMode(artifactDirectory.path, 0x1c0);
+          final artifactRoot = await OwnedImageDirectory.open(
+            artifactDirectory,
+          );
+          try {
+            validationImage =
+                await ImageStore(
+                  writer,
+                  Directory('${state.path}/images'),
+                ).importFile(
+                  await File(
+                    '${publishedTemporary.path}/seed.raw',
+                  ).writeAsString('retained validation disk'),
+                  type: ImageType.rawDisk,
+                );
+            final vmDirectory = await Directory('${state.path}/vms').create();
+            imageFileMode(vmDirectory.path, 0x1c0);
+            final bundles = await OwnedImageDirectory.open(vmDirectory);
+            final images = await OwnedImageDirectory.open(
+              Directory('${state.path}/images'),
+            );
+            try {
+              final accepted =
+                  await SqliteVmCreateAcceptance(
+                    database: writer,
+                    idempotencyRetention: const Duration(days: 30),
+                  ).create(
+                    VmCreateCommand(
+                      requestId: RequestId.generate(),
+                      idempotencyKey: null,
+                      requestBody: const [],
+                      name: 'retained-validation-vm',
+                      spec: VmSpec(
+                        cpu: 1,
+                        memoryBytes: 268435456,
+                        boot: EfiBoot(),
+                        disks: [
+                          VmDisk(
+                            id: 'root',
+                            source: ManagedImageDiskSource(validationImage.id),
+                            writable: true,
+                          ),
+                        ],
+                        networks: [DisconnectedNetwork(id: 'net0')],
+                        graphics: GraphicsConfig(enabled: false),
+                        serial: const SerialConfig(
+                          enabled: true,
+                          capture: true,
+                        ),
+                        guestAgent: GuestAgentConfig(
+                          enabled: false,
+                          requiredForReady: false,
+                        ),
+                        restartPolicy: RestartPolicy.never,
+                      ),
+                    ),
+                  );
+              validationVm = accepted.resourceId as VmId;
+              final provisioned = (await VmProvisioningWorker(
+                work: SqliteVmProvisioningWorkRepository(writer),
+                bundles: VmBundleStore(
+                  database: writer,
+                  bundles: bundles,
+                  images: images,
+                ),
+                owner: 'candidate-validation-fixture',
+              ).dispatchOnce()).single;
+              expect(
+                provisioned.completion,
+                VmProvisioningCompletionKind.succeeded,
+              );
+            } finally {
+              images.close();
+              bundles.close();
+            }
+            final runs = SqliteTestRunRepository(
+              writer,
+              now: () => DateTime.utc(2000),
+            );
+            final run = await runs.create(
+              spec: TestRunSpec(
+                source: ImageTestRunSource(validationImage.id),
+                wait: VmWaitSpec(
+                  condition: WaitCondition.guestAgentReady,
+                  timeoutSeconds: 30,
+                ),
+                steps: [
+                  TestStepRequest(
+                    argv: ['must-not-run-in-validation'],
+                    timeoutSeconds: 60,
+                  ),
+                ],
+                cleanup: CleanupPolicy.deleteOnSuccess,
+                retainOnFailure: true,
+              ),
+              requestId: RequestId.generate(),
+            );
+            await runs.transition(
+              run.id,
+              expectedState: TestRunState.pending,
+              nextState: TestRunState.provisioning,
+            );
+            await runs.requestCancel(run.id);
+            await runs.transition(
+              run.id,
+              expectedState: TestRunState.provisioning,
+              nextState: TestRunState.collecting,
+              vmId: validationVm,
+              outcome: TestRunState.cancelled,
+            );
+            await SqliteIdempotencyRepository(
+              writer,
+              retention: const Duration(days: 1),
+              now: () => DateTime.utc(2000),
+            ).execute(
+              scope: 'validation-retention-probe',
+              key: 'retain-expired',
+              requestBody: const [],
+              action: () async => IdempotencyResponse(JsonObjectValue.empty),
+            );
+            artifact =
+                await ArtifactApplicationService(
+                  database: writer,
+                  directory: artifactRoot,
+                ).publish(
+                  bytes: Stream.value(payload),
+                  kind: ArtifactKind.stdout,
+                  contentType: 'application/octet-stream',
+                  maxBytes: payload.length,
+                  vmId: validationVm,
+                  operationId: run.operationId,
+                  testRunId: run.id,
+                  retentionUntil: DateTime.utc(2000),
+                );
+            await runs.transition(
+              run.id,
+              expectedState: TestRunState.collecting,
+              nextState: TestRunState.cleaningUp,
+              cleanupDecision: 'retain',
+            );
+            validationRun = await runs.finish(
+              run.id,
+              outcome: TestRunState.cancelled,
+            );
+          } finally {
+            artifactRoot.close();
+            writer.close();
+          }
+          final selectors = [
+            '--app',
+            publishedApp.path,
+            '--state-dir',
+            publishedState.path,
+            '--work-dir',
+            publishedWork.path,
+            '--bundle-id',
+            'org.gaovm.tests.Release',
+            '--old-version',
+            '0.1.0',
+            '--new-version',
+            '0.1.0',
+            '--team-id',
+            'ABCDEFGHIJ',
+          ];
+          await runMacOsColdPublication(
+            [
+              'publish-upgrade',
+              ...selectors,
+              '--candidate-app',
+              candidate.path,
+              '--inspection-dir',
+              publicationInspection.path,
+            ],
+            host: validationHost,
+            observer: MacOsOpenReferences(
+              command: (_, _) async => ProcessResult(pid, 1, '', ''),
+            ),
+            inventory: (_) async => DriverInventorySnapshot(
+              processes: [],
+              unresolvedProcessIds: [],
+            ),
+          );
+          validateArguments = [
+            'validate-upgrade',
+            ...selectors,
+            '--inspection-dir',
+            validationInspection.path,
+            '--catalog-schema',
+            '21',
+          ];
+        } finally {
+          activeRetirementChecks--;
+          activeValidation--;
+        }
+      });
+      tearDownAll(() async {
+        if (activeValidation != 0 || validationHost.retainInputs) {
+          throw StateError(
+            'retain active validation fixture ${publishedTemporary.path}',
+          );
+        }
+        await publishedTemporary.delete(recursive: true);
+      });
+      for (final refusal in [
+        'missing-self',
+        'unversioned-self',
+        'changed-self',
+        'other-daemon',
+        'unresolved-daemon',
+        'live-driver',
+        'unresolved-driver',
+      ]) {
+        test(
+          'refuses $refusal without migrating or writing validation intent',
+          () async {
+            activeValidation++;
+            activeRetirementChecks++;
+            try {
+              final inspection = await Directory(
+                '${publishedTemporary.path}/refuse-$refusal',
+              ).create();
+              imageFileMode(inspection.path, 0x1c0);
+              final arguments = [...validateArguments];
+              arguments[arguments.indexOf('--inspection-dir') + 1] =
+                  inspection.path;
+              final before = await File(
+                '${publishedState.path}/gaovm.db',
+              ).readAsBytes();
+              var selfObservations = 0;
+              var enteredDoctor = false;
+              final daemon = '${publishedApp.path}/Contents/MacOS/gaovmd';
+              final driver =
+                  '${publishedApp.path}/Contents/Helpers/gaovm-driver-vz';
+              final reason = switch (refusal) {
+                'other-daemon' || 'unresolved-daemon' => 'daemon_processes',
+                'live-driver' || 'unresolved-driver' => 'driver_processes',
+                _ => 'validation_process',
+              };
+              await expectLater(
+                runMacOsCandidateValidation(
+                  arguments,
+                  host: validationHost,
+                  currentExecutable: () async => daemon,
+                  doctorHost: _ValidationDoctorHost(() async {
+                    enteredDoctor = true;
+                  }),
+                  observer: MacOsOpenReferences(
+                    command: (_, _) async => ProcessResult(pid, 1, '', ''),
+                  ),
+                  inventory: (path) async {
+                    if (path == daemon) selfObservations++;
+                    return DriverInventorySnapshot(
+                      processes: [
+                        if (path == daemon && refusal != 'missing-self')
+                          DriverProcessIdentity(
+                            pid: pid,
+                            uid: 501,
+                            executablePath: path,
+                            startedAtMicroseconds: 1,
+                            pidVersion: refusal == 'unversioned-self'
+                                ? null
+                                : refusal == 'changed-self' &&
+                                      selfObservations > 1
+                                ? 2
+                                : 1,
+                          ),
+                        if (path == daemon && refusal == 'other-daemon' ||
+                            path == driver && refusal == 'live-driver')
+                          DriverProcessIdentity(
+                            pid: pid + 1,
+                            uid: 501,
+                            executablePath: path,
+                            startedAtMicroseconds: 2,
+                            pidVersion: 2,
+                          ),
+                      ],
+                      unresolvedProcessIds: [
+                        if (path == daemon && refusal == 'unresolved-daemon' ||
+                            path == driver && refusal == 'unresolved-driver')
+                          pid + 1,
+                      ],
+                    );
+                  },
+                ),
+                throwsA(
+                  isA<ColdPublicationFailure>().having(
+                    (error) => error.cause,
+                    'cold admission reason',
+                    isA<ColdStateFailure>().having(
+                      (error) => error.stage,
+                      'stage',
+                      reason,
+                    ),
+                  ),
+                ),
+              );
+              expect(enteredDoctor, false);
+              expect(
+                await File('${publishedState.path}/gaovm.db').readAsBytes(),
+                before,
+              );
+              expect(
+                await FileSystemEntity.type(
+                  '${publishedWork.path}/validation',
+                  followLinks: false,
+                ),
+                FileSystemEntityType.notFound,
+              );
+              await expectLater(
+                MaintenanceStateFence.requireUnfenced(publishedState),
+                throwsA(isA<MaintenanceFenceActive>()),
+              );
+            } finally {
+              activeRetirementChecks--;
+              activeValidation--;
+            }
+          },
+        );
+      }
+      test(
+        'published candidate validates the populated catalog without workers and retains the fence for explicit commit',
+        () async {
+          final state = publishedState,
+              app = publishedApp,
+              work = publishedWork;
+          activeValidation++;
+          activeRetirementChecks++;
+          try {
+            var observedRestrictedApi = false;
+            final doctor = _ValidationDoctorHost(() async {
+              final root = await OwnedImageDirectory.open(state);
+              try {
+                final competing = await root.tryAcquireMaintenanceLock(
+                  '.gaovmd.lock',
+                  create: false,
+                );
+                try {
+                  expect(competing, isNull);
+                } finally {
+                  competing?.close();
+                }
+              } finally {
+                root.close();
+              }
+              await expectLater(
+                MaintenanceStateFence.requireUnfenced(state),
+                throwsA(isA<MaintenanceFenceActive>()),
+              );
+              final client = HttpClient()
+                ..findProxy = ((_) => 'DIRECT')
+                ..connectionFactory = (_, _, _) => Socket.startConnect(
+                  InternetAddress(
+                    '${state.path}/run/api.sock',
+                    type: InternetAddressType.unix,
+                  ),
+                  0,
+                );
+              try {
+                for (final path in [
+                  '/v1/vms',
+                  '/v1/images',
+                  '/v1/operations',
+                ]) {
+                  final response = await (await client.getUrl(
+                    Uri.parse('http://localhost$path'),
+                  )).close();
+                  expect(response.statusCode, 200);
+                  await response.drain<void>();
+                }
+                final write = await client.postUrl(
+                  Uri.parse('http://localhost/v1/vms'),
+                );
+                write.headers.contentType = ContentType.json;
+                write.write('{not-json');
+                final refused = await write.close();
+                expect(refused.statusCode, 403);
+                expect(
+                  (jsonDecode(await utf8.decoder.bind(refused).join())
+                      as Map)['code'],
+                  'INVALID_REQUEST',
+                );
+                final ready = await (await client.getUrl(
+                  Uri.parse('http://localhost/v1/system/ready'),
+                )).close();
+                expect(ready.statusCode, 503);
+                expect(
+                  (jsonDecode(await utf8.decoder.bind(ready).join())
+                      as Map)['ready'],
+                  false,
+                );
+                final download = await (await client.getUrl(
+                  Uri.parse('http://localhost${artifact.downloadUrl}'),
+                )).close();
+                expect(download.statusCode, 200);
+                expect(
+                  await download.expand((chunk) => chunk).toList(),
+                  payload,
+                );
+                observedRestrictedApi = true;
+              } finally {
+                client.close(force: true);
+              }
+            });
+            final report = await runMacOsCandidateValidation(
+              validateArguments,
+              host: validationHost,
+              currentExecutable: () async =>
+                  '${app.path}/Contents/MacOS/gaovmd',
+              doctorHost: doctor,
+              observer: MacOsOpenReferences(
+                command: (_, _) async => ProcessResult(pid, 1, '', ''),
+              ),
+              inventory: (path) async => DriverInventorySnapshot(
+                processes: path == '${app.path}/Contents/MacOS/gaovmd'
+                    ? [
+                        DriverProcessIdentity(
+                          pid: pid,
+                          uid: 501,
+                          executablePath: path,
+                          startedAtMicroseconds: 1,
+                          pidVersion: 1,
+                        ),
+                      ]
+                    : [],
+                unresolvedProcessIds: [],
+              ),
+            );
+            expect(observedRestrictedApi, true);
+            expect(report['phase'], 'candidate_validated');
+            expect(report['applied_catalog_schema'], 21);
+            expect(report['background_workers_started'], false);
+            expect(report['ordinary_startup_fenced'], true);
+            expect(report['committed'], false);
+            final identity = report['catalog_identity'] as Map;
+            expect(identity['vm_ids'], [validationVm.value]);
+            expect(identity['image_ids'], [validationImage.id.value]);
+            expect(identity['operation_ids'], hasLength(2));
+            expect(identity['test_run_ids'], [validationRun.id.value]);
+            expect(identity['artifact_ids'], [artifact.id.value]);
+            expect(identity['event_cursor'], greaterThan(0));
+            expect(identity['idempotency_count'], 1);
+            final completed =
+                jsonDecode(
+                      await File(
+                        '${work.path}/validation/completed/record.json',
+                      ).readAsString(),
+                    )
+                    as Map;
+            expect(completed['phase'], 'candidate_validated');
+            expect(
+              await File('${state.path}/unknown-data').readAsString(),
+              'retain me',
+            );
+            final reader = await GaoVmDatabase.openReadOnly(
+              '${state.path}/gaovm.db',
+            );
+            try {
+              expect(
+                await reader.read(
+                  (db) => db
+                      .select('SELECT key FROM idempotency_keys')
+                      .single['key'],
+                ),
+                'retain-expired',
+              );
+              expect(
+                await ArtifactRepository(reader).get(artifact.id),
+                isNotNull,
+              );
+              expect(
+                await SqliteTestRunRepository(reader).get(validationRun.id),
+                validationRun,
+              );
+              expect(
+                (await SqliteVmRepository(
+                  reader,
+                ).get(validationVm))!.status.phase,
+                VmPhase.stopped,
+              );
+            } finally {
+              reader.close();
+            }
+            await expectLater(
+              MaintenanceStateFence.requireUnfenced(state),
+              throwsA(isA<MaintenanceFenceActive>()),
+            );
+            final fence = await MaintenanceStateFence.open(state);
+            final root = await OwnedImageDirectory.open(state);
+            try {
+              final owner = await DaemonOwnership.tryAcquireForMaintenance(
+                root,
+                fence,
+              );
+              expect(owner, isNotNull);
+              owner?.close();
+            } finally {
+              root.close();
+              fence.close();
+            }
+          } finally {
+            activeRetirementChecks--;
+            activeValidation--;
+          }
+        },
+        timeout: const Timeout(Duration(minutes: 8)),
+      );
+    }, timeout: const Timeout(Duration(minutes: 8)));
 
     for (final refusal in [
       'overlap',
@@ -4138,6 +4734,36 @@ void main() {
       },
     );
   }, skip: !Platform.isMacOS);
+}
+
+final class _ValidationDoctorHost implements DoctorHost {
+  _ValidationDoctorHost(this.onPlatform);
+  final Future<void> Function() onPlatform;
+  @override
+  Future<DoctorPlatformObservation> inspectPlatform() async {
+    await onPlatform();
+    return (macOS: true, appleSilicon: true, majorVersion: 14);
+  }
+
+  @override
+  Future<DoctorDriverObservation> inspectDriver() async => (
+    executable: true,
+    arm64: true,
+    validSignature: true,
+    virtualizationEntitlement: true,
+    signatureMessage: 'fixture native boundary',
+  );
+  @override
+  Future<HostMetrics> sampleResources() async => const HostMetrics(
+    logicalCpuCount: 8,
+    totalMemoryBytes: 16 * 1024 * 1024 * 1024,
+    availableMemoryBytes: 10 * 1024 * 1024 * 1024,
+    freeDiskBytes: 100 * 1024 * 1024 * 1024,
+    unmanagedDriverProcesses: 0,
+  );
+  @override
+  Future<DriverInventorySnapshot> inventory() async =>
+      DriverInventorySnapshot(processes: [], unresolvedProcessIds: []);
 }
 
 final class _SnapshotHost implements ColdStateHost {

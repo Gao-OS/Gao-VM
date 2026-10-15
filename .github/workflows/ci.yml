@@ -130,7 +130,24 @@ jobs:
           dart test test/public_api_server_test.dart
           test/sqlite_database_test.dart
           test/sqlite_read_only_validation_test.dart
-          test/artifact_api_handlers_test.dart --concurrency=1
+          test/artifact_api_handlers_test.dart
+          test/system_doctor_test.dart
+          test/candidate_validation_entrypoint_test.dart --concurrency=1
+
+      - name: Check cold state and snapshot boundaries
+        working-directory: daemon/gaovmd
+        run: >-
+          dart test test/cold_catalog_inspection_test.dart
+          test/cold_file_references_test.dart
+          test/cold_legacy_inspection_test.dart
+          test/cold_managed_assets_test.dart
+          test/cold_runtime_inspection_test.dart
+          test/cold_state_snapshot_test.dart
+          test/cold_state_lease_test.dart
+          test/cold_state_backup_test.dart
+          test/maintenance_tree_test.dart
+          test/maintenance_snapshot_test.dart
+          test/maintenance_state_fence_test.dart --concurrency=1
 
       - name: Resolve CLI dependencies
         working-directory: clients/gaovm_cli

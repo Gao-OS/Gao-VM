@@ -268,6 +268,14 @@ abstract interface class VmConditionWaiter {
 }
 
 final class VmApplicationService {
+  const VmApplicationService.readOnly({required VmRepository repository})
+    : _repository = repository,
+      _creates = null,
+      _patches = null,
+      _lifecycle = null,
+      _waiter = null,
+      _display = null;
+
   const VmApplicationService({
     required VmRepository repository,
     required VmMutationAcceptor mutations,
@@ -297,10 +305,10 @@ final class VmApplicationService {
        _display = display;
 
   final VmRepository _repository;
-  final VmCreateAcceptor _creates;
-  final VmPatchAcceptor _patches;
-  final VmLifecycleAcceptor _lifecycle;
-  final VmConditionWaiter _waiter;
+  final VmCreateAcceptor? _creates;
+  final VmPatchAcceptor? _patches;
+  final VmLifecycleAcceptor? _lifecycle;
+  final VmConditionWaiter? _waiter;
   final VmDisplayReader? _display;
 
   Future<VmDisplayStatus> displayStatus(VmId vmId) {
@@ -352,15 +360,18 @@ final class VmApplicationService {
   }
 
   Future<OperationAcceptance> create(VmCreateCommand command) =>
-      _creates.create(command);
+      _creates?.create(command) ?? (throw StateError('read-only VM service'));
 
   Future<OperationAcceptance> patch(VmPatchCommand command) =>
-      _patches.patch(command);
+      _patches?.patch(command) ?? (throw StateError('read-only VM service'));
 
   Future<OperationAcceptance> lifecycle(VmLifecycleCommand command) =>
-      _lifecycle.lifecycle(command);
+      _lifecycle?.lifecycle(command) ??
+      (throw StateError('read-only VM service'));
 
   Future<VmWaitResult> wait(VmWaitCommand command) async {
+    final waiter = _waiter;
+    if (waiter == null) throw StateError('read-only VM service');
     final elapsed = Stopwatch()..start();
     Duration remaining() {
       final budget = command.timeout - elapsed.elapsed;
@@ -372,7 +383,7 @@ final class VmApplicationService {
 
     try {
       await get(command.vmId).timeout(remaining());
-      final observedAt = await _waiter
+      final observedAt = await waiter
           .wait(
             VmWaitCommand(
               vmId: command.vmId,

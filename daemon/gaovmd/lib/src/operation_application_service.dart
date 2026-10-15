@@ -151,6 +151,12 @@ abstract interface class OperationWaiter {
 }
 
 final class OperationApplicationService {
+  const OperationApplicationService.readOnly({
+    required OperationRepository repository,
+  }) : _repository = repository,
+       _mutations = null,
+       _waiter = null;
+
   const OperationApplicationService({
     required OperationRepository repository,
     required OperationMutationAcceptor mutations,
@@ -160,8 +166,8 @@ final class OperationApplicationService {
        _waiter = waiter;
 
   final OperationRepository _repository;
-  final OperationMutationAcceptor _mutations;
-  final OperationWaiter _waiter;
+  final OperationMutationAcceptor? _mutations;
+  final OperationWaiter? _waiter;
 
   Future<OperationPage> list([OperationListQuery? query]) async {
     final effective = query ?? OperationListQuery();
@@ -199,9 +205,12 @@ final class OperationApplicationService {
   }
 
   Future<OperationAcceptance> cancel(OperationCancelCommand command) =>
-      _mutations.cancel(command);
+      _mutations?.cancel(command) ??
+      (throw StateError('read-only operation service'));
 
   Future<Operation> wait(OperationWaitCommand command) async {
+    final waiter = _waiter;
+    if (waiter == null) throw StateError('read-only operation service');
     final elapsed = Stopwatch()..start();
     Duration remaining() {
       final budget = command.timeout - elapsed.elapsed;
@@ -215,7 +224,7 @@ final class OperationApplicationService {
       final current = await get(command.operationId).timeout(remaining());
       remaining();
       if (_isTerminal(current.state)) return current;
-      final completed = await _waiter
+      final completed = await waiter
           .wait(
             OperationWaitCommand(
               operationId: command.operationId,

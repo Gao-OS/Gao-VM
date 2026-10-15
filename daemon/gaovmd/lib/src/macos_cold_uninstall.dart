@@ -8,13 +8,13 @@ Future<Map<String, Object?>> runMacOsColdUninstall(
   MacOsOpenReferences? observer,
   Future<DriverInventorySnapshot> Function(String)? inventory,
 }) async {
-  final options = _Options.parse(arguments, uninstall: true);
-  final execution = _OwnedInspection(host);
+  final options = ColdMaintenanceOptions.parse(arguments, uninstall: true);
+  final execution = OwnedColdInspection(host);
   final references =
       observer ??
       MacOsOpenReferences(
         command: (path, args) =>
-            _terminal(() => runMaintenanceCommand(path, args)),
+            awaitColdCommandExit(() => runMaintenanceCommand(path, args)),
       );
   final census =
       inventory ??
@@ -41,34 +41,36 @@ Future<Map<String, Object?>> runMacOsColdUninstall(
         );
       }
     }
-    await _entries(scratch, const {});
-    await _entries(
+    await verifyColdEntries(scratch, const {});
+    await verifyColdEntries(
       work,
-      options.resuming ? _workEntries(options.from, uninstall: true) : const {},
+      options.resuming
+          ? coldWorkEntries(options.from, uninstall: true)
+          : const {},
     );
     commandLock = await work.tryAcquireMaintenanceLock(
-      _uninstallCommandLock,
+      coldUninstallCommandLock,
       create: !options.resuming,
     );
     if (commandLock == null) throw StateError('maintenance work already owned');
-    final lockFile = work.file(_uninstallCommandLock);
+    final lockFile = work.file(coldUninstallCommandLock);
     try {
       await lockFile.sync();
     } finally {
       lockFile.close();
     }
     await work.sync();
-    await _verifyWork(work, commandLock, options.from, uninstall: true);
+    await verifyColdWork(work, commandLock, options.from, uninstall: true);
     final state = Directory(options.state);
     stage = 'cold';
     if (options.resuming) fence = await MaintenanceStateFence.open(state);
-    coldHost = options.from == _retirement
+    coldHost = options.from == coldRetirementName
         ? await MacOsColdStateHost.openRetired(
             Directory(options.app),
             state,
             fence!,
             work,
-            _retirement,
+            coldRetirementName,
             bundleIdentifier: options.bundle,
             version: options.oldVersion,
             teamIdentifier: options.team,
@@ -87,7 +89,7 @@ Future<Map<String, Object?>> runMacOsColdUninstall(
             observer: references,
             inventory: census,
           );
-    await _verifyWork(work, commandLock, options.from, uninstall: true);
+    await verifyColdWork(work, commandLock, options.from, uninstall: true);
     lease = await ColdStateLease.acquire(
       state,
       bundleIdentifier: options.bundle,
@@ -101,7 +103,7 @@ Future<Map<String, Object?>> runMacOsColdUninstall(
       observer: references,
       inventory: census,
     );
-    await _verifyWork(work, commandLock, options.from, uninstall: true);
+    await verifyColdWork(work, commandLock, options.from, uninstall: true);
     if (options.resuming &&
         options.catalogSchema != (snapshot.observedCatalogSchema ?? 0)) {
       throw const FormatException(
@@ -129,21 +131,30 @@ Future<Map<String, Object?>> runMacOsColdUninstall(
             host: execution,
             observer: references,
           );
-    await _verifyWork(
+    await verifyColdWork(
       work,
       commandLock,
-      options.from ?? _preparation,
+      options.from ?? coldPreparationName,
       uninstall: true,
     );
     stage = 'retirement';
     final heldWork = work, heldLock = commandLock;
-    final result = options.from == _retirement
+    final result = options.from == coldRetirementName
         ? await prepared.observeRetiredApp()
         : await prepared.retireApp(
-            verifyCommandWork: () =>
-                _verifyWork(heldWork, heldLock, _retirement, uninstall: true),
+            verifyCommandWork: () => verifyColdWork(
+              heldWork,
+              heldLock,
+              coldRetirementName,
+              uninstall: true,
+            ),
           );
-    await _verifyWork(work, commandLock, _retirement, uninstall: true);
+    await verifyColdWork(
+      work,
+      commandLock,
+      coldRetirementName,
+      uninstall: true,
+    );
     return {
       'format': 'gaovm.cold-uninstall-command.v1',
       'status': 'observed',

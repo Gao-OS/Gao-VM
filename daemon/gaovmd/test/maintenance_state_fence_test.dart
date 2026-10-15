@@ -62,6 +62,31 @@ void main() {
   });
 
   test(
+    'ordinary cold ownership and a fence cannot grant candidate state borrowing',
+    () async {
+      var called = false;
+      Future<void> tryBorrow() => lease.withCandidateState((_, __) async {
+        called = true;
+      });
+      await expectLater(tryBorrow(), throwsStateError);
+      fence = await MaintenanceStateFence.begin(lease);
+      await expectLater(tryBorrow(), throwsStateError);
+      expect(called, false);
+      await lease.verify();
+      final root = await OwnedImageDirectory.open(state);
+      try {
+        expect(
+          await root.tryAcquireMaintenanceLock('.gaovmd.lock', create: false),
+          isNull,
+        );
+      } finally {
+        root.close();
+      }
+    },
+    skip: !Platform.isMacOS,
+  );
+
+  test(
     'persistent fence refuses ordinary startup after maintenance ownership closes',
     () async {
       fence = await MaintenanceStateFence.begin(lease);

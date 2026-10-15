@@ -52,6 +52,34 @@ final class ColdStateLease {
   final String installationPath;
   String get bundleIdentifier => _bundleIdentifier;
 
+  /// Scoped borrow for the installed candidate composition, not a raw owner
+  /// getter or an ordinary-startup bypass. The callback must drain all work
+  /// before returning and must not close or retain the borrowed resources.
+  Future<T> withCandidateState<T>(
+    Future<T> Function(OwnedImageDirectory root, DaemonOwnership ownership)
+    action,
+  ) async {
+    final host = _host;
+    if (_closed ||
+        _retiring ||
+        host is! MacOsColdStateHost ||
+        !host.isValidatingCandidate ||
+        _maintenanceFence == null) {
+      throw StateError('executing published candidate and held fence required');
+    }
+    _retiring = true;
+    try {
+      await verify();
+      return await action(_root, _ownership);
+    } finally {
+      try {
+        await _ownership.verify();
+      } finally {
+        _retiring = false;
+      }
+    }
+  }
+
   static Future<ColdStateLease> acquire(
     Directory state, {
     required String bundleIdentifier,
