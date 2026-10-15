@@ -1002,3 +1002,41 @@ with rewind acknowledgement, or data-preserving uninstall transaction. Full
 lifecycle crash/low-disk and genuine signed installed-product acceptance remain
 unproved. No real installed app/state/service or remote ref was changed; Apple
 Silicon/VZ/GaoOS work remains assigned to the user. This is not M8/MVP completion.
+
+## 2026-10-16 bound directory-move checkpoint
+
+On top of `b5001a0`, the internal [cross-parent move prerequisite](MACOS_UPGRADE_PREPARATION.md#bound-cross-parent-directory-move-prerequisite)
+now binds the actual source directory and both parent descriptors. Native
+no-follow identity checks precede one Darwin no-replace rename; both parents
+must sync and pass post-move identity/permission checks. The source inode and
+payload metadata are retained. Existing files, nonempty/empty directories and
+symlinks are never replaced. Failure never triggers reverse movement, copying,
+deletion, permission normalization or automatic retry.
+
+The tree-level method adds complete byte/native-metadata verification and returns
+a newly bound reader, without rebasing or closing the borrowed old reader.
+Private/0755 namespaces, substituted source/parents, invalid/overlapping targets,
+closed owners, ACLs, xattrs, flags and real competing moves have focused coverage.
+An incomplete move cannot be inferred to have left the source path intact;
+recovery must inspect both namespaces against durable intent and identity.
+
+The **25 new real-filesystem checks** passed in the final combined **524-test**,
+**36-file**, concurrency-1 run, with zero failures/skips, terminal success and
+confirmed runner exit. The report is `verified.jsonl` under
+`/private/tmp/gaovm-maintenance-move.de9Ihg/`. The same three installed/startup
+checks remain explicitly filtered and did not start; they are not passes/skips.
+Dart analysis, pinned formatting (**296** files, zero changes), JSON Schema/
+OpenAPI validation, **92** scoped local Markdown targets and `git diff --check`
+passed. Test cleanup retains any unconfirmed move/native fixture. The unrelated
+UI lockfile is unchanged and excluded. The broader daemon regressions and earlier
+failures were not rerun or resolved by this focused verification.
+
+This is a required filesystem prerequisite, not integrated app installation or
+a coldness certificate. Existing original-app-bound cold verification correctly
+fails after app retirement. Its typed host/ownership handoff, durable retirement/
+publication recovery, maintenance command outside renamed trees, activation/write
+isolation through validation/commit, whole-state/app rollback with rewind consent,
+and data-preserving uninstall remain unfinished. Native fsync/crash/low-disk
+injection and full installed lifecycle acceptance are not proved by the new tests.
+No real installed app/state/service or remote ref was changed; no Apple Silicon,
+VZ/GaoOS, Swift/CI or whole-MVP pass is claimed.

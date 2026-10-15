@@ -225,6 +225,43 @@ final class MaintenanceTree {
     }
   }
 
+  /// Relocate this complete tree with before/after byte/native verification.
+  /// Caller supplies serialized parents, durable intent and cold authorization;
+  /// this does not grant any of them or flush uncommitted payload writes.
+  /// The old reader retains its old pathname. Failure may be post-rename: retain
+  /// both namespaces for identity-based recovery, never automatically move back.
+  Future<MaintenanceTree> moveForMaintenanceTo(
+    OwnedImageDirectory sourceParent,
+    OwnedImageDirectory destinationParent,
+    String destinationName,
+  ) async {
+    if (_stateBoundary != null) {
+      throw StateError(
+        'a guarded state view cannot transfer its cold boundary',
+      );
+    }
+    final expected = await capture(nativeMetadata: true);
+    MaintenanceTree? moved;
+    try {
+      final root = await _root.moveForMaintenanceTo(
+        sourceParent,
+        destinationParent,
+        destinationName,
+      );
+      moved = MaintenanceTree._(root);
+      await moved.verify(expected, nativeMetadata: true);
+      return moved;
+    } catch (error) {
+      moved?.close();
+      if (error is MaintenanceDirectoryMoveFailure) rethrow;
+      throw MaintenanceDirectoryMoveFailure(
+        path,
+        '${destinationParent.path}/$destinationName',
+        error,
+      );
+    }
+  }
+
   /// Snapshot every entry, without runtime exclusions. Callers must separately
   /// establish cold ownership and account for external files before using this
   /// as an upgrade snapshot. Never time out/abandon an in-flight native copy.

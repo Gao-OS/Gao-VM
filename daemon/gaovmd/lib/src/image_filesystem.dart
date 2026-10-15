@@ -8,6 +8,7 @@ import 'package:crypto/crypto.dart';
 import 'package:ffi/ffi.dart';
 
 part 'maintenance_filesystem.dart';
+part 'maintenance_directory_move.dart';
 
 final _libc = DynamicLibrary.process();
 final _open = _libc

@@ -107,3 +107,44 @@ recovery, activation/write isolation through validation/commit, fresh-cold
 whole-state/app rollback with rewind acknowledgement, and data-preserving
 uninstall. Genuine signed installed-product and ARM64/VZ/GaoOS acceptance remain
 unproved. This preparation component does not complete M8 or the MVP goal.
+
+## Bound cross-parent directory move prerequisite
+
+The internal [`OwnedImageDirectory.moveForMaintenanceTo`](../daemon/gaovmd/lib/src/maintenance_directory_move.dart)
+now provides the missing physical move between two held parent namespaces.
+It requires the exact owned source directory and explicit source/destination
+parent descriptors. Parents must be canonical, same-user, without shared write
+bits, special permission bits or ACL grants; owned 0755 application directories
+are allowed. It does not change permissions or remove an unknown destination.
+
+Native no-follow source lookup must match the held source inode. One Darwin
+`renameatx_np(..., RENAME_EXCL)` moves it without replacing any file, symlink or
+even an empty directory. Both parent directory entries are fsynced; identity
+and parent bindings/permissions are rechecked. Cross-device/native failures do
+not fall back to copy/delete. The new reader binds the same inode at its new
+path; the borrowed old reader deliberately keeps its old path and becomes
+invalid there. All input handles remain caller-owned.
+
+[`MaintenanceTree.moveForMaintenanceTo`](../daemon/gaovmd/lib/src/maintenance_tree.dart)
+additionally verifies complete bytes/native metadata before and after moving,
+then returns a new tree reader. A guarded state view cannot transfer its cold
+boundary through this method. A post-rename verification/fsync failure is an
+unverified move, **not** evidence that the old path still exists: retain both
+namespaces for journal/identity-based recovery. Neither method auto-reverses,
+deletes, retries, closes input owners or flushes uncommitted payload writes.
+
+The caller must serialize both namespaces, flush the payload and persist intent
+before moving, retain the cold state kernel lock/admission fence, confirm all
+native helper exits, and run maintenance outside renamed trees. These primitives
+are cooperative observed-identity checks, not protection from a malicious same-UID
+writer racing the syscall. Source ACL/xattr/flags are preserved, not accepted
+as signed-release or cold-state authorization.
+
+These methods are not wired to an install command. Do not move the retained
+`candidate-app/payload.app` out of the immutable preparation checkpoint; a later
+publisher needs its own verified staged copy. Moving the installed old app also
+invalidates its existing `MacOsColdStateHost`, original app reader and preparation
+verification. A typed, journaled cold-host/ownership handoff and recovery of the
+retirement gap are still required; releasing the state lock or ignoring those
+failed checks is not a valid workaround. This prerequisite does not complete
+candidate installation, activation/commit, rollback or uninstall.
