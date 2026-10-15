@@ -22,6 +22,8 @@ final class ComponentExecutableEvidence {
 Future<ComponentExecutableEvidence> probeComponentExecutable(
   File executable, {
   required ComponentRole expectedRole,
+  Future<ProcessResult> Function(String, List<String>) command =
+      runMaintenanceCommand,
 }) async {
   final path = executable.absolute.path;
   if (await executable.resolveSymbolicLinks() != path ||
@@ -48,7 +50,7 @@ Future<ComponentExecutableEvidence> probeComponentExecutable(
     final digest = 'sha256:${await sha256.bind(binary.openRead()).first}';
     await parent.verifyPathBinding();
     await binary.verifyPathBinding();
-    final result = await runMaintenanceCommand(path, ['--component-info']);
+    final result = await command(path, ['--component-info']);
     await parent.verifyPathBinding();
     await binary.verifyPathBinding();
     if (binary.stat() != before ||

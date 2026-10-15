@@ -47,9 +47,12 @@ release publication or remote push is authorized by this ledger.
    not require automatic rollback; the user accepted the [explicit cold operator
    lifecycle](proposals/MACOS_UPGRADE_ROLLBACK.md) on 2026-10-15, not automatic
    orchestration. [Executable component probes](COMPONENT_PROBES.md) and internal
-   role/contract compatibility checks now provide a tested prerequisite. The
-   complete signed-release inspector, cold boundary, writer fencing, whole-state
-   rollback and native acceptance remain unfinished, not waived by the proposal.
+   role/contract compatibility checks now provide a tested prerequisite. A
+   [read-only Developer ID inspection entry point](MACOS_RELEASE_INSPECTION.md)
+   adds signed identity/layout and whole-tree checks, not applied database or
+   negotiated runtime evidence. The development-package trust choice, cold
+   boundary, writer fencing, whole-state rollback and native acceptance remain
+   unfinished, not waived by the proposal.
 
 These are not all interchangeable with “tests not run”. In particular, a green
 native boot would not itself complete Guest/TestRun acceptance, prove installed
@@ -470,3 +473,37 @@ Dart reports and the complete driver log are under
 `success: true`. The UI lockfile remains unchanged. Probe/compatibility fixtures
 do not certify a signed product release, applied catalog version, installed
 upgrade, whole-state rollback, Guest readiness or native lifecycle acceptance.
+
+## 2026-10-15 read-only release inspection checkpoint
+
+On top of `4e8c5d4`, the [Developer ID inspection tool](MACOS_RELEASE_INSPECTION.md)
+checks the explicit signed identity, actual entitlement/ARM64/bundle/service
+layout, shipped contract versions and actual component evidence. Complete
+before/after tree manifests include unknown files and empty directories.
+The general ad-hoc upgrade trust choice is still pending; only the common
+formal-signature inspection path is implemented here. No installed app, catalog
+or service action was performed.
+
+The focused **49-test** inspection/probe/compatibility/tree/child suite passed.
+The real native negative case creates a controlled signed ARM64 C fixture,
+verifies its ordinary signature, then proves the Developer ID requirement rejects
+it without execution. The positive policy case replaces the external native
+boundary and is not actual signed-product/ARM64 acceptance. Native plist decoding
+uses bounded stdin, not a generated file. Malformed command inputs fail without
+HOME or runtime files.
+
+The complete daemon suite passed **1,495** tests, with **1** platform skip and
+the same **3** explicitly excluded installed/native-process cases, zero failures.
+Rust publication coverage remained enabled. The unchanged RPC and API-client
+suites were also rerun: **5** and **87** passed, zero failures/skips. Reports
+under `/private/tmp/gaovm-component-probe.soVj3m/` ended with `success: true`;
+the latest daemon report is `daemon-release.jsonl`.
+
+Dart analysis, pinned formatting, scoped local Markdown links and
+`git diff --check` passed. The standalone inspection tool compiled to an Intel
+AOT executable and its help command exited successfully; that artifact is not a
+signed product release. The unrelated UI lockfile is unchanged. No fresh Swift
+or hardware matrix is claimed by this subsequent Dart-only checkpoint.
+Actual applied catalog/runtime negotiation, cold acquisition, complete durable
+paired snapshots, startup/writer fencing, publication, validation/commit,
+whole-state rollback/recovery and uninstall remain unfinished M8 work.

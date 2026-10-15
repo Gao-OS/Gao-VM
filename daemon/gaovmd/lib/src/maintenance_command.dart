@@ -20,11 +20,15 @@ final class MaintenanceCommandFailure implements Exception {
 Future<ProcessResult> runMaintenanceCommand(
   String executable,
   List<String> arguments, {
+  List<int>? input,
   Duration timeout = const Duration(seconds: 5),
   int maxOutputBytes = 16384,
 }) async {
   if (timeout <= Duration.zero || maxOutputBytes < 1) {
     throw ArgumentError('maintenance command requires positive bounds');
+  }
+  if (input != null && input.length > 65536) {
+    throw ArgumentError('maintenance input exceeds 64 KiB');
   }
   final child = await Process.start(
     executable,
@@ -71,6 +75,7 @@ Future<ProcessResult> runMaintenanceCommand(
   StackTrace? stack;
   try {
     Future<ProcessResult> collect() async {
+      if (input != null) child.stdin.add(input);
       await child.stdin.close();
       final code = await exit;
       await Future.wait([outputDone.future, errorDone.future]);

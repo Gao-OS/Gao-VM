@@ -53,6 +53,8 @@ observation deadline. Failure terminates **only its own child**, first gracefull
 then forcibly if needed, and separately confirms exit. An unconfirmed exit is a
 failure requiring all inputs to be retained, not authority to unlink a live
 executable or signal an unrelated process. A timeout never restarts a probe.
+Native plist decoding may supply at most 64 KiB through stdin; probes supply none.
+Conversion uses bounded pipes instead of creating a temporary entitlement file.
 
 `verifyReleaseCompatibility` checks all four actual role declarations against the
 expected bundle version and a caller-supplied required catalog schema. It checks
@@ -63,10 +65,12 @@ evidence is incompatible, not “old but probably supported”. The supplied cat
 number is not a live database observation; the cold transaction must obtain and
 bind the actual database version independently.
 
-These internal components are prerequisites, not the complete release inspector,
-version doctor, cold snapshot/publication/rollback transaction or installed
-lifecycle acceptance. The existing assembler still checks static architecture and
-signatures; it must not treat these unit fixtures as actual component evidence.
+The [read-only Developer ID release inspector](MACOS_RELEASE_INSPECTION.md) now
+combines these prerequisites with signed identity/layout and whole-tree byte
+checks. It is not the complete version doctor, cold snapshot/publication/rollback
+transaction or installed lifecycle acceptance. The existing assembler still
+checks static architecture and signatures; it must not treat unit fixtures as
+actual component evidence.
 The [accepted cold lifecycle design](proposals/MACOS_UPGRADE_ROLLBACK.md) remains
 the required transaction boundary.
 
