@@ -8,20 +8,31 @@ import 'package:sqlite3/sqlite3.dart';
 
 import 'cold_state_lease.dart';
 import 'image_filesystem.dart';
+import 'image_manifest.dart';
 import 'macos_open_references.dart';
+import 'maintenance_tree.dart';
+import 'vm_bundle_manifest.dart';
+import 'vm_provisioning_plan.dart';
 
 part 'cold_file_references.dart';
+part 'cold_managed_assets.dart';
 
 /// Facts from a private catalog copy, not a full cold/upgrade certificate.
 /// Never pass the inspection copy to a restore operation: SQLite may change its
 /// database/sidecars; it contains neither complete state nor external VM files.
 final class ColdCatalogInspection {
-  ColdCatalogInspection._(this._state, Map<String, Object?> evidence)
-    : schemaVersion = evidence['schema_version'] as int,
+  ColdCatalogInspection._(
+    this._state,
+    Map<String, Object?> evidence,
+    this._managedImages,
+    this._managedVms,
+  ) : schemaVersion = evidence['schema_version'] as int,
       _quiescent = (evidence['blockers'] as List).isEmpty,
       _evidence = JsonObjectValue.fromJson(evidence);
   final JsonObjectValue _evidence;
   final ColdStateLease _state;
+  final List<Image> _managedImages;
+  final List<_ColdManagedVm> _managedVms;
   final bool _quiescent;
   final int schemaVersion;
   String get sourcePath => _state.path;
@@ -127,11 +138,15 @@ final class ColdCatalogInspection {
         mode: OpenMode.readWrite,
       );
       late Map<String, Object?> catalog;
+      late List<Image> images;
+      late List<_ColdManagedVm> vms;
       try {
         await inspection.verifyPathBinding();
         database.execute('PRAGMA query_only = ON');
         database.execute('PRAGMA trusted_schema = OFF');
         catalog = _read(database);
+        images = _readManagedImages(database);
+        vms = _readManagedVms(database);
       } finally {
         database.dispose();
       }
@@ -155,13 +170,18 @@ final class ColdCatalogInspection {
       await inspection.verifyPathBinding();
       await _noRollbackJournal(source);
       await state.verify();
-      return ColdCatalogInspection._(state, {
-        'format': 'gaovm.cold-catalog-inspection.v1',
-        'source_state': state.path,
-        'inspection_path': inspection.path,
-        'source_files': Map<String, Object?>.unmodifiable(seals),
-        ...catalog,
-      });
+      return ColdCatalogInspection._(
+        state,
+        {
+          'format': 'gaovm.cold-catalog-inspection.v1',
+          'source_state': state.path,
+          'inspection_path': inspection.path,
+          'source_files': Map<String, Object?>.unmodifiable(seals),
+          ...catalog,
+        },
+        images,
+        vms,
+      );
     } finally {
       for (final file in inputs.values) {
         file.close();

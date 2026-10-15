@@ -51,7 +51,8 @@ release publication or remote push is authorized by this ledger.
    [read-only Developer ID inspection entry point](MACOS_RELEASE_INSPECTION.md)
    adds signed identity/layout and whole-tree checks, not applied database or
    negotiated runtime evidence. Held cold preparation, metadata-preserving tree
-   copies and [catalog/referenced-file inspections](MACOS_RELEASE_INSPECTION.md#source-read-only-catalog-and-referenced-file-inspections)
+   copies and [catalog/referenced-file inspections](MACOS_RELEASE_INSPECTION.md#source-read-only-catalog-and-referenced-file-inspections),
+   plus [managed asset checks](MACOS_RELEASE_INSPECTION.md#managed-images-bundle-provenance-and-current-writable-bytes),
    now cover separate prerequisites, not their full transaction composition.
    The development-package trust choice, complete cold boundary, writer fencing,
    whole-state rollback and native acceptance remain
@@ -650,3 +651,47 @@ Retired generations/legacy boundaries, managed bundle/image validation, safe
 transaction recovery/commit/rollback/uninstall remain unfinished. No installed
 app/state, real service, Chrome integration or remote ref was changed. M8 and
 the complete PRD/development-plan goal remain open.
+
+## 2026-10-15 managed asset checkpoint
+
+On top of `e3cd572`, [managed asset inspection](MACOS_RELEASE_INSPECTION.md#managed-images-bundle-provenance-and-current-writable-bytes)
+checks active immutable images and the completed publication provenance of live
+VM bundles using facts from the private SQLite copy. Image catalog metadata,
+actual manifest/object bytes, create Operation identity/completion and retained
+spec generations must agree. Current writable disk/EFI bytes are bound without
+comparing them to immutable image seeds or changing source files.
+
+The checks distinguish failed/cancelled create tombstones from retained failed
+TestRun VMs with successfully published assets. The latter keep their definition,
+current disk/EFI and terminal history unchanged. A never-started VM may have no
+managed EFI yet; the absence is recorded and revalidated without initialization.
+Used-VM loss, mismatched proof, unknown bindings, unsafe paths/permissions/ACLs,
+observed writers or changed bytes/metadata refuse progress. Required image/VM
+trees also retain and bind unknown regular staging/orphan data, not clean it.
+
+The **263-test** combined focused run passed with **concurrency 1**, zero
+failures/skips, across **22** files. This includes **24 new tests** plus the prior
+cold/metadata/component checks and existing runtime-asset, bundle/image store,
+manifest and provisioning repository checks. New cases cover real unchanged
+source trees, legitimate writable changes, missing/unsafe files, absent EFI and
+its observation race, current/observed/execution bindings, retained failed
+TestRuns, contradictory failed-create proof, unrelated Operations, typed request
+generations, immutable corruption, unknown staging retention, distinct GaoOS
+role objects and refusal before tree reads after the original lease is closed.
+The terminal report is `focused-final.jsonl` under
+`/private/tmp/gaovm-managed-assets.4H09OD/`.
+
+Dart analysis, pinned formatting (**284** files), JSON Schema/OpenAPI validation,
+scoped Markdown file links and staged `git diff --check` passed. The unrelated UI
+lockfile stays unchanged and excluded. Full daemon regression was not rerun:
+these focused results do not supersede the earlier failed broad regressions.
+No new Swift, hardware, CI or installed lifecycle pass is claimed.
+The owning service/process census is still a fixture boundary; native local
+SQLite, file metadata/hash/copy and the positive reference reader do not establish
+installed-service, Developer ID product, ARM64, VZ or Guest acceptance.
+
+Full cold acquisition still needs retired runtimes/legacy boundaries and safe
+`run/` handling. Paired app/state publication, persistent startup/writer fencing,
+durable journal/recovery, activation/commit, whole-state rollback and uninstall
+remain unfinished. No installed app/state, real service, remote ref or hardware
+was changed; the full M8/PRD goal is not complete.

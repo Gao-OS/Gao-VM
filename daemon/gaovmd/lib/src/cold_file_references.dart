@@ -12,12 +12,18 @@ final class ColdFileReferences {
   static Future<ColdFileReferences> inspect(
     ColdCatalogInspection catalog, {
     MacOsOpenReferences? observer,
+  }) => _inspect(catalog, catalog.fileReferences, observer: observer);
+
+  static Future<ColdFileReferences> _inspect(
+    ColdCatalogInspection catalog,
+    Iterable<Map<String, Object?>> bindings, {
+    MacOsOpenReferences? observer,
   }) async {
     catalog.requireQuiescent();
     await catalog.verify();
     final files = <String, _HeldReference>{};
     try {
-      for (final binding in catalog.fileReferences) {
+      for (final binding in bindings) {
         final path = binding['path'] as String;
         final existing = files[path];
         if (existing != null) {

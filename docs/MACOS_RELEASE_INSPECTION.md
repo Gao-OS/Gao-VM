@@ -244,8 +244,62 @@ on failure until explicit close; the caller always owns the state lease lifetime
 Their JSON formats are `gaovm.cold-catalog-inspection.v1` and
 `gaovm.cold-file-references.v1`. Every referenced-file record says
 `backed_up: false`: no external backup/restore or lasting writer fence is supplied.
-Managed image/bundle validation, legacy inputs, retired runtime generations,
-safe `run/` exclusion, complete paired snapshots, transaction fencing/journal,
+Managed assets have the separate read-only inspection below. Legacy inputs,
+retired runtime generations, safe `run/` exclusion, complete paired snapshots,
+transaction fencing/journal,
 publication/validation/commit, rollback/recovery and uninstall still need the
 full workflow. These internal checks do not change the public API or authorize
 installed mutations, service actions, VZ boot, push or release.
+
+## Managed images, bundle provenance and current writable bytes
+
+The internal [`ColdManagedAssets`](../daemon/gaovmd/lib/src/cold_managed_assets.dart)
+uses facts retained privately by `ColdCatalogInspection` while SQLite opens only
+the inspection copy. Imported JSON cannot supply those facts. Active image rows
+must agree with their immutable manifests, including type/profile/version/build/
+channel. Actual published image manifests and every declared object are checked
+against that catalog, including complete size and content digests.
+
+Each nondeleted VM needs successful provisioning publication proof: the plan,
+relational VM/Operation/generation IDs, terminal create Operation, completion
+timestamp, retained origin spec digest and bundle manifest digest must agree.
+The create request's generation, when present, must be an integer. A failed or
+cancelled create tombstones its definition; a live definition with such proof
+is contradictory and refused. A retained failed **TestRun** VM is different:
+its earlier successful create proof, definition, current data and terminal
+diagnostic history are kept, not converted into upgrade garbage.
+
+Current, observed and execution VmSpecs must retain the completed boot/disk
+source binding. Image-role pins are checked against the catalog, including the
+distinct kernel/initrd/root objects in a GaoOS bundle. Unknown/older layouts
+without bounded publication proof refuse asset preparation; no migration or
+repair runs here. This is not a replacement for the separate legacy workflow.
+
+**Writable VM disks are not checked against their original image seed digest.**
+Their nonempty current bytes and native metadata are held and hashed, as are
+existing managed EFI variables. Legitimate guest changes therefore survive the
+inspection. An absent managed EFI file is permitted only before any observed
+or driver generation; absence is recorded and rechecked, never initialized.
+A used VM's missing EFI, an empty file, a changed path or an observed writer
+refuses progress.
+
+The required `images/` and `vms/` roots, VM bundle folders and immutable-image
+folders are bound and revalidated. Private roots/bundle folders and no ACL
+grants on known directories/files are required, without chmod/ACL normalization.
+The existing native-metadata `MaintenanceTree` checks bind all entries beneath
+required roots, including unknown regular staging/orphan data and empty
+directories. Unknown data is retained; links, unsafe entries, special files or
+changes refuse progress rather than trigger cleanup. Each tree retains its
+existing 16,384-entry/32-level traversal bounds; managed file bindings are also
+bounded to 16,384. Manifest/plan/spec JSON is capped at 1 MiB per input, image
+label JSON at 64 KiB.
+
+The result format is `gaovm.cold-managed-assets.v1`. File evidence still says
+`backed_up: false`; tree content evidence is not a snapshot receipt. Revalidation
+checks the original cold lease before and after tree reads, using held readers.
+Failure does not release the caller's state ownership, and explicit close
+releases only this inspection's readers. These checks provide neither a lasting
+writer/startup fence nor a
+complete cold boundary. Retired runtime/legacy handling, safe `run/` treatment,
+paired snapshots, publication, durable transaction recovery, activation/commit,
+whole-state rollback and uninstall still require the full M8 workflow.
