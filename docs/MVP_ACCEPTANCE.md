@@ -1555,3 +1555,82 @@ paired whole-state/app rollback and first install remain unfinished. No push,
 PR, release, installed app/state/service operation or machine switch occurred.
 Apple Silicon execution remains assigned to the user. M8/MVP and the goal remain
 open; this is a validated candidate-composition slice, not a completed upgrade.
+
+## 2026-10-16 pre-catalog validation and startup obstruction
+
+Two new command integration checks in
+[release inspection](../daemon/gaovmd/test/macos_release_inspection_test.dart)
+exercise real pre-catalog legacy inputs through cold publication and controlled
+candidate validation. No source database is created or downgraded to manufacture
+this fixture. Publication reports `observed_catalog_schema: null`; successful
+validation applies schema 21, imports two boot images and migrates one stopped
+VM using the pending CPU setting. Original JSON, legacy backups, unknown private
+bytes, external kernel/initrd/disk bytes and the complete original app/state
+rollback pair remain intact. The original-state snapshot still has no catalog.
+No background worker or driver starts, no commit is granted, and ordinary
+startup stays fenced.
+
+The error case uses an unsupported legacy network mode rather than a fake
+migration callback. It fails after the actual boot-image imports: the partial
+catalog, validation intent and fence remain, while completion output and the API
+socket are absent. The original rollback pair and external inputs are unchanged.
+A direct retry refuses partial work before native component execution or new
+inspection output, with complete state/work manifests unchanged. Unexpected
+setup/test failures or active work retain the fixture instead of deleting it.
+
+The final combined candidate cohort passes **11 checks**, zero failures/skips,
+in **396.608 seconds**, with concurrency 1 and confirmed runner exit. This
+includes the two new checks and all nine existing source-entry/native-census/
+populated-current-catalog checks. Native JSON is
+`/private/tmp/gaovm-candidate-migration.DIjSuy/candidate-composition-final.jsonl`.
+Signature/service/ARM64/process observations in this cohort remain fixtures;
+real private SQLite/files/HTTP do not certify installed native activation.
+
+The previously filtered startup cases were then actually run, without name
+filters or longer deadlines, as part of
+[daemon application](../daemon/gaovmd/test/daemon_application_test.dart) and
+[legacy migration](../daemon/gaovmd/test/legacy_vm_migration_test.dart):
+**18 pass, 2 fail, zero skips across 20 checks/two files**, **121.677 seconds**.
+The runner exited 1. Native JSON is `daemon-startup-legacy.jsonl` in the same
+report directory. `unresolved native census rejects startup before legacy
+migration` now passes, including confirmed retirement of its disposable unlinked
+executable. The two positive daemon checks fail at their unchanged ten-second
+readiness deadlines; they are neither passing nor still unrun. Despite their
+test names, they launch source Dart in private state, not SMAppService or a real
+installed app.
+
+Read-only diagnostics distinguish source loading from the underlying refusal.
+The source component-info entry, which never starts the daemon/census, takes
+11.84 seconds. A temporary direct-import experiment still takes 10.83 seconds
+and was reverted, not presented as a fix. Its Intel AOT daemon exits 1 after
+1.356 seconds and its source daemon exits 1 after 11.941 seconds, both reporting
+`process inventory contains unresolved executables`. Both original child exits
+are confirmed. A separate native census observes four unresolved same-user PIDs;
+re-inspection returns `proc_pidpath` errno 2 for all four. Missing paths are not
+exit/ownership evidence. No unknown process was signalled or filtered out.
+
+`startup-diagnostics.json` records that temporary experiment explicitly. The
+diagnostic states `/private/tmp/gvm-start-probe-bm1rmX` and
+`/private/tmp/gvm-start-probe-hKJkri` are retained. The throwaway diagnostic script
+was removed only after its original runs exited; no temporary import or debug
+instrumentation remains in tracked source. This is a reproducible local native
+admission obstruction, not evidence of successful daemon startup.
+
+The macOS packaging job now explicitly selects both startup/migration files,
+with concurrency 1 and no new exclusions; Linux tests alone would skip the
+native cases. Remote CI was not run. The existing cold-operator CI target already
+includes the two new pre-catalog command checks.
+
+Daemon analysis, pinned non-UI formatting (**388 files**, zero changes),
+Schema/OpenAPI validation and `git diff --check` pass. Root analysis exits 0 with
+the same nine existing UI informational notices. Workflow YAML and six selected
+macOS steps with 29 existing test targets, plus 83 scoped Markdown file targets,
+validate; actionlint and Markdown anchors were not checked. No product guard, protocol,
+authentication, native-census rule or deadline was relaxed. The unrelated UI
+lockfile remains byte-identical and excluded. Historical nonzero-schema migration
+through candidate validation, full failure/crash/low-disk matrices and earlier
+broad/default-concurrency failures remain unresolved. Explicit validation
+recovery/commit, a verified outside-app launcher, activation, paired whole-state/
+app rollback and first install remain unfinished. No push, PR, release, real
+installed app/state/service operation, machine switch or Apple Silicon/VZ/GaoOS
+execution occurred. M8/MVP and the full goal remain open.
