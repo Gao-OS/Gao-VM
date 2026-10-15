@@ -21,6 +21,10 @@ final class MaintenanceTree {
       );
     }
     final root = await OwnedImageDirectory.open(directory);
+    if (root.path != directory.path) {
+      root.close();
+      throw const FormatException('maintenance canonical path changed');
+    }
     return MaintenanceTree._(root);
   }
 

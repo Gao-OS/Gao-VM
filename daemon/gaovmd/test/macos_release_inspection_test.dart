@@ -7,6 +7,7 @@ import 'package:gaovm_models/gaovm_models.dart';
 import 'package:gaovmd/src/daemon_component_info.dart';
 import 'package:gaovmd/src/image_filesystem.dart' show imageFileMode;
 import 'package:gaovmd/src/macos_release_inspection.dart';
+import 'package:gaovmd/src/macos_cold_state_host.dart';
 import 'package:gaovmd/src/maintenance_command.dart';
 import 'package:test/test.dart';
 
@@ -74,6 +75,38 @@ void main() {
       );
       expect(host.executedRoles, ['daemon', 'cli', 'driver-vz', 'service']);
       expect(await temporary.list().length, 1);
+    },
+  );
+
+  test(
+    'cold host rebinds inspected app bytes before its read-only service query',
+    () async {
+      final cold = await MacOsColdStateHost.open(
+        app,
+        bundleIdentifier: 'org.gaovm.tests.Release',
+        version: '0.1.0',
+        teamIdentifier: 'ABCDEFGHIJ',
+        catalogSchema: 21,
+        host: host,
+      );
+      try {
+        final status = await cold.serviceStatus();
+        expect(
+          jsonDecode(status.stdout as String)['authorization_state'],
+          'notRegistered',
+        );
+        expect(host.statusCalls, 1);
+        final file = File('${app.path}/Contents/MacOS/gaovm-service');
+        await file.writeAsBytes([...await file.readAsBytes(), 0]);
+        await expectLater(cold.serviceStatus(), throwsFormatException);
+        expect(
+          host.statusCalls,
+          1,
+          reason: 'changed helper must not be executed',
+        );
+      } finally {
+        cold.close();
+      }
     },
   );
 
@@ -368,6 +401,7 @@ final class _RealNativeBoundary implements ReleaseInspectionHost {
 // Only the native Security/plutil/execution boundary is replaced. These header
 // fixtures are never executed or presented as signed GaoVM product binaries.
 final class _NativeBoundary implements ReleaseInspectionHost {
+  int statusCalls = 0;
   final executedRoles = <String>[];
   final _verified = <String>{};
   final componentChanges = <String, Map<String, Object?>>{};
@@ -442,6 +476,19 @@ final class _NativeBoundary implements ReleaseInspectionHost {
         error =
             'Identifier=$identifier\nTeamIdentifier=$metadataTeam\nCodeDirectory v=20500 flags=${runtimeFlag ? '0x10000(runtime)' : '0x0(none)'}\n';
       }
+    } else if (arguments.length == 1 && arguments.single == 'status') {
+      expect(executable, endsWith('/Contents/MacOS/gaovm-service'));
+      expect(_verified.length, 5);
+      statusCalls++;
+      output = jsonEncode({
+        'action': 'status',
+        'bundle_identifier': 'org.gaovm.tests.Release',
+        'plist_name': 'gaovmd.plist',
+        'authorization_state': 'notRegistered',
+        'native_status': 0,
+        'outcome': 'observed',
+        'error_code': null,
+      });
     } else {
       expect(arguments, ['--component-info']);
       expect(

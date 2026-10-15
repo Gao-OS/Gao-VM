@@ -507,3 +507,40 @@ or hardware matrix is claimed by this subsequent Dart-only checkpoint.
 Actual applied catalog/runtime negotiation, cold acquisition, complete durable
 paired snapshots, startup/writer fencing, publication, validation/commit,
 whole-state rollback/recovery and uninstall remain unfinished M8 work.
+
+## 2026-10-15 cold-state preparation checkpoint
+
+On top of `97d0442`, the internal
+[cold preparation components](MACOS_RELEASE_INSPECTION.md#cold-state-preparation-library)
+bind a read-only owning-helper status query to freshly inspected app bytes,
+retain actual private state ownership, and independently reject live/unresolved
+daemon/driver processes or other same-user state references. Service status is
+rechecked after native observations. Refused acquisition releases its own lock;
+failed revalidation retains an acquired lock until explicit close. No catalog,
+desired state or installed app is changed; the persistent ownership lock may be
+created and is never removed by these components.
+
+The **87-test** focused preparation/inspection/ownership suite passed with zero
+failures/skips. Real isolated open-file children prove both directory/file
+observations and refusal until confirmed exit. Native service/census observations
+in the lease policy tests are replaced at the external boundary; they do not
+prove actual Service Management or an unconstrained host census. Changed app
+bytes prevent a subsequent helper execution. Incomplete native output, foreign
+service identity, re-registration, lock contention and replaced state identities
+refuse progress. Native partial-search status 1 retains reported occupied PIDs.
+
+The complete daemon regression passed **1,529** tests, with **1** platform skip,
+zero failures and the same **3** explicitly excluded installed/native-process
+cases. The Rust host publication fixture remained enabled. Both JSON reports in
+`/private/tmp/gaovm-cold-preflight.vGA4jo/` ended with `success: true`. Dart
+analysis, pinned formatting (**275** files), JSON Schema/OpenAPI validation,
+scoped Markdown file links and `git diff --check` passed. No new Swift/hardware,
+CI or native installed-lifecycle result is claimed. The unrelated UI lockfile
+retains its previous digest and is not part of this change.
+
+This lease is only a preparation prerequisite: active catalog work/leases,
+retired runtime generations, external disks/EFI, complete durable paired
+snapshots, writer fencing across directory replacement, publication,
+validation/commit, rollback/recovery and uninstall remain unfinished. It does
+not authorize omitting `run/`, replacing installed app/state, service mutation,
+push or release, and does not complete M8 or the overall goal.

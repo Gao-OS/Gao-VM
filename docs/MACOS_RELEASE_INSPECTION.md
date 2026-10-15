@@ -90,3 +90,44 @@ the formal-signature path common to both proposed policies; existing explicit
 ad-hoc assembly tests remain valid build fixtures, not upgrade authority.
 Complete cold acquisition, durable paired snapshots, writer fencing, publication,
 validation/commit, rollback/recovery and uninstall are still separate M8 work.
+
+## Cold-state preparation library
+
+The internal [`MacOsColdStateHost`](../daemon/gaovmd/lib/src/macos_cold_state_host.dart)
+performs a fresh release inspection and holds its app tree. Before and after
+running only that app's `gaovm-service status`, it verifies the inspected bytes
+again. Imported JSON receipts cannot grant trust to an arbitrary helper.
+The native process observations match the exact canonical daemon and driver
+paths; unresolved executable identities remain failures, not proof of exit.
+
+[`ColdStateLease`](../daemon/gaovmd/lib/src/cold_state_lease.dart) holds the
+existing daemon ownership mechanism throughout preparation. It refuses broad
+roots, app/state overlap, noncanonical or nonprivate state, an existing owner,
+anything except the exact owning helper's `notRegistered` observation, live or
+unresolved daemon/driver processes, and other same-user processes referencing
+the state tree. Service status is checked again after the process/reference
+observations. Revalidation failure retains an acquired lock until explicit
+close; rejected acquisition releases its own lock. The persistent
+`.gaovmd.lock` may be created but is never unlinked; catalog/data are not opened
+or changed. The host's app handle and the state lease have explicit lifetimes.
+
+The targeted native open-reference reader requests only PID/file-descriptor
+fields, restricted to the current UID and the specified canonical directory or
+file. It treats readers, working directories and mappings as occupied too. It
+does not inspect command lines or act on an observed PID. The bounded command
+runner must confirm its own observer exited; only that observer is omitted.
+The lease additionally permits its own maintenance process's references.
+Warnings, malformed/truncated records, unsupported descriptor records, output
+overflow and unavailable evidence refuse progress. A native search can return
+1 while reporting occupied files; those PIDs must be retained, as documented in
+the [lsof project's exit-status FAQ](https://github.com/lsof-org/lsof/blob/master/docs/faq.md#why-does-the-lsof-exit-code-report-it-didnt-find-open-files).
+This same-user observation is not protection against privileged or malicious
+writers, nor a lasting fence against uncooperative new processes.
+
+This is a preparation prerequisite, **not a complete cold-boundary certificate**
+or an installed maintenance command. It does not yet check catalog work/leases,
+external disks/EFI, copy a complete durable app/state snapshot, or provide
+startup fencing across state-directory replacement. It must not justify omitting
+`run/`, moving installed trees, or declaring M8 complete. Normal daemon startup
+and public API behavior remain unchanged. Real service registration/unregistration
+and native ARM64 product acceptance remain outside this component's tests.
