@@ -1634,3 +1634,81 @@ recovery/commit, a verified outside-app launcher, activation, paired whole-state
 app rollback and first install remain unfinished. No push, PR, release, real
 installed app/state/service operation, machine switch or Apple Silicon/VZ/GaoOS
 execution occurred. M8/MVP and the full goal remain open.
+
+## 2026-10-16 sealed validation-checkpoint recovery
+
+Local commit `e30675f` adds the outside-app `resume-validation` maintenance action,
+which reopens only a complete sealed candidate-validation result. It
+re-establishes a zero-daemon/driver cold
+boundary, the original-state kernel owner and existing persistent fence, then
+verifies the published candidate, immutable original app/state rollback pair,
+complete current persistent state and original external-file seals. Historical
+legacy inputs are checked even when migration removed their live catalog
+reference. No migration, API/doctor session, worker, driver, registration or
+ordinary startup is rerun. The result explicitly reports
+`public_api_rerun: false`, `state_unchanged: true` and no commit/activation/rollback
+authority.
+
+V2 validation intents bind the workspace inode and original publication/
+preparation evidence. Old unbound intents are retained and refused, not patched
+into recovery permits. Existing complete records are read without rewriting.
+Only a complete sealed `.completed.partial` can be atomically published as
+`completed`, without replacement and with another complete verification after
+the move. Other partial/unknown work remains retained. Ordinary preparation/
+publication admission keeps its original strict source-catalog checks; the
+private retained-validation opening does not relax those entry points. See the
+[operator boundary](MACOS_COLD_MAINTENANCE.md#sealed-validation-recovery).
+
+The new command check first failed at the real runtime after successful legacy
+migration because `resume-validation` was not implemented. That runner exited;
+its fixture `/private/tmp/gvm-recover-validation-NZEnR6` remains retained with an
+older unbound validation intent. Do not rewrite it or infer recovery authority
+from its complete-looking contents. Earlier timed-out and diagnostic fixtures
+listed above were not touched; all six retained directories were rechecked to
+exist, including the incomplete validated-state output.
+
+The final combined candidate/recovery cohort passes **19 checks**, zero failures
+or skips, in **932.493 seconds**, with concurrency 1 and confirmed runner exit.
+It includes all eleven preceding candidate checks plus eight recovery checks:
+complete-result re-verification, wrong source-schema refusal, complete sealed
+completion promotion, unknown partial completion retention, three zero-process
+census refusals and a changed historical kernel. Current persistent state and
+the original rollback pair stay unchanged. Early refusals leave the fresh
+inspection directory empty; rejected state/work contents remain unchanged. The
+partial-completion case models a sealed crash checkpoint by moving its own
+completed directory; it is not a process-kill crash E2E test. Native signature,
+service, ARM64 and process boundaries remain fixtures, not installed acceptance.
+
+The real SQLite/database and native read-only-connection cohort passes **27
+checks across two files**, zero failures/skips, in **6.840 seconds**, with
+confirmed runner exit. Reports are retained under
+`/private/tmp/gaovm-validation-recovery.XdSMJE/` as
+`candidate-recovery-final.jsonl` and `sqlite-isolation.jsonl`. The final Intel AOT
+maintenance executable compiles; empty-environment/no-HOME help and malformed
+recovery input checks pass with confirmed original child exits. This is entry
+and grammar evidence, not ARM64 execution or a native upgrade result.
+
+The source maintenance CLI cohort passes **35 checks**, zero failures/skips, in
+**254.286 seconds**, with confirmed runner exit and the original ten-second
+owned-child deadlines unchanged. This includes nine new malformed recovery
+inputs, empty-environment/no-HOME help and all preceding publication/uninstall
+grammar and actual unsigned-app refusal checks. Native JSON is
+`operator-cli-final.jsonl` in the same report directory. Together the three
+cohorts cover **81 checks across four files**, not the entire repository suite.
+
+Daemon analysis has no issues. Root analysis exits 0 with the same nine existing
+UI informational notices; pinned non-UI formatting checks **390 files**, zero
+changes. Schema/OpenAPI validation and `git diff --check` pass. The unrelated UI
+lockfile remains byte-identical and excluded. All 87 scoped Markdown file
+targets exist (anchors were not checked). Existing macOS CI already selects
+both command files; remote CI and the full/default-concurrency suite were not
+run in this slice. Earlier two positive local daemon-startup failures remain
+unfixed, not reclassified as passing.
+
+This is sealed-checkpoint recovery only. Cold commit, arbitrary interrupted
+migration/validation recovery, a verified outside-app candidate launcher,
+activation, paired whole-state/app rollback, first install and the complete
+failure/crash/low-disk matrix remain unfinished. Historical nonzero-schema
+migration still lacks dedicated command evidence. No push, PR, release, real
+installed app/state/service/VM operation, machine switch or Apple Silicon/
+VZ/GaoOS execution occurred. M8/MVP and the full goal remain open.
