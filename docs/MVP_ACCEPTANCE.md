@@ -544,3 +544,56 @@ snapshots, writer fencing across directory replacement, publication,
 validation/commit, rollback/recovery and uninstall remain unfinished. It does
 not authorize omitting `run/`, replacing installed app/state, service mutation,
 push or release, and does not complete M8 or the overall goal.
+
+## 2026-10-15 native tree snapshot component checkpoint
+
+On top of `0678d70`, the internal
+[tree snapshot primitive](MACOS_RELEASE_INSPECTION.md#metadata-preserving-tree-snapshot-primitive)
+copies supported complete trees, including unknown files, empty directories and
+zero-byte ownership records. Native bytes, UID/GID, modes, ACLs, xattrs/resource
+forks, creation/modification times and flags are checked independently in source
+and payload manifests. Directory metadata is applied after children; synced
+receipts and no-replace publication retain failed staging and original inputs.
+An existing namespace lock with unexpected mode, contents or hardlinks is refused
+before the existing lock primitive can change its permissions. Copied lock bytes
+do not transfer source ownership or fence a replacement tree.
+
+The final **102-test** focused suite passed with **concurrency 1**, zero failures
+or skips. It includes **23 new native component tests**, real retained SQLite
+WAL/SHM with committed data, resource forks larger than one read chunk, ACL/flag
+preservation, metadata-only change detection, descriptor lifetimes, existing
+target protection, native-copy failure retention and real source/copy lock
+independence. Only the disposable SQLite copy was opened for integrity checks.
+The terminal report is `focused-complete.jsonl` under
+`/private/tmp/gaovm-tree-snapshot.c8JJrj/`.
+
+Broad regression **did not pass** during this change:
+
+- The first selected daemon run passed **1,546**, skipped **1** and failed **1**
+  existing daemon component-probe case at its 10-second child deadline.
+- The concurrency-2 rerun passed **1,542**, skipped **1** and failed **5**:
+  four existing executable-probe cases at their 5-second deadlines and the
+  packaged HOME/default-state case at its 10-second child deadline.
+- The same **3** installed/native-process exclusions documented above remained
+  excluded, not passed. The Rust host publication fixture remained enabled.
+  These broad runs preceded the final namespace-guard test additions.
+
+Parallel focused attempts also hit probe deadlines; those failed reports are
+retained alongside `daemon.jsonl` and `daemon-c2.jsonl`. The daemon component
+case, packaged HOME case and final focused suite passed in isolation. Every
+timed-out owned child reported confirmed exit. At one observation the host had
+12 logical CPUs and load averages 187.76/141.52/112.50; this is pressure context,
+not a proven cause. No production/test deadline, assertion or exclusion was
+relaxed. Isolated success does not supersede the failed broad runs or satisfy
+the unfiltered release gate.
+
+Dart analysis, pinned formatting (**278** files), JSON Schema/OpenAPI validation,
+scoped local Markdown file links and `git diff --check` passed. The unrelated UI
+lockfile is unchanged and excluded from this component. No fresh Swift, hardware,
+CI, signed-product or installed lifecycle result is claimed.
+
+This is not complete cold acquisition or a paired app/state transaction. Active
+catalog/lease checks, retired runtimes, external disks/EFI, startup/writer fencing,
+crash/low-disk injection, publication/commit, whole-state rollback/recovery and
+uninstall remain unfinished M8 work. No installed app/state or real service was
+changed, and neither M8 nor the overall goal is complete.

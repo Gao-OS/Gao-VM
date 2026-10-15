@@ -131,3 +131,57 @@ startup fencing across state-directory replacement. It must not justify omitting
 `run/`, moving installed trees, or declaring M8 complete. Normal daemon startup
 and public API behavior remain unchanged. Real service registration/unregistration
 and native ARM64 product acceptance remain outside this component's tests.
+
+## Metadata-preserving tree snapshot primitive
+
+The internal [`MaintenanceTree.snapshotTo`](../daemon/gaovmd/lib/src/maintenance_tree.dart)
+now copies one complete supported tree to a new private snapshot wrapper. It is
+not an installed maintenance command or a paired app/state transaction. The
+caller must still establish the full cold/external-file boundary and retain its
+ownership throughout preparation; a JSON receipt grants no authority to move
+its recorded paths.
+
+The source and destination must be disjoint, canonical owned trees. Snapshot
+storage must have private mode bits and no ACL grants. The primitive takes a
+bounded cooperative namespace lock, refuses existing final/partial destinations,
+and checks available space against logical file/xattr sizes plus conservative
+per-entry overhead before copying. This is not a disk-space reservation. It
+creates `.<name>.partial/payload` (`payload.app` for an app), preserves unknown
+files and empty directories, and never excludes `run/` or other names. Links,
+hardlinks, special files, unsafe modes and traversal/metadata bounds fail closed;
+an unsupported entry must not be silently omitted to make a backup succeed.
+The persistent `.gaovm-maintenance.lock` is never unlinked. Before calling the
+existing lock primitive, any existing lock must be a singly linked, empty owned
+regular file with mode 0600. Other contents, modes or links are refused without
+changing them. The snapshot name cannot use this reserved lock name.
+Copying an ownership file's bytes never transfers its kernel lock to the copy;
+the held source ownership is not a startup fence for a replacement tree.
+
+Native copying uses held descriptors and is awaited to completion, never
+abandoned on a timer. Files retain bytes, UID/GID, modes, ACLs, extended attributes
+(including chunked resource forks), creation/modification times and BSD flags.
+Directories receive their metadata after their children. The copy call alone is
+not preservation proof: checked native ownership/stat operations supplement
+[`fcopyfile`](https://github.com/apple-oss-distributions/copyfile/blob/main/copyfile.3),
+and complete source/copy manifests are compared before publication. Native
+metadata errors or unsupported attributes refuse the snapshot rather than
+normalizing them away. Resource forks are bounded to 4 GiB minus one byte;
+other attribute values to 16 MiB, attribute-name lists and ACLs to 64 KiB each.
+Read access can advance access times; they are copied as observed but excluded
+from the integrity manifest, as are new inode identities and change times.
+
+Each manifest binds file size/SHA-256 and every supported entry's permissions,
+ownership, creation/modification times, flags and ACL/xattr digests. The primitive
+syncs new directories, copied data/metadata, and the sealed `receipt.json`, then publishes
+with an atomic no-replace directory rename and parent sync. The receipt format
+is `gaovm.tree-snapshot.v1`. A failure after staging starts reports both partial
+and final paths, retains originals/output, and never deletes output to retry.
+A sync error may follow a successful rename: inspect both retained paths rather
+than assuming nothing was published. This receipt is not a recovery journal.
+
+Local Intel tests use real private files, native metadata/ACL/resource-fork APIs,
+and a closed SQLite database with committed WAL/SHM sidecars. SQLite validation
+opens only the disposable copy, never the original catalog. These are component
+checks, not signed-app, actual catalog/lease quiescence, external-disk accounting,
+paired snapshot, crash/low-disk injection, writer fencing, upgrade, rollback or
+native ARM64 lifecycle acceptance. Those M8 requirements remain unfinished.
