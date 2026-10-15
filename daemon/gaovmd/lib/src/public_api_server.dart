@@ -551,6 +551,23 @@ final class PublicApiServer {
   Object? _fatalError;
   int _artifactSequence = 0;
   final Set<_PublicApiStreamSession> _activeStreams = {};
+  final Set<Future<void>> _maintenanceWork = {};
+
+  Future<T> _retainMaintenance<T>(Future<T> work) {
+    if (access != PublicApiAccess.maintenanceValidation) return work;
+    late Future<void> settled;
+    settled = work
+        .then<void>((_) {}, onError: (Object _, StackTrace __) {})
+        .whenComplete(() => _maintenanceWork.remove(settled));
+    _maintenanceWork.add(settled);
+    return work;
+  }
+
+  Future<void> _drainMaintenanceWork() async {
+    while (_maintenanceWork.isNotEmpty) {
+      await Future.wait(_maintenanceWork.toList(growable: false));
+    }
+  }
 
   static final _pathGate = _PublicApiPathGate();
 
@@ -599,6 +616,11 @@ final class PublicApiServer {
   Future<void> _startLocked() async {
     if (_server != null || _listenerSocket != null)
       throw StateError('public API server is already started');
+    if (access == PublicApiAccess.maintenanceValidation &&
+        _closing &&
+        _maintenanceWork.isNotEmpty) {
+      throw StateError('maintenance requests are still draining');
+    }
     _closing = false;
     _listenerTerminated = false;
     _fatalError = null;
@@ -643,7 +665,7 @@ final class PublicApiServer {
         socket: socket,
         onRequest: (request) {
           unawaited(
-            _handle(request).catchError((Object _) {
+            _retainMaintenance(_handle(request)).catchError((Object _) {
               try {
                 request.response.close();
               } catch (_) {}
@@ -690,7 +712,17 @@ final class PublicApiServer {
     }
   }
 
-  Future<void> close() => _pathGate.run(socketPath, _closeLocked);
+  Future<void> close() async {
+    try {
+      await _pathGate.run(socketPath, _closeLocked);
+    } finally {
+      // HTTP observation deadlines do not cancel borrowed application work.
+      // Retain maintenance roots/catalog until the original futures settle,
+      // including when listener/link cleanup itself fails. Do not hold the
+      // observation gate: a borrowed diagnostic may still need that gate.
+      await _drainMaintenanceWork();
+    }
+  }
 
   Future<void> _closeLocked() async {
     if (_server == null && _subscription == null && _listenerSocket == null) {
@@ -910,7 +942,8 @@ final class PublicApiServer {
     };
     final builtIn = builtInPaths.contains(request.uri.path);
     if (access == PublicApiAccess.maintenanceValidation &&
-        (request.method != 'GET' ||
+        (_closing ||
+            request.method != 'GET' ||
             request.contentLength > 0 ||
             request.headers.value(HttpHeaders.transferEncodingHeader) != null ||
             !_maintenanceReadPaths.contains(
@@ -1001,7 +1034,7 @@ final class PublicApiServer {
           request.uri.path,
         ),
       );
-      final response = handler(apiRequest);
+      final response = _retainMaintenance(handler(apiRequest));
       final result = await response.timeout(
         apiRequest._selectResponseDeadline(remainingOrdinaryDeadline()),
       );
@@ -1026,9 +1059,9 @@ final class PublicApiServer {
       case '/v1/openapi.json':
         _writeJson(request.response, HttpStatus.ok, _openApiDocument);
       case '/v1/system/live':
-        final status = await _systemHealth.liveness().timeout(
-          remainingOrdinaryDeadline(),
-        );
+        final status = await _retainMaintenance(
+          _systemHealth.liveness(),
+        ).timeout(remainingOrdinaryDeadline());
         _writeJson(
           request.response,
           status.healthy ? HttpStatus.ok : HttpStatus.serviceUnavailable,

@@ -28,6 +28,87 @@ void main() {
   });
 
   test(
+    'maintenance close drains the original handler after its HTTP deadline',
+    () async {
+      final entered = Completer<void>();
+      final release = Completer<PublicApiResponse>();
+      var calls = 0;
+      final router = PublicApiRouter()
+        ..add('GET', '/v1/vms', (_) {
+          calls++;
+          entered.complete();
+          return release.future;
+        });
+      final server = PublicApiServer(
+        socketPath: socketPath,
+        openApiDocument: const {},
+        systemHealth: _HealthService(),
+        router: router,
+        access: PublicApiAccess.maintenanceValidation,
+        requestDeadline: const Duration(milliseconds: 50),
+        newRequestId: () => _requestId,
+      );
+      await server.start();
+      Future<void>? closing;
+      try {
+        final request = _request(socketPath, 'GET', '/v1/vms');
+        await entered.future;
+        _expectProblem(await request, 504, 'WAIT_TIMEOUT');
+        var closed = false;
+        closing = server.close().then((_) => closed = true);
+        await Future<void>.delayed(const Duration(seconds: 1));
+        expect(closed, false, reason: 'the same borrowed handler still runs');
+        expect(calls, 1);
+      } finally {
+        release.complete(PublicApiResponse.json(status: 200, body: const {}));
+        await (closing ?? server.close());
+      }
+    },
+  );
+
+  test('maintenance drain does not hold the socket observation gate', () async {
+    final entered = Completer<void>(), release = Completer<void>();
+    final cleanup = Completer<void>();
+    Future<void>? observation;
+    late PublicApiServer server;
+    final router = PublicApiRouter()
+      ..add('GET', '/v1/vms', (_) async {
+        entered.complete();
+        await release.future;
+        observation = server.inspectOwnedSocketPaths().then<void>(
+          (_) {},
+          onError: (Object _, StackTrace __) {},
+        );
+        await Future.any([observation!, cleanup.future]);
+        return PublicApiResponse.json(status: 200, body: const {});
+      });
+    server = PublicApiServer(
+      socketPath: socketPath,
+      openApiDocument: const {},
+      systemHealth: _HealthService(),
+      router: router,
+      access: PublicApiAccess.maintenanceValidation,
+      requestDeadline: const Duration(milliseconds: 50),
+    );
+    await server.start();
+    Future<void>? closing;
+    try {
+      final request = _request(socketPath, 'GET', '/v1/vms');
+      await entered.future;
+      expect((await request).status, 504);
+      closing = server.close();
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      release.complete();
+      await closing.timeout(const Duration(seconds: 1));
+    } finally {
+      if (!release.isCompleted) release.complete();
+      cleanup.complete();
+      await (closing ?? server.close());
+      await observation;
+    }
+  });
+
+  test(
     'maintenance validation rejects writes before invoking a handler',
     () async {
       var accepted = false;
