@@ -72,6 +72,14 @@ final class MacOsDriverInventory {
     ).timeout(const Duration(seconds: 5));
   }
 
+  /// A cold maintenance owner cannot abandon a native observation and release
+  /// protected readers/locks on a Dart observation deadline. Await its isolate.
+  Future<DriverInventorySnapshot> snapshotForMaintenance() {
+    if (!Platform.isMacOS) throw UnsupportedError('macOS inventory required');
+    final path = executablePath;
+    return Isolate.run(() => _snapshot(path));
+  }
+
   /// Returns null for an exited process or a different executable/user.
   /// Inspection errors are not evidence that a process is absent.
   Future<DriverProcessIdentity?> inspect(int pid) async {

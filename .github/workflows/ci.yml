@@ -85,6 +85,10 @@ jobs:
         if: matrix.entrypoint != ''
         run: dart compile exe ${{ matrix.entrypoint }} -o "${RUNNER_TEMP}/${{ matrix.package }}"
 
+      - name: Compile cold maintenance operator
+        if: matrix.package == 'gaovmd'
+        run: dart compile exe tool/maintain_macos.dart -o "${RUNNER_TEMP}/gaovm-maintenance"
+
   macos-package-components:
     name: macOS packaging component checks
     runs-on: macos-14
@@ -112,6 +116,13 @@ jobs:
           test/vm_bundle_filesystem_test.dart
           test/daemon_launch_configuration_test.dart
           test/packaged_daemon_launch_test.dart --concurrency=1
+
+      - name: Check cold operator and recovery with native observation fixtures
+        working-directory: daemon/gaovmd
+        run: >-
+          dart test test/macos_release_inspection_test.dart
+          test/cold_publication_tool_test.dart
+          test/macos_driver_inventory_test.dart --concurrency=1
 
       - name: Resolve CLI dependencies
         working-directory: clients/gaovm_cli

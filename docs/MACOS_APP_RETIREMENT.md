@@ -4,8 +4,9 @@ The internal [cold preparation](MACOS_UPGRADE_PREPARATION.md) can now retire
 its exact original app into a private journal namespace, keeping the original
 state-inode kernel lock continuously held. It does **not** install a candidate,
 start/register a service, clear a fence, commit an upgrade or authorize rollback.
-There is still no install/upgrade maintenance CLI. These interfaces do not grant
-permission to act on a real installed app/state/service.
+The bounded [cold operator command](MACOS_COLD_MAINTENANCE.md) composes retirement
+with preparation/publication and explicit recovery, not a complete install or
+upgrade. These interfaces do not grant permission to act on an actual installation.
 
 ## Ownership and inputs
 
@@ -117,7 +118,7 @@ or full transaction recovery. Independent staged candidate publication and
 candidate fence-cooperation evidence now have a separate
 [implementation](MACOS_CANDIDATE_PUBLICATION.md). Activation/write isolation through
 explicit validation/commit, whole-state/app rollback with rewind acknowledgement,
-data-preserving uninstall and the operator command remain unfinished. Full
+and data-preserving uninstall remain unfinished. Full
 process-crash/fsync/low-disk lifecycle and genuine signed installed-product
 acceptance are unproved. Apple Silicon/VZ/GaoOS execution remains assigned to
 the user; no M8/MVP or release-completion claim follows from this component.

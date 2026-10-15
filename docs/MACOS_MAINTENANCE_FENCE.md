@@ -102,9 +102,11 @@ cleanup. Only external service/process/reference observations are replaced.
 They also cover damaged/foreign records, concurrent recovery, cold revalidation,
 late native-callback changes and publication failures with original preservation.
 
-There is no begin/recover/clear CLI yet, no replacement-state admission,
-activation/write isolation, validated commit/retirement, whole-state rollback or
-uninstall transaction. The separate [paired snapshot](MACOS_RELEASE_INSPECTION.md#paired-old-app-and-state-snapshots)
+The bounded [cold operator command](MACOS_COLD_MAINTENANCE.md) begins or reopens
+the matching guard as part of explicit candidate publication/recovery. There is
+no standalone clear command, replacement-state admission, activation/write
+isolation, validated commit/fence removal, whole-state rollback or uninstall
+transaction. The separate [paired snapshot](MACOS_RELEASE_INSPECTION.md#paired-old-app-and-state-snapshots)
 does not arm this guard and still reports `replacement_startup_fenced: false`.
 The separate [candidate preparation](MACOS_UPGRADE_PREPARATION.md) requires an
 already-held typed guard and retains it; its durable `candidate_prepared`

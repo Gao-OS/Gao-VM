@@ -13,6 +13,7 @@ import 'package:gaovmd/src/image_filesystem.dart';
 import 'package:gaovmd/src/macos_release_inspection.dart';
 import 'package:gaovmd/src/macos_cold_state_host.dart';
 import 'package:gaovmd/src/macos_open_references.dart';
+import 'package:gaovmd/src/macos_cold_publication.dart';
 import 'package:gaovmd/src/maintenance_command.dart';
 import 'package:gaovmd/src/maintenance_tree.dart';
 import 'package:gaovmd/src/maintenance_state_fence.dart';
@@ -1556,6 +1557,463 @@ void main() {
         await assertStateOwner();
         await lease.verify();
       }),
+      timeout: const Timeout(Duration(minutes: 2)),
+    );
+  }, skip: !Platform.isMacOS);
+
+  group('cold publication command', () {
+    late Directory state, candidate, work, scratch;
+    setUp(() async {
+      state = await Directory('${temporary.path}/command-state').create();
+      candidate = Directory('${temporary.path}/Candidate.app');
+      work = await Directory('${temporary.path}/command-work').create();
+      scratch = await Directory(
+        '${temporary.path}/command-inspection',
+      ).create();
+      for (final directory in [state, work, scratch]) {
+        imageFileMode(directory.path, 0x1c0);
+      }
+      final database = await GaoVmDatabase.open('${state.path}/gaovm.db');
+      database.close();
+      imageFileMode('${state.path}/gaovm.db', 0x180);
+      await File('${state.path}/unknown-data').writeAsString('retain me');
+      imageFileMode('${state.path}/unknown-data', 0x180);
+      await _fixture(candidate);
+      await File(
+        '${candidate.path}/Contents/Resources/new-only',
+      ).writeAsString('candidate');
+      imageFileMode('${candidate.path}/Contents/Resources/new-only', 0x180);
+    });
+
+    List<String> arguments({String? from, int schema = 21}) => [
+      from == null ? 'publish-upgrade' : 'resume-publication',
+      '--app',
+      app.path,
+      '--state-dir',
+      state.path,
+      if (from == null) ...['--candidate-app', candidate.path],
+      '--work-dir',
+      work.path,
+      '--inspection-dir',
+      scratch.path,
+      '--bundle-id',
+      'org.gaovm.tests.Release',
+      '--old-version',
+      '0.1.0',
+      '--new-version',
+      '0.1.0',
+      '--team-id',
+      'ABCDEFGHIJ',
+      if (from != null) ...['--from', from, '--catalog-schema', '$schema'],
+    ];
+
+    Future<Map<String, Object?>> command(List<String> args) async {
+      activeRetirementChecks++;
+      try {
+        return await runMacOsColdPublication(
+          args,
+          host: host,
+          observer: MacOsOpenReferences(
+            command: (_, _) async => ProcessResult(pid, 1, '', ''),
+          ),
+          inventory: (_) async =>
+              DriverInventorySnapshot(processes: [], unresolvedProcessIds: []),
+        );
+      } finally {
+        activeRetirementChecks--;
+      }
+    }
+
+    Future<void> freshInspection(String name) async {
+      scratch = await Directory('${temporary.path}/$name').create();
+      imageFileMode(scratch.path, 0x1c0);
+    }
+
+    for (final refusal in [
+      'overlap',
+      'unknown-work',
+      'used-inspection',
+      'work-privacy',
+    ]) {
+      test(
+        'operator refuses $refusal without fencing or normalizing inputs',
+        () async {
+          final args = arguments();
+          switch (refusal) {
+            case 'overlap':
+              args[args.indexOf('--work-dir') + 1] = state.path;
+            case 'unknown-work':
+              await File('${work.path}/unknown').writeAsString('retain work');
+            case 'used-inspection':
+              await File(
+                '${scratch.path}/unknown',
+              ).writeAsString('retain inspection');
+            case 'work-privacy':
+              imageFileMode(work.path, 0x1ed);
+          }
+          await expectLater(
+            command(args),
+            throwsA(isA<ColdPublicationFailure>()),
+          );
+          expect(await File('${state.path}/.gaovmd.lock').exists(), false);
+          await MaintenanceStateFence.requireUnfenced(state);
+          expect(
+            await File('${state.path}/unknown-data').readAsString(),
+            'retain me',
+          );
+          if (refusal == 'work-privacy') {
+            expect((await work.stat()).mode & 0xfff, 0x1ed);
+          }
+          if (refusal == 'unknown-work') {
+            expect(
+              await File('${work.path}/unknown').readAsString(),
+              'retain work',
+            );
+          }
+          if (refusal == 'used-inspection') {
+            expect(
+              await File('${scratch.path}/unknown').readAsString(),
+              'retain inspection',
+            );
+          }
+        },
+      );
+    }
+
+    test(
+      'operator cannot fence or replace state owned by an existing daemon',
+      () async {
+        activeRetirementChecks++;
+        final root = await OwnedImageDirectory.open(state);
+        final owner = await DaemonOwnership.tryAcquire(root);
+        try {
+          expect(owner, isNotNull);
+          await expectLater(
+            command(arguments()),
+            throwsA(
+              isA<ColdPublicationFailure>().having(
+                (error) => error.cause,
+                'actual state ownership',
+                isA<ColdStateFailure>(),
+              ),
+            ),
+          );
+          await owner!.verify();
+          await MaintenanceStateFence.requireUnfenced(state);
+          expect(await Directory(app.path).exists(), true);
+          expect(
+            await File('${state.path}/unknown-data').readAsString(),
+            'retain me',
+          );
+        } finally {
+          owner?.close();
+          root.close();
+          activeRetirementChecks--;
+        }
+      },
+    );
+
+    test(
+      'operator refuses a changed work lock before acquiring original state',
+      () async {
+        activeRetirementChecks++;
+        try {
+          host.onProbe = () => File(
+            '${work.path}/.gaovm-cold-publication.lock',
+          ).writeAsString('foreign lock contents');
+          host.onStatus = () async {
+            throw StateError(
+              'should refuse before querying service with a state lease',
+            );
+          };
+          await expectLater(
+            command(arguments()),
+            throwsA(
+              isA<ColdPublicationFailure>().having(
+                (error) => error.cause,
+                'strict command lock rejection',
+                isA<FormatException>(),
+              ),
+            ),
+          );
+          expect(await File('${state.path}/.gaovmd.lock').exists(), false);
+          expect(
+            await File(
+              '${work.path}/.gaovm-cold-publication.lock',
+            ).readAsString(),
+            'foreign lock contents',
+          );
+        } finally {
+          activeRetirementChecks--;
+        }
+      },
+    );
+
+    test(
+      'operator command publishes with an independently observed catalog and retained fence',
+      () async {
+        activeRetirementChecks++;
+        try {
+          host.onAdmission = (_, _) async {
+            final root = await OwnedImageDirectory.open(state);
+            try {
+              final competing = await root.tryAcquireMaintenanceLock(
+                '.gaovmd.lock',
+                create: false,
+              );
+              try {
+                expect(competing, isNull, reason: 'original inode stays owned');
+              } finally {
+                competing?.close();
+              }
+            } finally {
+              root.close();
+            }
+            await expectLater(
+              MaintenanceStateFence.requireUnfenced(state),
+              throwsA(isA<MaintenanceFenceActive>()),
+            );
+            return null;
+          };
+          final report = await runMacOsColdPublication(
+            arguments(),
+            host: host,
+            observer: MacOsOpenReferences(
+              command: (_, _) async => ProcessResult(pid, 1, '', ''),
+            ),
+            inventory: (_) async => DriverInventorySnapshot(
+              processes: [],
+              unresolvedProcessIds: [],
+            ),
+          );
+          expect(report['phase'], 'candidate_published');
+          expect(report['observed_catalog_schema'], 21);
+          expect(report['activation_authorized'], false);
+          expect(report['committed'], false);
+          expect(report['rollback_authorized'], false);
+          expect(
+            await File('${state.path}/unknown-data').readAsString(),
+            'retain me',
+          );
+          expect(
+            await File(
+              '${app.path}/Contents/Resources/new-only',
+            ).readAsString(),
+            'candidate',
+          );
+          expect(
+            await Directory('${work.path}/retirement/GaoVM.app').exists(),
+            true,
+          );
+          expect(
+            await Directory(
+              '${work.path}/preparation/original-state/payload',
+            ).exists(),
+            true,
+          );
+          await expectLater(
+            MaintenanceStateFence.requireUnfenced(state),
+            throwsA(isA<MaintenanceFenceActive>()),
+          );
+          final fence = await MaintenanceStateFence.open(state);
+          final root = await OwnedImageDirectory.open(state);
+          try {
+            final owner = await DaemonOwnership.tryAcquireForMaintenance(
+              root,
+              fence,
+            );
+            expect(
+              owner,
+              isNotNull,
+              reason: 'terminal command releases ownership only',
+            );
+            owner?.close();
+          } finally {
+            root.close();
+            fence.close();
+          }
+          host.onAdmission = null;
+          final published = await OwnedImageDirectory.open(app);
+          final identity = await published.maintenanceIdentity();
+          published.close();
+          await candidate.rename('${temporary.path}/retained-source.app');
+          await freshInspection('published-recheck-inspection');
+          final recheck = await command(arguments(from: 'publication'));
+          expect(recheck['phase'], 'candidate_published');
+          final current = await OwnedImageDirectory.open(app);
+          try {
+            expect(await current.maintenanceIdentity(), identity);
+          } finally {
+            current.close();
+          }
+          await expectLater(
+            MaintenanceStateFence.requireUnfenced(state),
+            throwsA(isA<MaintenanceFenceActive>()),
+          );
+        } finally {
+          activeRetirementChecks--;
+        }
+      },
+      timeout: const Timeout(Duration(minutes: 8)),
+    );
+
+    for (final checkpoint in ['preparation', 'retirement', 'publication']) {
+      test(
+        'operator resumes only the explicit completed $checkpoint checkpoint',
+        () async {
+          activeRetirementChecks++;
+          try {
+            host.onStatus = () async {
+              final complete = switch (checkpoint) {
+                'preparation' => File(
+                  '${work.path}/preparation/prepared/record.json',
+                ).existsSync(),
+                'retirement' => Directory(
+                  '${work.path}/retirement/GaoVM.app',
+                ).existsSync(),
+                _ => File(
+                  '${work.path}/publication/prepared/record.json',
+                ).existsSync(),
+              };
+              if (complete) throw StateError('terminal observation refusal');
+            };
+            await expectLater(
+              command(arguments()),
+              throwsA(isA<ColdPublicationFailure>()),
+            );
+            expect(
+              await Directory(app.path).exists(),
+              checkpoint == 'preparation',
+            );
+            await expectLater(
+              MaintenanceStateFence.requireUnfenced(state),
+              throwsA(isA<MaintenanceFenceActive>()),
+            );
+            host.onStatus = null;
+            // The original download is provenance, not a recovery input selector.
+            await candidate.rename('${temporary.path}/retained-source.app');
+            if (checkpoint == 'preparation') {
+              await freshInspection('wrong-schema-inspection');
+              await expectLater(
+                command(arguments(from: checkpoint, schema: 0)),
+                throwsA(
+                  isA<ColdPublicationFailure>().having(
+                    (error) => error.stage,
+                    'independent catalog rejection',
+                    'preparation',
+                  ),
+                ),
+              );
+              expect(await Directory(app.path).exists(), true);
+            }
+            await freshInspection('resume-inspection');
+            final report = await command(arguments(from: checkpoint));
+            expect(report['phase'], 'candidate_published');
+            expect(report['observed_catalog_schema'], 21);
+            expect(report['activation_authorized'], false);
+            expect(report['committed'], false);
+            expect(
+              await File('${state.path}/unknown-data').readAsString(),
+              'retain me',
+            );
+            expect(
+              await File(
+                '${app.path}/Contents/Resources/new-only',
+              ).readAsString(),
+              'candidate',
+            );
+            await expectLater(
+              MaintenanceStateFence.requireUnfenced(state),
+              throwsA(isA<MaintenanceFenceActive>()),
+            );
+          } finally {
+            activeRetirementChecks--;
+          }
+        },
+        timeout: const Timeout(Duration(minutes: 8)),
+      );
+    }
+
+    test(
+      'operator retains original ownership until a preparation child exit is confirmed',
+      () async {
+        activeRetirementChecks++;
+        final entered = Completer<void>(), ownedExit = Completer<int>();
+        Object? failure;
+        var finished = false;
+        Future<void>? settled;
+        try {
+          host.onProbe = () async {
+            if (!entered.isCompleted &&
+                File('${work.path}/.gaovm-upgrade.lock').existsSync()) {
+              entered.complete();
+              throw MaintenanceCommandFailure(
+                'injected unconfirmed preparation child',
+                pid + 500,
+                exitConfirmed: false,
+                ownedExit: ownedExit.future,
+              );
+            }
+          };
+          settled = command(arguments())
+              .then<void>(
+                (_) => fail('unconfirmed command must not succeed'),
+                onError: (Object error) {
+                  failure = error;
+                },
+              )
+              .whenComplete(() {
+                finished = true;
+              });
+          await entered.future;
+          for (final (directory, lockName) in [
+            (state, '.gaovmd.lock'),
+            (work, '.gaovm-cold-publication.lock'),
+            (work, '.gaovm-upgrade.lock'),
+          ]) {
+            final root = await OwnedImageDirectory.open(directory);
+            try {
+              final competing = await root.tryAcquireMaintenanceLock(
+                lockName,
+                create: false,
+              );
+              try {
+                expect(competing, isNull);
+              } finally {
+                competing?.close();
+              }
+            } finally {
+              root.close();
+            }
+          }
+          expect(finished, false);
+          await expectLater(
+            MaintenanceStateFence.requireUnfenced(state),
+            throwsA(isA<MaintenanceFenceActive>()),
+          );
+        } finally {
+          if (!ownedExit.isCompleted) ownedExit.complete(1);
+          await settled;
+          activeRetirementChecks--;
+        }
+        expect(
+          failure,
+          isA<ColdPublicationFailure>().having(
+            (error) => error.cause,
+            'terminal original child failure',
+            isA<MaintenanceCommandFailure>().having(
+              (error) => error.exitConfirmed,
+              'owned exit awaited',
+              true,
+            ),
+          ),
+        );
+        expect(
+          await File('${state.path}/unknown-data').readAsString(),
+          'retain me',
+        );
+        expect(await Directory(app.path).exists(), true);
+      },
       timeout: const Timeout(Duration(minutes: 2)),
     );
   }, skip: !Platform.isMacOS);

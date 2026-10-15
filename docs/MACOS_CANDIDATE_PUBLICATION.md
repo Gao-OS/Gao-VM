@@ -5,8 +5,9 @@ continues [old-app retirement](MACOS_APP_RETIREMENT.md). It publishes an
 independent candidate copy at the fixed original installation slot while the
 original state-inode kernel lock and persistent startup fence remain held.
 This does not start/register a service, migrate the catalog, clear the fence,
-commit an upgrade, or authorize rollback. There is no maintenance CLI yet;
-these interfaces do not authorize changes to a real installed app/state tree.
+commit an upgrade, or authorize rollback. The bounded
+[cold operator command](MACOS_COLD_MAINTENANCE.md) composes these phases and
+explicit recovery; neither interface authorizes changes to an actual installation.
 
 ## Inputs and ownership
 
@@ -113,7 +114,7 @@ the actual source daemon, not the ARM64 header fixture. Neither is a genuine
 signed installed-product acceptance result.
 
 The accepted [cold operator workflow](proposals/MACOS_UPGRADE_ROLLBACK.md) still
-needs the operator executable/interface, activation/write isolation through
+needs activation/write isolation through
 validation/commit, fresh-cold whole-state/app rollback with rewind acknowledgement,
 and data-preserving uninstall. Full process-crash/fsync/low-disk lifecycle and
 genuine installed-product acceptance remain unproved. Apple Silicon/VZ/GaoOS

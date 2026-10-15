@@ -61,6 +61,28 @@ void main() {
   );
 
   test(
+    'maintenance inventory awaits its native census and preserves self identity',
+    () async {
+      final executable = File(
+        Platform.resolvedExecutable,
+      ).resolveSymbolicLinksSync();
+      final snapshot = await MacOsDriverInventory(
+        executablePath: executable,
+      ).snapshotForMaintenance();
+      expect(
+        snapshot.processes.any(
+          (entry) => entry.pid == pid && entry.executablePath == executable,
+        ),
+        true,
+      );
+      if (snapshot.unresolvedProcessIds.isNotEmpty) {
+        expect(() => snapshot.countUnmanaged({}), throwsStateError);
+      }
+    },
+    skip: !Platform.isMacOS,
+  );
+
+  test(
     'owned child identity disappears after confirmed exit; path is exact',
     () async {
       final executable = File('/bin/cat').resolveSymbolicLinksSync();

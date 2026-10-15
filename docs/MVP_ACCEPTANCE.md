@@ -1194,3 +1194,86 @@ genuine signed installed-product lifecycle acceptance remain unproved. No real
 installed app/state/service or remote ref was changed, and no new Swift/CI/
 Apple Silicon/VZ/GaoOS or M8/MVP completion is claimed. Apple Silicon execution
 remains assigned to the user.
+
+## 2026-10-16 explicit cold operator publication entry
+
+The separate [cold operator command](MACOS_COLD_MAINTENANCE.md) now composes
+original cold ownership, persistent startup fencing, independently inspected
+catalog/external/runtime inputs, immutable preparation, old-app retirement and
+independent candidate publication. `publish-upgrade` requires explicit disjoint
+app/state/candidate/work/inspection targets and release identities.
+`resume-publication --from preparation|retirement|publication` selects only the
+explicit completed checkpoint, requires a new private inspection directory and
+reacquires actual original-state kernel ownership. Journal paths never select
+arbitrary targets; incomplete/unknown output is retained, not promoted.
+
+The bootstrap old-release schema requirement is zero, not an observed database
+version. Preparation independently inspects the source catalog and checks both
+releases against that actual schema. Resume's expected schema is independently
+checked too. The command reports source schema 21 in the SQLite fixtures.
+Pre-catalog evidence uses a nullable observed field, not an invented
+applied-candidate migration.
+The original download is not a recovery input: the fixed prepared candidate
+remains available after the download is moved away.
+
+The command owns a strict, persistent work lock and exact phase namespaces.
+Work privacy, lock contents/mode/link/ACL/path bindings and allowed entries are
+rechecked after native observations, before state acquisition, between phases
+and before success. Test-first reproduction caught a changed command lock
+advancing too far; it now refuses before obtaining original-state ownership and
+never normalizes the changed file. Native command failures wait for the same
+owned child's confirmed exit before unwinding. Cold inventory awaits its native
+isolate instead of abandoning it on a Dart observation deadline.
+
+Successful output is `candidate_published`, not an upgrade commit. Startup
+remains fenced and activation/rollback/commit flags remain false. The old app,
+complete original-state snapshot, candidate snapshot, inspection copies and
+failure evidence remain retained. No service, VM, migration, activation,
+rollback, uninstall or cleanup action is introduced by these commands.
+
+The existing [CI workflow](../.github/workflows/ci.yml) now compiles the separate
+entry in the daemon static matrix and includes operator/recovery/inventory
+checks in its macOS component job. This is source wiring, not a remote CI result.
+
+Verification: **594 checks across 37 files**, concurrency 1, zero failures/skips,
+terminal success and confirmed runner exit (**1595.632 seconds**). The retained
+JSON report is `/private/tmp/gaovm-cold-command.L5d9Wk/verified.jsonl`. It confirms
+the same three installed/startup scenarios were explicitly filtered and never
+started, not counted as passes or skips. The affected release-inspection file
+contains **120 checks**, including **11 new operator checks**; the new real-source
+command process suite contributes **14 checks**, and inventory has **6 checks**.
+Earlier broad/default-concurrency daemon failures were not rerun or resolved.
+
+The test-first loops reproduced the missing executable, malformed version
+classification and command-lock revalidation before their fixes. An initial
+whole-run attempt hit a test-helper bracket error: **474 other checks passed**,
+but that run failed overall and is retained as `pre-repair.jsonl`, not a green
+suite. The final 37-file run above was performed after the repair and after
+redistributing the slow already-published recheck so each positive case has at
+most two full publication/recovery lifecycles. The prior three-checkpoint
+diagnostic completed normally (**892.351 seconds**); it was not a stuck-process
+fix and no production or test deadline was increased.
+
+The standalone Intel executable compiled with Dart 3.9.0 and ran help plus
+structured argument refusal with no HOME. Real source-process tests reject an
+unsigned app before original-state ownership or candidate execution. Positive
+integration replaces only external signature/ARM64/component/service/process
+observations, while using real private files, SQLite, native metadata, moves and
+kernel locks. These are not genuine signed ARM64 installed-product results.
+
+Daemon analysis has no issues; root analysis exits 0 with the same nine existing
+UI informational notices. Daemon formatting (**301 files**) and non-UI formatting
+(**381 files**) have zero changes. An extra whole-tree formatting check would
+change four untouched UI files; it was not presented as passing or applied.
+JSON Schema/OpenAPI validation, workflow YAML parsing and scoped Markdown file
+targets passed; actionlint was unavailable, anchors and remote CI were not run.
+`git diff --check` passed. The unrelated UI lockfile remains byte-identical and
+excluded. No owned fixture/component process remained after terminal completion.
+
+The selected operator interface is now implemented only through fenced candidate
+publication and explicit checkpoint recovery. Activation/write isolation through
+validation/commit, fresh-cold whole-state/app rollback with rewind acknowledgement,
+complete install/uninstall and full crash/fsync/low-disk lifecycle acceptance
+remain unfinished. No real installed app/state/service or remote ref was changed;
+no new Swift/CI/Apple Silicon/VZ/GaoOS, complete-upgrade or M8/MVP pass is claimed.
+Apple Silicon execution remains assigned to the user.

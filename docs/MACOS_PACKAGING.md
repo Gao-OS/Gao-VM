@@ -7,6 +7,11 @@ Intel macOS; complete installed startup, installation/update/uninstall,
 notarization, and Apple Silicon VM/GaoOS release acceptance remain pending. An
 assembled bundle is not evidence that those gates passed.
 
+The separate [cold operator publication command](MACOS_COLD_MAINTENANCE.md)
+composes fenced preparation/retirement/publication, not installation or a
+complete upgrade. It intentionally leaves ordinary startup blocked; activation,
+validation/commit, rollback and uninstall remain separate unfinished work.
+
 ## Inputs and invocation
 
 Run on macOS with Xcode Command Line Tools and the pinned Dart 3.9 SDK. Supply

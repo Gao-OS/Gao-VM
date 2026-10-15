@@ -23,6 +23,10 @@ final class ColdStateSnapshot {
   final String _inspectionPath;
   bool _closed = false;
 
+  /// Independently inspected source schema; null means no source catalog.
+  /// Zero used for release bootstrap compatibility must not be reported as this.
+  int? get observedCatalogSchema => _catalog?.schemaVersion;
+
   static Future<ColdStateSnapshot> prepare(
     ColdStateLease state,
     OwnedImageDirectory inspection, {

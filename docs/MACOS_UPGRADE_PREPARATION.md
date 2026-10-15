@@ -9,8 +9,9 @@ while keeping state ownership. Its separate
 [`publishCandidate` step](MACOS_CANDIDATE_PUBLICATION.md) publishes an independent
 candidate copy, not a replacement state. None of these steps activates a service,
 authorizes rollback, or completes an upgrade.
-There is no preparation/install CLI yet. The read-only release inspector's
-command remains unchanged.
+The bounded [cold operator command](MACOS_COLD_MAINTENANCE.md) now composes these
+phases and explicit recovery, not installation or a complete upgrade. The
+read-only release inspector's command remains unchanged.
 
 ## Inputs and ownership
 
@@ -108,8 +109,7 @@ do not simulate a complete upgrade process crash, low-disk lifecycle, real
 installed publication or migration.
 
 The [accepted cold operator workflow](proposals/MACOS_UPGRADE_ROLLBACK.md) still
-needs a maintenance executable/command outside renamed trees,
-activation/write isolation through validation/commit, fresh-cold
+needs activation/write isolation through validation/commit, fresh-cold
 whole-state/app rollback with rewind acknowledgement, and data-preserving
 uninstall. Genuine signed installed-product and ARM64/VZ/GaoOS acceptance remain
 unproved. This preparation component does not complete M8 or the MVP goal.
