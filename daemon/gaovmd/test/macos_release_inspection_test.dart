@@ -591,6 +591,196 @@ void main() {
       storage.close();
     });
 
+    for (final published in [false, true]) {
+      test(
+        'whole state preservation reopens native ${published ? 'published' : 'retired'} app provenance without service actions',
+        () => check(() async {
+          PreservedColdState? preserved;
+          final parent = await OwnedImageDirectory.open(temporary);
+          final preservation = parent.createDirectory('state-preservation');
+          MaintenanceTree? appTree,
+              publishedTree,
+              stateTree,
+              retainedTree,
+              recoveryTree;
+          try {
+            await retire();
+            if (published) await publish();
+            appTree = await MaintenanceTree.open(Directory(lease.appPath));
+            final appBefore = await appTree.capture(nativeMetadata: true);
+            Map<String, Object?>? candidateBefore;
+            if (published) {
+              publishedTree = await MaintenanceTree.open(app);
+              candidateBefore = await publishedTree.capture(
+                nativeMetadata: true,
+              );
+            }
+            stateTree = await MaintenanceTree.open(state);
+            final stateBefore = await stateTree.capture(nativeMetadata: true);
+            final admissions = host.admissions;
+            preserved = await lease.preserveForRollback(
+              fence,
+              preservation,
+              'current',
+              verifyPreparedInputs: () async {
+                await appTree!.verify(appBefore, nativeMetadata: true);
+                if (publishedTree != null) {
+                  await publishedTree.verify(
+                    candidateBefore!,
+                    nativeMetadata: true,
+                  );
+                }
+                await stateTree!.verify(stateBefore, nativeMetadata: true);
+              },
+            );
+            lease.close();
+            await preserved.verify();
+            expect(host.admissions, admissions);
+            expect(await state.exists(), false);
+            expect(preserved.toJson()['service_actions_performed'], false);
+            expect(preserved.toJson()['committed'], false);
+            retainedTree = await MaintenanceTree.open(
+              Directory(preserved.path),
+            );
+            await retainedTree.verify(stateBefore, nativeMetadata: true);
+            await appTree.verify(appBefore, nativeMetadata: true);
+            if (publishedTree != null) {
+              await publishedTree.verify(
+                candidateBefore!,
+                nativeMetadata: true,
+              );
+            }
+            final actual = await OwnedImageDirectory.open(
+              Directory(preserved.path),
+            );
+            try {
+              final contender = await actual.tryAcquireMaintenanceLock(
+                '.gaovmd.lock',
+                create: false,
+              );
+              try {
+                expect(contender, isNull);
+              } finally {
+                contender?.close();
+              }
+            } finally {
+              actual.close();
+            }
+            for (final target in [state, Directory(preserved.path)]) {
+              await expectLater(
+                MaintenanceStateFence.requireUnfenced(target),
+                throwsA(isA<MaintenanceFenceActive>()),
+              );
+            }
+            final retainedPath = preserved.path;
+            preserved.close();
+            preserved = null;
+            fence.close();
+            fence = await MaintenanceStateFence.open(state);
+            recoveryTree = await MaintenanceTree.open(temporary);
+            final recoveryBefore = await recoveryTree.capture(
+              nativeMetadata: true,
+            );
+            final destinationFence = await MaintenanceStateFence.open(
+              Directory(retainedPath),
+            );
+            late MacOsColdStateHost recovered;
+            Future<MacOsColdStateHost> reopenPreserved(
+              MaintenanceStateFence? origin,
+            ) async {
+              if (published) {
+                final publication = await OwnedImageDirectory.open(
+                  Directory('${temporary.path}/publications'),
+                );
+                try {
+                  return await MacOsColdStateHost.openPublished(
+                    app,
+                    Directory(retainedPath),
+                    destinationFence,
+                    storage,
+                    'old',
+                    publication,
+                    'upgrade',
+                    bundleIdentifier: 'org.gaovm.tests.Release',
+                    oldVersion: '0.1.0',
+                    newVersion: '0.1.0',
+                    teamIdentifier: 'ABCDEFGHIJ',
+                    retiredCatalogSchema: 0,
+                    catalogSchema: 0,
+                    preservedOriginal: origin,
+                    host: host,
+                    observer: observer(),
+                    inventory: inventory,
+                  );
+                } finally {
+                  publication.close();
+                }
+              } else {
+                return await MacOsColdStateHost.openRetired(
+                  app,
+                  Directory(retainedPath),
+                  destinationFence,
+                  storage,
+                  'old',
+                  bundleIdentifier: 'org.gaovm.tests.Release',
+                  version: '0.1.0',
+                  teamIdentifier: 'ABCDEFGHIJ',
+                  catalogSchema: 0,
+                  preservedOriginal: origin,
+                  host: host,
+                  observer: observer(),
+                  inventory: inventory,
+                );
+              }
+            }
+
+            try {
+              final executions = host.executedRoles.length;
+              for (final invalid in <MaintenanceStateFence?>[
+                null,
+                destinationFence,
+              ]) {
+                await expectLater(
+                  reopenPreserved(invalid),
+                  throwsFormatException,
+                );
+                expect(host.executedRoles.length, executions);
+                await recoveryTree.verify(recoveryBefore, nativeMetadata: true);
+              }
+              recovered = await reopenPreserved(fence);
+              recoveredHosts.add(recovered);
+            } finally {
+              destinationFence.close();
+            }
+            preserved = await PreservedColdState.open(
+              state,
+              fence,
+              preservation,
+              'current',
+              bundleIdentifier: 'org.gaovm.tests.Release',
+              host: recovered,
+            );
+            await preserved.verify();
+            await recoveryTree.verify(recoveryBefore, nativeMetadata: true);
+            await retainedTree.verify(stateBefore, nativeMetadata: true);
+          } catch (_) {
+            retainInputs = true;
+            rethrow;
+          } finally {
+            preserved?.close();
+            recoveryTree?.close();
+            retainedTree?.close();
+            stateTree?.close();
+            publishedTree?.close();
+            appTree?.close();
+            preservation.close();
+            parent.close();
+          }
+        }),
+        timeout: const Timeout(Duration(minutes: 3)),
+      );
+    }
+
     test(
       'candidate publication requires explicit old-app retirement first',
       () => check(() async {
@@ -6065,6 +6255,68 @@ void main() {
       ),
       inventory: (_) async =>
           DriverInventorySnapshot(processes: [], unresolvedProcessIds: []),
+    );
+
+    test(
+      'rollback preparation preserves the entire failed generation without changing the old pair',
+      () async {
+        activeRetirementChecks++;
+        ColdRollbackPreparation? rollback;
+        PreservedColdState? retained;
+        MaintenanceTree? oldPair;
+        try {
+          final (snapshot, fence, upgrade) = await fencedPreparation();
+          upgrade.close();
+          snapshot.close();
+          await File('${state.path}/gaovm.db').writeAsString(
+            'preserve the failed migration, not only catalog rows',
+            flush: true,
+          );
+          rollback = await prepareRollback(fence);
+          oldPair = await MaintenanceTree.open(Directory(rollback.path));
+          final before = await oldPair.capture(nativeMetadata: true);
+          retained = await rollback.preserveCurrentState();
+          expect(await state.exists(), false);
+          expect(
+            await File('${retained.path}/gaovm.db').readAsString(),
+            'preserve the failed migration, not only catalog rows',
+          );
+          expect(retained.toJson()['canonical_state_restored'], false);
+          expect(retained.toJson()['committed'], false);
+          expect(retained.toJson()['startup_allowed'], false);
+          await oldPair.verify(before, nativeMetadata: true);
+          await expectLater(rollback.verify(), throwsStateError);
+          rollback.close();
+          await retained.verify();
+          lease.close();
+          final root = await OwnedImageDirectory.open(Directory(retained.path));
+          final contender = await root.tryAcquireMaintenanceLock(
+            '.gaovmd.lock',
+            create: false,
+          );
+          try {
+            expect(contender, isNull);
+          } finally {
+            contender?.close();
+            root.close();
+          }
+          for (final target in [state, Directory(retained.path)]) {
+            await expectLater(
+              MaintenanceStateFence.requireUnfenced(target),
+              throwsA(isA<MaintenanceFenceActive>()),
+            );
+          }
+        } catch (_) {
+          retainInputs = true;
+          rethrow;
+        } finally {
+          retained?.close();
+          rollback?.close();
+          oldPair?.close();
+          activeRetirementChecks--;
+        }
+      },
+      timeout: const Timeout(Duration(minutes: 3)),
     );
 
     for (final condition in [

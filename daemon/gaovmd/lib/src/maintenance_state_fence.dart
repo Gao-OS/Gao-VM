@@ -149,6 +149,137 @@ final class MaintenanceStateFence {
     }
   }
 
+  /// Reserve a second startup fence BEFORE relocating the original state inode.
+  /// Requires its original held cold context and active fence. The target must
+  /// be unused, private and disjoint; no state directory is created or copied.
+  /// The original marker remains active. This grants no replacement admission.
+  static Future<MaintenanceStateFence> reserveRelocation(
+    ColdStateLease state,
+    MaintenanceStateFence original,
+    OwnedImageDirectory destinationParent,
+    String destinationName,
+  ) async {
+    if (!RegExp(
+          r'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$',
+        ).hasMatch(destinationName) ||
+        original.retiredForCommit) {
+      throw const FormatException(
+        'active original fence and fixed child required',
+      );
+    }
+    await state.verify();
+    await _verifyParent(destinationParent, destinationParent.path);
+    if (destinationParent.mode & 0x3f != 0) {
+      throw const FormatException('private relocation storage required');
+    }
+    for (final protected in {
+      state.path,
+      state.appPath,
+      state.installationPath,
+    }) {
+      if (destinationParent.path == protected ||
+          destinationParent.path.startsWith('$protected/') ||
+          protected.startsWith('${destinationParent.path}/')) {
+        throw const FormatException(
+          'relocation storage overlaps protected input',
+        );
+      }
+    }
+    final target = '${destinationParent.path}/$destinationName';
+    final name = _name(target);
+    final parent = await OwnedImageDirectory.open(
+      Directory(destinationParent.path),
+    );
+    OwnedImageDirectory? source, staging;
+    OwnedImageLock? lock;
+    MaintenanceStateFence? reservation;
+    try {
+      source = await OwnedImageDirectory.open(Directory(state.path));
+      await original.verifyFor(
+        source,
+        bundleIdentifier: state.bundleIdentifier,
+        appPath: state.installationPath,
+      );
+      for (final child in [destinationName, name, '$name.partial']) {
+        if (maintenancePathEntryExists('${parent.path}/$child')) {
+          throw const FormatException('relocation destination already exists');
+        }
+      }
+      lock = await parent.tryAcquireMaintenanceLock('$name.lock');
+      if (lock == null) throw StateError('relocation fence already owned');
+      final lockFile = parent.file('$name.lock');
+      try {
+        await lockFile.sync();
+      } finally {
+        lockFile.close();
+      }
+      await parent.sync();
+      final intent = <String, Object?>{
+        'format': 'gaovm.maintenance-state-fence.v1',
+        'state_path': target,
+        'state_identity': await source.maintenanceIdentity(),
+        'app_path': state.installationPath,
+        'bundle_identifier': state.bundleIdentifier,
+      };
+      final encoded = utf8.encode('${jsonEncode(intent)}\n');
+      staging = parent.createDirectory('$name.partial');
+      final output = staging.createFile('intent.json');
+      try {
+        final writer = await output.openWrite();
+        try {
+          await writer.writeFrom(encoded);
+          await writer.flush();
+        } finally {
+          await writer.close();
+        }
+        await output.seal();
+      } finally {
+        output.close();
+      }
+      await staging.sync();
+      await parent.sync();
+      await state.verify();
+      await original.verifyFor(source);
+      await _verifyParent(parent, destinationParent.path);
+      await destinationParent.verifyPathBinding();
+      if (parent.mode & 0x3f != 0 ||
+          maintenancePathEntryExists(target) ||
+          sha256.convert(await _readIntent(staging)).toString() !=
+              sha256.convert(encoded).toString()) {
+        throw const FormatException('relocation reservation changed');
+      }
+      lock.verifyPathBinding();
+      await parent.renameDirectoryNoReplace('$name.partial', name);
+      reservation = MaintenanceStateFence._(
+        parent,
+        lock,
+        parent.directory(name),
+        target,
+        encoded,
+        intent,
+      );
+      await state.verify();
+      await original.verifyFor(source);
+      await reservation.verify();
+      await destinationParent.verifyPathBinding();
+      if (parent.mode & 0x3f != 0 || maintenancePathEntryExists(target)) {
+        throw const FormatException('reserved relocation boundary changed');
+      }
+      return reservation;
+    } catch (_) {
+      if (reservation != null) {
+        reservation.close();
+      } else {
+        lock?.close();
+        parent.close();
+      }
+      rethrow;
+    } finally {
+      source?.close();
+      staging?.close();
+    }
+  }
+
   /// Reopen only this canonical target's fixed sibling marker. JSON paths do
   /// not choose filesystem targets, and recovery never recreates a missing lock.
   static Future<MaintenanceStateFence> open(Directory state) => _open(state);
@@ -263,6 +394,36 @@ final class MaintenanceStateFence {
         (appPath != null && appPath != _intent['app_path'])) {
       throw const FormatException('maintenance source identity changed');
     }
+    await root.verifyPathBinding();
+  }
+
+  /// Read-only provenance for the SAME original inode at a reserved location.
+  /// Admission there still requires its independently held destination fence.
+  /// Never authorizes a copied/replacement state at the original canonical path.
+  Future<void> verifyRelocatedOriginal(
+    OwnedImageDirectory root,
+    MaintenanceStateFence destination, {
+    required String bundleIdentifier,
+    required String appPath,
+  }) async {
+    await verify();
+    if (retiredForCommit ||
+        destination.retiredForCommit ||
+        root.path == sourceStatePath ||
+        root.path.startsWith('$sourceStatePath/') ||
+        sourceStatePath.startsWith('${root.path}/') ||
+        bundleIdentifier != _intent['bundle_identifier'] ||
+        appPath != _intent['app_path'] ||
+        jsonEncode(await root.maintenanceIdentity()) !=
+            jsonEncode(_intent['state_identity'])) {
+      throw const FormatException('relocated original state binding changed');
+    }
+    await destination.verifyFor(
+      root,
+      bundleIdentifier: bundleIdentifier,
+      appPath: appPath,
+    );
+    await verify();
     await root.verifyPathBinding();
   }
 

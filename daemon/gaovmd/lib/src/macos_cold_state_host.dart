@@ -136,6 +136,7 @@ final class MacOsColdStateHost implements ColdStateHost {
   /// Explicit read-only recovery of the old-app retirement gap. No paths from
   /// the journal select targets; the caller supplies the original slot, state,
   /// fence, storage/name and expected release. Still needs the real state lock.
+  /// A relocated original additionally requires both active inode-bound fences.
   static Future<MacOsColdStateHost> openRetired(
     Directory originalApp,
     Directory state,
@@ -146,6 +147,7 @@ final class MacOsColdStateHost implements ColdStateHost {
     required String version,
     required String teamIdentifier,
     required int catalogSchema,
+    MaintenanceStateFence? preservedOriginal,
     ReleaseInspectionHost host = const MacOsReleaseInspectionHost(),
     MacOsOpenReferences? observer,
     Future<DriverInventorySnapshot> Function(String)? inventory,
@@ -159,6 +161,7 @@ final class MacOsColdStateHost implements ColdStateHost {
     version: version,
     teamIdentifier: teamIdentifier,
     catalogSchema: catalogSchema,
+    preservedOriginal: preservedOriginal,
     host: _PublicationExecution(host),
     observer: observer ?? MacOsOpenReferences(),
     inventory:
@@ -183,6 +186,7 @@ final class MacOsColdStateHost implements ColdStateHost {
     required String teamIdentifier,
     required int retiredCatalogSchema,
     required int catalogSchema,
+    MaintenanceStateFence? preservedOriginal,
     ReleaseInspectionHost host = const MacOsReleaseInspectionHost(),
     MacOsOpenReferences? observer,
     Future<DriverInventorySnapshot> Function(String)? inventory,
@@ -196,6 +200,7 @@ final class MacOsColdStateHost implements ColdStateHost {
     version: oldVersion,
     teamIdentifier: teamIdentifier,
     catalogSchema: retiredCatalogSchema,
+    preservedOriginal: preservedOriginal,
     host: _PublicationExecution(host),
     observer: observer ?? MacOsOpenReferences(),
     inventory:
@@ -356,6 +361,7 @@ final class MacOsColdStateHost implements ColdStateHost {
     MaintenanceStateFence fence, {
     required String bundleIdentifier,
     required String installationPath,
+    MaintenanceStateFence? preservedOriginal,
   }) async {
     final retirement = _retirement;
     if (retirement == null) throw StateError('retirement proof required');
@@ -364,8 +370,17 @@ final class MacOsColdStateHost implements ColdStateHost {
       bundleIdentifier: bundleIdentifier,
       appPath: installationPath,
     );
-    if (retirement._intent['source_state'] != state.path ||
-        retirement._intent['fence_path'] != fence.path ||
+    if (preservedOriginal != null) {
+      await preservedOriginal.verifyRelocatedOriginal(
+        state,
+        fence,
+        bundleIdentifier: bundleIdentifier,
+        appPath: installationPath,
+      );
+    }
+    final origin = preservedOriginal ?? fence;
+    if (retirement._intent['source_state'] != origin.sourceStatePath ||
+        retirement._intent['fence_path'] != origin.path ||
         retirement.sourceAppPath != installationPath ||
         retirement._intent['bundle_identifier'] != bundleIdentifier ||
         jsonEncode(retirement._intent['state_identity']) !=

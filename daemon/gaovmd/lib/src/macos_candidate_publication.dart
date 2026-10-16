@@ -49,6 +49,7 @@ final class _CandidatePublication {
     String name, {
     required String version,
     required int catalogSchema,
+    MaintenanceStateFence? preservedOriginal,
   }) async {
     _AppRetirement._validateName(name);
     await _AppRetirement._private(storage);
@@ -97,12 +98,13 @@ final class _CandidatePublication {
       } finally {
         prepared.close();
       }
+      final origin = preservedOriginal ?? fence;
       if (intent.length != 16 ||
           intent['format'] != 'gaovm.candidate-publication-intent.v1' ||
           intent['source_app'] != retirement.sourceAppPath ||
-          intent['source_state'] != state.path ||
+          intent['source_state'] != origin.sourceStatePath ||
           intent['source_state'] != retirement._intent['source_state'] ||
-          intent['fence_path'] != fence.path ||
+          intent['fence_path'] != origin.path ||
           intent['fence_path'] != retirement._intent['fence_path'] ||
           intent['bundle_identifier'] !=
               retirement._intent['bundle_identifier'] ||

@@ -36,6 +36,7 @@ final class _AppRetirement {
     required ReleaseInspectionHost host,
     required MacOsOpenReferences observer,
     required Future<DriverInventorySnapshot> Function(String) inventory,
+    MaintenanceStateFence? preservedOriginal,
     ({
       OwnedImageDirectory storage,
       String name,
@@ -63,6 +64,28 @@ final class _AppRetirement {
     OwnedImageLock? lock;
     _AppRetirement? retirement;
     MaintenanceTree? app;
+    final origin = preservedOriginal ?? fence;
+    Future<void> verifyState() async {
+      await fence.verifyFor(
+        stateRoot!,
+        bundleIdentifier: bundleIdentifier,
+        appPath: originalApp.path,
+      );
+      if (preservedOriginal != null) {
+        await preservedOriginal.verifyRelocatedOriginal(
+          stateRoot,
+          fence,
+          bundleIdentifier: bundleIdentifier,
+          appPath: originalApp.path,
+        );
+        if (maintenancePathEntryExists(origin.sourceStatePath)) {
+          throw const FormatException(
+            'vacated original state slot is occupied',
+          );
+        }
+      }
+    }
+
     try {
       await storage.verifyPathBinding();
       if (!_equal(
@@ -79,11 +102,7 @@ final class _AppRetirement {
       }
       await _appParent(sourceParent);
       stateRoot = await OwnedImageDirectory.open(state);
-      await fence.verifyFor(
-        stateRoot,
-        bundleIdentifier: bundleIdentifier,
-        appPath: originalApp.path,
-      );
+      await verifyState();
       lock = await parent.tryAcquireMaintenanceLock(_lockName, create: false);
       if (lock == null) throw StateError('retirement namespace already owned');
       root = parent.directory(name);
@@ -92,8 +111,8 @@ final class _AppRetirement {
       if (intent.length != 14 ||
           intent['format'] != 'gaovm.app-retirement-intent.v1' ||
           intent['source_app'] != originalApp.path ||
-          intent['source_state'] != state.path ||
-          intent['fence_path'] != fence.path ||
+          intent['source_state'] != origin.sourceStatePath ||
+          intent['fence_path'] != origin.path ||
           intent['bundle_identifier'] != bundleIdentifier ||
           intent['version'] != version ||
           intent['team_identifier'] != teamIdentifier ||
@@ -120,6 +139,7 @@ final class _AppRetirement {
           publication.name,
           version: publication.version,
           catalogSchema: publication.catalogSchema,
+          preservedOriginal: preservedOriginal,
         );
       }
       app = await MaintenanceTree.open(Directory('${root.path}/GaoVM.app'));
@@ -137,11 +157,7 @@ final class _AppRetirement {
         throw const FormatException('retired release evidence changed');
       }
       await _noReferences(observer, app.path);
-      await fence.verifyFor(
-        stateRoot,
-        bundleIdentifier: bundleIdentifier,
-        appPath: originalApp.path,
-      );
+      await verifyState();
       await retirement.verify(app);
       final recovered = MacOsColdStateHost._(
         app,
@@ -152,6 +168,7 @@ final class _AppRetirement {
         retirement,
       );
       await retirement._publication?.validateNative(recovered);
+      await verifyState();
       await retirement.verify(app);
       return recovered;
     } catch (_) {

@@ -63,22 +63,37 @@ final class DaemonOwnership {
   /// coordinator. This does not move it or authorize a rollback. Both borrowed
   /// readers must remain open until this future settles. An error retains the
   /// original kernel lock; callers must not retry by closing/reopening it.
-  /// Fenced destinations are refused, just like ordinary admission.
-  Future<void> rebindAfterMaintenanceMove(OwnedImageDirectory moved) async {
+  /// Ordinary admission still refuses fences. An explicit held destination
+  /// fence must bind the exact moved inode, never a copied ownership file.
+  Future<void> rebindAfterMaintenanceMove(
+    OwnedImageDirectory moved, {
+    MaintenanceStateFence? maintenanceFence,
+  }) async {
     if (_closed || _rebinding) {
       throw StateError('daemon ownership is unavailable');
     }
     _rebinding = true;
     try {
+      Future<void> admission() async {
+        if (maintenanceFence == null) {
+          await MaintenanceStateFence.requireUnfenced(Directory(moved.path));
+        } else {
+          if (maintenanceFence.retiredForCommit) {
+            throw const FormatException('active relocation fence required');
+          }
+          await maintenanceFence.verifyFor(moved);
+        }
+      }
+
       if (moved.mode & 0x3f != 0) {
         throw const FormatException('daemon state directory must be private');
       }
-      await MaintenanceStateFence.requireUnfenced(Directory(moved.path));
+      await admission();
       await moved.verifyPathBinding();
       _lock.rebindAfterMaintenanceMove(_root, moved);
       _root = moved;
       await verify();
-      await MaintenanceStateFence.requireUnfenced(Directory(moved.path));
+      await admission();
     } finally {
       _rebinding = false;
     }

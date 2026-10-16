@@ -768,6 +768,32 @@ final class ColdRollbackPreparation {
     }
   }
 
+  /// First cutover phase only: preserve the whole failed/current generation
+  /// while retaining both persistent startup fences and the exact kernel owner.
+  /// Consumes the caller's current lease on success. Does not install the old
+  /// state/app pair, retire either fence or start a service.
+  Future<PreservedColdState> preserveCurrentState() async {
+    await verify();
+    _busy = true;
+    try {
+      return await _current.preserveForRollback(
+        _fence,
+        _work,
+        'retained-current',
+        verifyPreparedInputs: () async {
+          await _stagedLease!.verify();
+          await _catalog?.verify();
+          await _verifySources();
+          await _catalog?._verifySourceFiles();
+          await ColdUpgradePreparation._verifyPrivate(_inspection!);
+          await _verifyOutputFiles();
+        },
+      );
+    } finally {
+      _busy = false;
+    }
+  }
+
   Future<void> _verifyOutputFiles() async {
     await ColdUpgradePreparation._entries(_root, {
       'intent.json',

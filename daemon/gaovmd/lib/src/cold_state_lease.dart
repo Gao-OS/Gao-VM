@@ -1,11 +1,16 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
+
 import 'daemon_ownership.dart';
 import 'image_filesystem.dart';
 import 'macos_driver_inventory.dart';
 import 'macos_cold_state_host.dart';
 import 'maintenance_state_fence.dart';
+import 'maintenance_tree.dart';
+
+part 'cold_state_preservation.dart';
 
 /// External observations only. The native implementation binds these to the
 /// previously inspected owning app; fixtures never register or stop services.
@@ -45,6 +50,7 @@ final class ColdStateLease {
   MacOsColdStateHost? _ownedRetiredHost;
   bool _retiring = false;
   bool _closed = false;
+  PreservedColdState? _pendingPreservation;
   String get path => _root.path;
   String get appPath => _host.appPath;
 
@@ -386,6 +392,36 @@ final class ColdStateLease {
     }
   }
 
+  /// Preserve this whole generation at a fixed private child under a second
+  /// persistent fence. Consumes this lease only on success, keeping the exact
+  /// kernel owner. On failure retain this lease until explicit close/recovery.
+  Future<PreservedColdState> preserveForRollback(
+    MaintenanceStateFence fence,
+    OwnedImageDirectory storage,
+    String name, {
+    required Future<void> Function() verifyPreparedInputs,
+  }) async {
+    if (_closed ||
+        _retiring ||
+        _pendingPreservation != null ||
+        (_host is MacOsColdStateHost &&
+            (_host as MacOsColdStateHost).isValidatingCandidate)) {
+      throw StateError('available non-executing cold state required');
+    }
+    _retiring = true;
+    try {
+      return await PreservedColdState._create(
+        this,
+        fence,
+        storage,
+        name,
+        verifyPreparedInputs,
+      );
+    } finally {
+      _retiring = false;
+    }
+  }
+
   void close() {
     if (_closed) return;
     if (_retiring)
@@ -396,6 +432,7 @@ final class ColdStateLease {
     } finally {
       _root.close();
       _ownedRetiredHost?.close();
+      _pendingPreservation?._closeUntransferred();
     }
   }
 }
