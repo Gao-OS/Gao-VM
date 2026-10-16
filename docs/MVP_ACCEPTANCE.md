@@ -2542,3 +2542,113 @@ crash/power-loss/low-disk coverage and manual installed/Apple Silicon/VZ/GaoOS
 acceptance remain open. No push, PR, release, real installed app/state/service/VM
 operation, machine switch or Chrome integration occurred. M8/MVP and the full
 M0–M8 goal remain open.
+
+## 2026-10-16 fixed post-move paired rollback recovery
+
+Local `main` implementation commit
+`7018dd7d993278e564ceec9bca4786d95b111b9a` advances development-plan M8.2/M8.3
+and the PRD release gates; it does not complete the rollback operator workflow,
+M8/MVP or the full M0–M8 goal. It was committed locally, not pushed.
+
+`ColdRollbackStateRestoration.open` composes the fixed checkpoint after both the
+old app and complete old state have reached their canonical slots. Explicit
+original preparation, installation, native retirement/publication selectors,
+expected release/schema and repeated history-rewind acceptance select the proof;
+recorded paths do not select replacement targets. An already-complete immutable
+state-component checkpoint is required. Complete app reopening is read-only;
+only a missing app completion or a complete sealed `.completed.partial` can be
+finished, without rerunning moves or rewriting the state-component record.
+
+The original master pair, independent copy receipts, complete actual/retained
+state and app contents, parents, both exact fences, unchanged native provenance,
+external-file seals and existing-only namespace/owner files close before either
+actual state owner or native factory. Fresh non-executing native observers use
+the actual app locations; inventories still include all original publication
+paths, including the vacant candidate staging slot. Both real state owners stay
+held through late snapshot/external-reference observations and the last complete
+filesystem closure. Neither actual state receives a startup probe or migration.
+Unknown/changed/incomplete layouts refuse without repair, cleanup or retry.
+Closing releases kernel ownership, never either persistent startup marker.
+
+Test-first verification first failed to compile the missing composition
+interface. Two further RED runs independently reproduced an app-completion claim
+while the native factory was pending, and a state-completion claim while the last
+input closure was pending. The recovery guard now covers the entire original
+future, not only native construction. The original failed runners exited 1;
+their raw reports are retained, not relabelled as passing. Both assertion-failure
+fixtures were rechecked to exist and retained without in-place repair, cleanup or
+retry:
+
+- `/private/var/folders/s0/hl1d3jkx5jx3gs69033nc6d80000gp/T/gvm-release-inspection-XvHWCh`
+- `/private/var/folders/s0/hl1d3jkx5jx3gs69033nc6d80000gp/T/gvm-release-inspection-ipT7Ux`
+
+The generic tearDown “unconfirmed native child” message also covers retained
+assertion failures; it is not itself evidence of a live child. Files, SQLite,
+native metadata, no-replace moves and locks are real. Positive signing,
+component, service and process observations remain fixtures, not signed ARM64
+product or installed-service acceptance.
+
+Evidence is retained under `/private/tmp/gaovm-paired-recovery.WgNyF0/`:
+
+| Report | Observed outcome |
+| --- | --- |
+| `state-regression.jsonl` | 132 checks passed in five files; original runner exit 0 |
+| `snapshot-regression.jsonl` | 207 checks passed in nine files; original runner exit 0 |
+| `completion-matrix.jsonl` | Both missing/sealed-partial completion checks passed; original runner exit 0 |
+| `unsafe-input-matrix.jsonl` | All seven changed/missing input checks passed; original runner exit 0 |
+| `native-and-final-recovery.jsonl` | All 47 native-retirement/publication regressions and five final recovery checks passed; original runner exit 0 |
+
+The final five cover a fresh late snapshot writer, an unresolved driver at the
+vacant original publication staging path, both pending-future guards and complete
+high-level paired reopen. Late refusals leave missing completion missing, release
+newly acquired owners and retain all data and both fences. Complete reopening
+holds both actual owners, leaves the state-component record unchanged, retains
+the failed generation and performs no actual-state probe. The two guard checks
+hold both owners and reject close/reentry/completion until the original native
+factory or final input closure settles; they rerun both earlier RED scenarios on
+final code.
+
+Deduplicating named checks across the five final reports yields 400 verified
+checks in 15 source files, zero failures and zero skips. All original runners
+reached observed terminal exit status. The earlier tracer/pending GREEN reports
+are not needed to inflate this count; earlier failed runners remain failed.
+
+The seven negative inputs cover original snapshot bytes, retained-app bytes,
+foreign installed app, unknown staged app, incomplete completion, missing actual
+state lock and changed native namespace lock. Each refuses before native helpers,
+leaves the complete captured tree unchanged, releases newly acquired kernel
+owners and retains both markers; a missing owner file is not recreated. Completion
+checks preserve both actual state/app generations, the original master pair,
+native provenance and immutable state record; sealed promotion preserves the
+original completion inode and bytes.
+
+Final scoped format covers 327 daemon Dart files with zero changes (exit 0), and
+daemon analysis exits 0 with no issues. Root analysis exits 0 with the same nine
+existing UI informational notices. Whole-repository read-only formatting exits
+1: the same four HEAD-identical, untouched UI files need formatting under pinned
+Dart 3.9.0; they were not rewritten. The unrelated UI lockfile remains
+byte-identical and is excluded. Separate daemon/outside-app AOT builds exit 0 and
+produce local Mach-O x86_64 executables. The five empty-environment read-only entry
+checks return expected codes 0/0/0/2/2: both help entries, daemon identity/schema
+21/no service actions and two explicit commit-input refusals. No installed app,
+service, VM, signing, release or ARM64 acceptance follows from those checks.
+
+The user has now accepted a single explicit rollback cold commit:
+`rollback-upgrade --accept-history-rewind --allow-startup`, followed by manual
+registration/start. It must revalidate the complete matching pair, preserve the
+failed/post-upgrade generation, atomically retire only the canonical startup
+fence and keep the retained failed generation fenced. The tool never starts a
+service. This resolves the rollback policy question in the preceding entries,
+but its final commit implementation/operator command is still unfinished and
+the decision is not permission to operate installed app/state/service trees.
+
+Earlier app-move-in-progress layouts and general interrupted-pair replacement
+remain unsupported; do not send them to ordinary preparation/preservation or
+state-only recovery, and do not clear a marker to bypass refusal. The
+full/default-concurrency suite and remote CI were not run. The two earlier
+source-Dart startup failures remain unfixed and unrerun. First install,
+historical-schema command integration, arbitrary migration/validation
+interruption, crash/power-loss/low-disk coverage and manual installed/Apple
+Silicon/VZ/GaoOS acceptance remain open. No push, PR, release, real installed
+app/state/service/VM operation, machine switch or Chrome integration occurred.
+M8/MVP and the full M0–M8 goal remain open.
