@@ -486,6 +486,45 @@ final class MaintenanceStateFence {
     await verifyFor(source);
   }
 
+  /// Paired rollback uses a different canonical state inode. Only its sealed
+  /// typed commit may retire this exact original marker, while the independently
+  /// fenced failed inode and both real state owners remain held.
+  Future<void> retireToRollbackCommit(
+    ColdRollbackCommit commit,
+    OwnedImageDirectory checkpoint,
+  ) async {
+    if (_closed || retiredForCommit)
+      throw StateError('active original rollback fence required');
+    await commit.verifyFenceRetirementFor(this, checkpoint);
+    final retained = await OwnedImageDirectory.open(
+      Directory(commit.retainedStatePath),
+    );
+    try {
+      Future<void> verifyOriginal() async {
+        await verify();
+        await retained.verifyPathBinding();
+        if (retained.path == sourceStatePath ||
+            jsonEncode(await retained.maintenanceIdentity()) !=
+                jsonEncode(_intent['state_identity']))
+          throw const FormatException('exact retained original inode required');
+      }
+
+      await verifyOriginal();
+      await commit.verifyFenceRetirementFor(this, checkpoint);
+      final moved = await _marker.moveForMaintenanceTo(
+        _parent,
+        checkpoint,
+        'retired-fence',
+      );
+      _marker.close();
+      _marker = moved;
+      await verifyOriginal();
+      await commit.verifyFenceRetirementFor(this, checkpoint);
+    } finally {
+      retained.close();
+    }
+  }
+
   static Future<List<int>> _readIntent(OwnedImageDirectory marker) async {
     final path = marker.path;
     await marker.verifyPathBinding();

@@ -7591,6 +7591,491 @@ void main() {
     );
 
     test(
+      'cold rollback commit retires only the canonical fence after verifying its matching old pair',
+      () async {
+        activeRetirementChecks++;
+        ColdRollbackStateRestoration? restored;
+        MaintenanceTree? oldState, failedState, originalPair;
+        try {
+          final inputs = await pairedCheckpoint();
+          restored = await reopenPair(inputs.fence, inputs.native);
+          final retained = Directory(restored.retainedStatePath);
+          oldState = await MaintenanceTree.open(state);
+          failedState = await MaintenanceTree.open(retained);
+          originalPair = await MaintenanceTree.open(
+            Directory('${backups.path}/upgrade'),
+          );
+          final oldBefore = await oldState.capture(nativeMetadata: true);
+          final failedBefore = await failedState.capture(nativeMetadata: true);
+          final pairBefore = await originalPair.capture(nativeMetadata: true);
+          final component = File(
+            '${backups.path}/restored-old-state/completed/record.json',
+          );
+          final componentBytes = await component.readAsBytes();
+          final probes = host.admissions;
+          final result = await restored.commit(
+            acceptHistoryRewind: true,
+            allowStartup: true,
+          );
+          expect(result['phase'], 'rollback_committed');
+          expect(result['committed'], true);
+          expect(result['startup_allowed'], true);
+          expect(result['manual_start_required'], true);
+          expect(result['retained_state_fenced'], true);
+          expect(result['service_actions_performed'], false);
+          expect(result['ordinary_ready'], false);
+          expect(restored.toJson(), result);
+          await restored.verify();
+          await oldState.verify(oldBefore, nativeMetadata: true);
+          await failedState.verify(failedBefore, nativeMetadata: true);
+          await originalPair.verify(pairBefore, nativeMetadata: true);
+          expect(await component.readAsBytes(), componentBytes);
+          expect(host.admissions, probes);
+          expect(inputs.fence.retiredForCommit, true);
+          expect(
+            inputs.fence.retainedPath,
+            '${backups.path}/rollback-commit/retired-fence',
+          );
+          await MaintenanceStateFence.requireUnfenced(state);
+          await expectLater(
+            MaintenanceStateFence.requireUnfenced(retained),
+            throwsA(isA<MaintenanceFenceActive>()),
+          );
+          for (final target in [state, retained]) {
+            final root = await OwnedImageDirectory.open(target);
+            try {
+              expect(
+                await root.tryAcquireMaintenanceLock(
+                  '.gaovmd.lock',
+                  create: false,
+                ),
+                isNull,
+              );
+              if (target.path == state.path)
+                await expectLater(
+                  inputs.fence.verifyFor(root),
+                  throwsFormatException,
+                );
+            } finally {
+              root.close();
+            }
+          }
+          restored.close();
+          final root = await OwnedImageDirectory.open(state);
+          try {
+            final admitted = await DaemonOwnership.tryAcquire(root);
+            expect(admitted, isNotNull);
+            admitted?.close();
+          } finally {
+            root.close();
+          }
+          await expectLater(
+            MaintenanceStateFence.requireUnfenced(retained),
+            throwsA(isA<MaintenanceFenceActive>()),
+          );
+          expect(
+            await File('${retained.path}/failed-generation').readAsString(),
+            'retain the failed generation',
+          );
+        } catch (_) {
+          retainInputs = true;
+          rethrow;
+        } finally {
+          originalPair?.close();
+          failedState?.close();
+          oldState?.close();
+          restored?.close();
+          activeRetirementChecks--;
+        }
+      },
+      timeout: const Timeout(Duration(minutes: 4)),
+    );
+
+    test(
+      'cold rollback commit follows app restoration in the same held composition without startup',
+      () async {
+        activeRetirementChecks++;
+        ColdRollbackStateRestoration? restored;
+        MaintenanceStateFence? original;
+        MaintenanceTree? oldState, failedState;
+        try {
+          final (_, result) = await restoredNativeRollback(
+            onPrepared: (fence, _, _) => original = fence,
+          );
+          restored = result;
+          await restored.restoreOldApp();
+          final retained = Directory(restored.retainedStatePath);
+          oldState = await MaintenanceTree.open(state);
+          failedState = await MaintenanceTree.open(retained);
+          final oldBefore = await oldState.capture(nativeMetadata: true);
+          final failedBefore = await failedState.capture(nativeMetadata: true);
+          final probes = host.admissions;
+          final facts = await restored.commit(
+            acceptHistoryRewind: true,
+            allowStartup: true,
+          );
+          expect(facts['phase'], 'rollback_committed');
+          expect(facts['committed'], true);
+          expect(facts['startup_allowed'], true);
+          expect(facts['manual_start_required'], true);
+          expect(facts['service_actions_performed'], false);
+          expect(facts['ordinary_ready'], false);
+          expect(restored.toJson(), facts);
+          await restored.verify();
+          expect(host.admissions, probes);
+          expect(original!.retiredForCommit, true);
+          await oldState.verify(oldBefore, nativeMetadata: true);
+          await failedState.verify(failedBefore, nativeMetadata: true);
+          await MaintenanceStateFence.requireUnfenced(state);
+          await expectLater(
+            MaintenanceStateFence.requireUnfenced(retained),
+            throwsA(isA<MaintenanceFenceActive>()),
+          );
+          expect(
+            await File('${retained.path}/failed-generation').readAsString(),
+            'retain the failed generation',
+          );
+        } catch (_) {
+          retainInputs = true;
+          rethrow;
+        } finally {
+          failedState?.close();
+          oldState?.close();
+          restored?.close();
+          activeRetirementChecks--;
+        }
+      },
+      timeout: const Timeout(Duration(minutes: 4)),
+    );
+
+    test(
+      'cold rollback commit requires both acknowledgements without consuming or changing its old pair',
+      () async {
+        activeRetirementChecks++;
+        ColdRollbackStateRestoration? restored;
+        MaintenanceTree? tree;
+        try {
+          final inputs = await pairedCheckpoint();
+          restored = await reopenPair(inputs.fence, inputs.native);
+          tree = await MaintenanceTree.open(temporary);
+          final before = await tree.capture(nativeMetadata: true);
+          final facts = restored.toJson();
+          final calls = host.statusCalls;
+          for (final (history, startup) in [
+            (false, false),
+            (false, true),
+            (true, false),
+          ]) {
+            await expectLater(
+              restored.commit(
+                acceptHistoryRewind: history,
+                allowStartup: startup,
+              ),
+              throwsFormatException,
+            );
+            expect(restored.toJson(), facts);
+          }
+          expect(host.statusCalls, calls);
+          await tree.verify(before, nativeMetadata: true);
+          expect(
+            await Directory('${backups.path}/rollback-commit').exists(),
+            false,
+          );
+          expect(inputs.fence.retiredForCommit, false);
+          await restored.verify();
+          for (final target in [state, Directory(restored.retainedStatePath)]) {
+            await expectLater(
+              MaintenanceStateFence.requireUnfenced(target),
+              throwsA(isA<MaintenanceFenceActive>()),
+            );
+          }
+        } catch (_) {
+          retainInputs = true;
+          rethrow;
+        } finally {
+          tree?.close();
+          restored?.close();
+          activeRetirementChecks--;
+        }
+      },
+      timeout: const Timeout(Duration(minutes: 4)),
+    );
+
+    test(
+      'cold rollback commit refuses changed master bytes after sealing its terminal proposal',
+      () async {
+        activeRetirementChecks++;
+        ColdRollbackStateRestoration? restored;
+        MaintenanceTree? oldState, failedState;
+        var changed = false;
+        try {
+          final inputs = await pairedCheckpoint();
+          restored = await reopenPair(inputs.fence, inputs.native);
+          oldState = await MaintenanceTree.open(state);
+          failedState = await MaintenanceTree.open(
+            Directory(restored.retainedStatePath),
+          );
+          final oldBefore = await oldState.capture(nativeMetadata: true);
+          final failedBefore = await failedState.capture(nativeMetadata: true);
+          final root = '${backups.path}/rollback-commit';
+          final master = File(
+            '${backups.path}/upgrade/original-state/payload/unknown-data',
+          );
+          host.onStatus = () async {
+            if (changed ||
+                !await File('$root/.completed.partial/record.json').exists())
+              return;
+            changed = true;
+            final bytes = await master.readAsString();
+            await master.writeAsString(
+              '$bytes changed after proposal',
+              flush: true,
+            );
+          };
+          await expectLater(
+            restored.commit(acceptHistoryRewind: true, allowStartup: true),
+            throwsFormatException,
+          );
+          host.onStatus = null;
+          expect(changed, true);
+          expect(inputs.fence.retiredForCommit, false);
+          expect(await Directory('$root/.completed.partial').exists(), true);
+          expect(await Directory('$root/completed').exists(), false);
+          expect(restored.toJson, throwsStateError);
+          await expectLater(
+            restored.commit(acceptHistoryRewind: true, allowStartup: true),
+            throwsStateError,
+          );
+          expect(
+            (await master.readAsString()).endsWith(' changed after proposal'),
+            true,
+          );
+          await oldState.verify(oldBefore, nativeMetadata: true);
+          await failedState.verify(failedBefore, nativeMetadata: true);
+          for (final target in [state, Directory(restored.retainedStatePath)]) {
+            final directory = await OwnedImageDirectory.open(target);
+            try {
+              final competing = await directory.tryAcquireMaintenanceLock(
+                '.gaovmd.lock',
+                create: false,
+              );
+              expect(competing, isNull);
+              competing?.close();
+            } finally {
+              directory.close();
+            }
+            await expectLater(
+              MaintenanceStateFence.requireUnfenced(target),
+              throwsA(isA<MaintenanceFenceActive>()),
+            );
+          }
+        } catch (_) {
+          retainInputs = true;
+          rethrow;
+        } finally {
+          host.onStatus = null;
+          failedState?.close();
+          oldState?.close();
+          restored?.close();
+          activeRetirementChecks--;
+        }
+      },
+      timeout: const Timeout(Duration(minutes: 4)),
+    );
+
+    for (final retired in [false, true]) {
+      test(
+        'cold rollback commit keeps both owners while ${retired ? "after" : "before"} marker retirement is pending',
+        () async {
+          activeRetirementChecks++;
+          ColdRollbackStateRestoration? restored;
+          final entered = Completer<void>(), release = Completer<void>();
+          try {
+            final inputs = await pairedCheckpoint();
+            restored = await reopenPair(inputs.fence, inputs.native);
+            final proposal = File(
+              '${backups.path}/rollback-commit/.completed.partial/record.json',
+            );
+            host.onStatus = () async {
+              if (!entered.isCompleted &&
+                  inputs.fence.retiredForCommit == retired &&
+                  await proposal.exists()) {
+                entered.complete();
+                await release.future;
+              }
+            };
+            final pending = restored.commit(
+              acceptHistoryRewind: true,
+              allowStartup: true,
+            );
+            unawaited(
+              pending.then<void>(
+                (_) {
+                  if (!entered.isCompleted)
+                    entered.completeError(
+                      StateError('missing commit observation'),
+                    );
+                },
+                onError: (Object error, StackTrace stack) {
+                  if (!entered.isCompleted) entered.completeError(error, stack);
+                },
+              ),
+            );
+            late Map<String, Object?> result;
+            try {
+              await entered.future;
+              expect(restored.close, throwsStateError);
+              expect(restored.toJson, throwsStateError);
+              await expectLater(restored.verify(), throwsStateError);
+              await expectLater(
+                restored.commit(acceptHistoryRewind: true, allowStartup: true),
+                throwsStateError,
+              );
+              for (final target in [
+                state,
+                Directory(restored.retainedStatePath),
+              ]) {
+                final root = await OwnedImageDirectory.open(target);
+                try {
+                  final competing = await root.tryAcquireMaintenanceLock(
+                    '.gaovmd.lock',
+                    create: false,
+                  );
+                  expect(competing, isNull);
+                  competing?.close();
+                } finally {
+                  root.close();
+                }
+                if (retired && target.path == state.path) {
+                  await MaintenanceStateFence.requireUnfenced(target);
+                } else {
+                  await expectLater(
+                    MaintenanceStateFence.requireUnfenced(target),
+                    throwsA(isA<MaintenanceFenceActive>()),
+                  );
+                }
+              }
+            } finally {
+              release.complete();
+              result = await pending;
+            }
+            host.onStatus = null;
+            expect(result['committed'], true);
+            expect(restored.toJson(), result);
+            await restored.verify();
+          } catch (_) {
+            retainInputs = true;
+            rethrow;
+          } finally {
+            host.onStatus = null;
+            restored?.close();
+            activeRetirementChecks--;
+          }
+        },
+        timeout: const Timeout(Duration(minutes: 4)),
+      );
+    }
+
+    test(
+      'cold rollback commit retains an uncertain retired marker after a late sealed-intent change',
+      () async {
+        activeRetirementChecks++;
+        ColdRollbackStateRestoration? restored;
+        MaintenanceTree? oldState, failedState;
+        var changed = false;
+        try {
+          final inputs = await pairedCheckpoint();
+          restored = await reopenPair(inputs.fence, inputs.native);
+          oldState = await MaintenanceTree.open(state);
+          failedState = await MaintenanceTree.open(
+            Directory(restored.retainedStatePath),
+          );
+          final oldBefore = await oldState.capture(nativeMetadata: true);
+          final failedBefore = await failedState.capture(nativeMetadata: true);
+          final root = '${backups.path}/rollback-commit';
+          final intent = File('$root/intent.json');
+          host.onStatus = () async {
+            if (changed || !inputs.fence.retiredForCommit) return;
+            changed = true;
+            final bytes = await intent.readAsString();
+            imageFileMode(intent.path, 0x180);
+            await intent.writeAsString('$bytes ', flush: true);
+            imageFileMode(intent.path, 0x100);
+          };
+          await expectLater(
+            restored.commit(acceptHistoryRewind: true, allowStartup: true),
+            throwsFormatException,
+          );
+          host.onStatus = null;
+          expect(changed, true);
+          expect(inputs.fence.retiredForCommit, true);
+          expect(await Directory('$root/retired-fence').exists(), true);
+          expect(await Directory('$root/.completed.partial').exists(), true);
+          expect(await Directory('$root/completed').exists(), false);
+          expect(restored.toJson, throwsStateError);
+          await expectLater(
+            restored.commit(acceptHistoryRewind: true, allowStartup: true),
+            throwsStateError,
+          );
+          final calls = host.statusCalls;
+          await expectLater(restored.verify(), throwsFormatException);
+          expect(host.statusCalls, calls);
+          expect((await intent.readAsString()).endsWith(' '), true);
+          await oldState.verify(oldBefore, nativeMetadata: true);
+          await failedState.verify(failedBefore, nativeMetadata: true);
+          await MaintenanceStateFence.requireUnfenced(state);
+          final retained = Directory(restored.retainedStatePath);
+          await expectLater(
+            MaintenanceStateFence.requireUnfenced(retained),
+            throwsA(isA<MaintenanceFenceActive>()),
+          );
+          for (final target in [state, retained]) {
+            final directory = await OwnedImageDirectory.open(target);
+            try {
+              final competing = await directory.tryAcquireMaintenanceLock(
+                '.gaovmd.lock',
+                create: false,
+              );
+              expect(competing, isNull);
+              competing?.close();
+            } finally {
+              directory.close();
+            }
+          }
+          restored.close();
+          for (final target in [state, retained]) {
+            final directory = await OwnedImageDirectory.open(target);
+            try {
+              final released = await directory.tryAcquireMaintenanceLock(
+                '.gaovmd.lock',
+                create: false,
+              );
+              expect(released, isNotNull);
+              released?.close();
+            } finally {
+              directory.close();
+            }
+          }
+          expect(await Directory('$root/retired-fence').exists(), true);
+          await expectLater(
+            MaintenanceStateFence.requireUnfenced(retained),
+            throwsA(isA<MaintenanceFenceActive>()),
+          );
+        } catch (_) {
+          retainInputs = true;
+          rethrow;
+        } finally {
+          host.onStatus = null;
+          failedState?.close();
+          oldState?.close();
+          restored?.close();
+          activeRetirementChecks--;
+        }
+      },
+      timeout: const Timeout(Duration(minutes: 4)),
+    );
+
+    test(
       'rollback app cutover restores the matching installed pair and retains the published failed app',
       () async {
         activeRetirementChecks++;

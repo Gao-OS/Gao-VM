@@ -638,7 +638,10 @@ final class ColdRollbackPreparation {
   }
 
   // Filesystem-only closure, after the last native observation of a pass.
-  Future<void> _verifySourceFiles({String? retainedState}) async {
+  Future<void> _verifySourceFiles({
+    String? retainedState,
+    ColdStateRestoration? restoration,
+  }) async {
     if (_closed) throw StateError('rollback preparation is closed');
     await ColdUpgradePreparation._verifyPrivate(_work);
     await _verifyLock('.gaovm-upgrade.lock', _upgradeLock);
@@ -695,8 +698,11 @@ final class ColdRollbackPreparation {
       Directory(retainedState ?? _source.state),
     );
     try {
-      if (_fence.retiredForCommit)
-        throw const FormatException('active original fence required');
+      if (_fence.retiredForCommit) {
+        if (restoration == null || retainedState == null)
+          throw const FormatException('active original fence required');
+        await restoration.verifyCommittedFenceFor(currentRoot, _fence);
+      }
       if (retainedState == null) {
         await _fence.verifyFor(
           currentRoot,
@@ -908,7 +914,7 @@ final class ColdRollbackPreparation {
     String retained, {
     ColdAppRestoration? app,
   }) async {
-    await _verifySourceFiles(retainedState: retained);
+    await _verifySourceFiles(retainedState: retained, restoration: restored);
     await ColdUpgradePreparation._verifyPrivate(_inspection!);
     await _verifyOutputFiles(restored: restored, app: app);
     // App transition callbacks run inside the state's guarded original future;

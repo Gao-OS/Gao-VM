@@ -1,9 +1,10 @@
 part of 'cold_catalog_inspection.dart';
 
 /// Held composition of an independently proved old pair and restored whole
-/// state, then optional explicit old-app installation. Both generations remain
-/// fenced; neither phase authorizes commit or ordinary startup. Owns its preparation,
-/// including its staged native host, external readers and both actual state
+/// state, then explicit old-app installation. Restoration keeps both generations
+/// fenced and uncommitted. Only the separate acknowledged commit may retire the
+/// canonical fence; the retained failed generation stays fenced. Owns its preparation,
+/// including staged/recovered native hosts, external readers and both actual state
 /// owners. Caller-owned current native hosts, original fence and work remain
 /// borrowed and must stay open until this context closes.
 final class ColdRollbackStateRestoration {
@@ -19,6 +20,8 @@ final class ColdRollbackStateRestoration {
   bool _closed = false, _busy = false;
   bool _appCuttingOver = false;
   ColdAppRestoration? _app;
+  ColdRollbackCommit? _commit;
+  bool _commitAttempted = false;
 
   String get path => _state.path;
 
@@ -65,6 +68,11 @@ final class ColdRollbackStateRestoration {
         'complete available rollback state restoration required',
       );
     }
+    if (_commitAttempted) {
+      final commit = _commit;
+      if (commit == null) throw StateError('rollback commit did not complete');
+      return commit.toJson();
+    }
     return _app?.toJson() ?? _state.toJson();
   }
 
@@ -74,6 +82,13 @@ final class ColdRollbackStateRestoration {
     }
     _busy = true;
     try {
+      if (_commitAttempted) {
+        final commit = _commit;
+        if (commit == null)
+          throw StateError('rollback commit did not complete');
+        await commit.verify();
+        return;
+      }
       await _preparation._verifyRestoredState(
         _state,
         retainedStatePath,
@@ -105,6 +120,53 @@ final class ColdRollbackStateRestoration {
         ),
       );
       _appCuttingOver = false;
+    } finally {
+      _busy = false;
+    }
+  }
+
+  /// One explicit cold rollback commit; registration/start remains manual.
+  /// A failed attempt is retained for fixed-checkpoint recovery, never replayed.
+  Future<Map<String, Object?>> commit({
+    required bool acceptHistoryRewind,
+    required bool allowStartup,
+  }) async {
+    if (!acceptHistoryRewind || !allowStartup)
+      throw const FormatException(
+        'explicit history rewind and startup acknowledgement required',
+      );
+    if (_commitAttempted || _app == null)
+      throw StateError('complete uncommitted matching pair required');
+    await verify();
+    _busy = true;
+    _commitAttempted = true;
+    try {
+      _commit = await ColdRollbackCommit.prepare(
+        _state,
+        acceptHistoryRewind: acceptHistoryRewind,
+        allowStartup: allowStartup,
+        pairing: {
+          'source_intent_digest': ColdRollbackPreparation._hash(
+            _preparation._sourceIntent,
+          ),
+          'source_record_digest': ColdRollbackPreparation._hash(
+            _preparation._sourceRecord,
+          ),
+          'rollback_intent_digest': ColdRollbackPreparation._hash(
+            _preparation._intent,
+          ),
+          'rollback_record_digest': ColdRollbackPreparation._hash(
+            _preparation._record!,
+          ),
+        },
+        observePreparedInputs: _preparation._verifySnapshotReferences,
+        verifyPreparedInputs: () => _preparation._verifyRestoredFiles(
+          _state,
+          retainedStatePath,
+          app: _app,
+        ),
+      );
+      return await _commit!.commit();
     } finally {
       _busy = false;
     }

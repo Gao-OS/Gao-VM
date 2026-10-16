@@ -543,12 +543,49 @@ Do not feed an app-restored layout to ordinary preparation, preservation or
 state-only recovery. App moves still in progress, incomplete/ambiguous records,
 foreign placements and changed inputs are retained and refused. There is still
 no operator rollback command or general interrupted-pair replacement protocol.
-The user has also accepted a single explicit cold rollback commit followed by
-manual startup: `rollback-upgrade --accept-history-rewind --allow-startup`.
-Its final commit implementation remains unfinished. That policy will retire only
-the canonical startup fence after complete paired revalidation, keep the retained
-failed generation fenced, and never register/start the service. The policy is not
-permission to operate an installed app/state tree or a completed transaction.
+
+### Paired cold rollback commit (internal API)
+
+The user selected one explicit cold rollback commit followed by manual startup:
+`rollback-upgrade --accept-history-rewind --allow-startup`. The operator command
+is still unfinished. The held matching-pair context now implements the internal
+`ColdRollbackStateRestoration.commit` phase; both `acceptHistoryRewind` and
+`allowStartup` must be true. This implementation policy is not permission for
+this agent to operate an installed app/state tree.
+
+The commit owns a separate maintenance namespace and private
+`rollback-commit` checkpoint. Its sealed intent binds both component intents,
+the original preparation/rollback record digests, actual work/checkpoint
+identities, app/state placements and both exact fences. Both actual state kernel
+owners and all matching-pair/external/native-provenance readers remain held.
+The state and app component records stay immutable; a new terminal proposal in
+`.completed.partial` is not itself evidence that startup is allowed.
+
+After fresh native service/process/reference checks, snapshot/external-reference
+observations and the complete filesystem read set close, a dedicated typed
+adapter may atomically move only the exact canonical marker to
+`rollback-commit/retired-fence`. It proves the original failed inode remains at
+its separately fenced retained path. Ordinary original-fence admission and
+relocation do not accept the old restored inode. The failed generation's marker
+is never retired, and neither app nor state is moved again during commit.
+
+Full observations and filesystem checks run again after retirement and before
+and after publishing the completion record. Only the completed, freshly verified
+context reports `phase: rollback_committed`, `committed: true`,
+`startup_allowed: true` and `manual_start_required: true`.
+`ordinary_ready` and `service_actions_performed` remain false. The tool does not
+probe/migrate either actual state or register/start a service. Clients must
+refresh snapshots, event cursors and retry/idempotency decisions after rewind.
+
+A pending commit cannot close, reenter or report completion. A failed attempt
+retains both owners until the original future settles and explicit close; it
+does not reverse a move, clear a marker, remove outputs or replay automatically.
+An error can follow physical marker retirement, so failure is not evidence of
+`committed: false` or `startup_allowed: false`. Retain the proposal and all
+placements for explicit recovery instead of guessing from a timeout or manually
+moving the marker. Fixed commit-checkpoint reopen and the operator command are
+not yet implemented; the active-fence paired reopen above is not a recovery
+route for a retired canonical fence.
 
 ## Data-preserving cold uninstall
 

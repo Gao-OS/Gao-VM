@@ -37,6 +37,7 @@ final class ColdAppRestoration {
         _reading ||
         _state._closed ||
         _state._recovering ||
+        _state._startupCommit != null ||
         _state._busy ||
         _completionName != 'completed') {
       throw StateError('complete available app restoration required');

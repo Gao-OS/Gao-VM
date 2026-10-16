@@ -570,12 +570,18 @@ final class PreservedColdState {
     }
     final actual = moved ? _state! : _source._root;
     if (moved) {
-      await _original.verifyRelocatedOriginal(
-        actual,
-        _destination,
-        bundleIdentifier: _source.bundleIdentifier,
-        appPath: _source.installationPath,
-      );
+      if (_original.retiredForCommit &&
+          restoration != null &&
+          identical(restoration._current, this)) {
+        await restoration.verifyCommittedFenceFor(actual, _original);
+      } else {
+        await _original.verifyRelocatedOriginal(
+          actual,
+          _destination,
+          bundleIdentifier: _source.bundleIdentifier,
+          appPath: _source.installationPath,
+        );
+      }
       if (maintenancePathEntryExists(_intent['source_state'] as String)) {
         if (restoration == null || !identical(restoration._current, this)) {
           throw const FormatException(

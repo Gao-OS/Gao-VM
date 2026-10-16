@@ -13,6 +13,7 @@ import 'maintenance_tree.dart';
 part 'cold_state_preservation.dart';
 part 'cold_state_restoration.dart';
 part 'cold_app_restoration.dart';
+part 'cold_rollback_commit.dart';
 
 /// External observations only. The native implementation binds these to the
 /// previously inspected owning app; fixtures never register or stop services.

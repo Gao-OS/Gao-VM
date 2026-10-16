@@ -30,6 +30,7 @@ final class ColdStateRestoration {
   bool _busy = false, _closed = false, _ownsStates = false;
   bool _recovering = false;
   ColdAppRestoration? _appRestoration;
+  ColdRollbackCommit? _startupCommit;
 
   String get path => _intent['target_state'] as String;
 
@@ -64,6 +65,7 @@ final class ColdStateRestoration {
   Map<String, Object?> toJson() {
     if (_closed ||
         _recovering ||
+        _startupCommit != null ||
         _record == null ||
         _completionName != 'completed') {
       throw StateError('complete available state restoration required');
@@ -502,6 +504,27 @@ final class ColdStateRestoration {
       throw const FormatException('restored state is not this old pair');
     }
     await _verifyFiles(moved: true);
+  }
+
+  /// Only an attached sealed paired commit can account for this different
+  /// canonical inode after retirement of the original generation's marker.
+  Future<void> verifyCommittedFenceFor(
+    OwnedImageDirectory retained,
+    MaintenanceStateFence original,
+  ) async {
+    final commit = _startupCommit;
+    if (_closed ||
+        commit == null ||
+        !original.retiredForCommit ||
+        !identical(original, _current._original) ||
+        retained.path != _current.path ||
+        !PreservedColdState._same(
+          await retained.maintenanceIdentity(),
+          _current._intent['state_identity'],
+        ))
+      throw const FormatException('exact held committed pair required');
+    await commit.verifyFenceRetirementFor(original, commit._root);
+    await retained.verifyPathBinding();
   }
 
   /// Borrowed app proof only; the state context owns every recovered observer.
@@ -976,6 +999,7 @@ final class ColdStateRestoration {
   void _closeUntransferred() {
     if (_closed) return;
     _closed = true;
+    _startupCommit?.close();
     _appRestoration?._closeResources();
     for (final host in _recoveredHosts) host.close();
     _state?.close();
