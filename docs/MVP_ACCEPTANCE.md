@@ -1917,3 +1917,62 @@ Manual installed activation/readiness and native lifecycle/Apple Silicon/VZ/GaoO
 acceptance remain outstanding and assigned to the user. No push, PR, release,
 actual installed app/state/service/VM operation or machine switch occurred.
 M8/MVP and the full goal remain open.
+
+## 2026-10-16 continuous ownership across a state-directory move
+
+Local commit `1201a60` adds the ownership primitive needed when preserving an
+entire post-upgrade state directory during a paired rollback. After a separately
+authorized no-replace directory move, `DaemonOwnership.rebindAfterMaintenanceMove`
+rebinds the existing lock descriptor only when both held directory readers refer
+to the same actual inode and the destination lock file is still the held lock.
+It never unlocks, reopens a lock, moves a directory, clears a fence, or grants
+rollback authority. An occupied old slot may belong to another generation; its
+independent owner and contents are neither adopted nor modified. Closing or
+starting another rebind while the original future is pending refuses, retaining
+the real kernel lock until that future settles.
+
+The new macOS CI selection covers 12 component checks: continuous ownership and
+independent-child exclusion after a real move, old-slot reuse, pending lifetime,
+closed/private-reader boundaries, unmoved or substituted directories, replaced
+lock files, copied-state refusal, and refusal of a destination startup fence.
+Before/after native manifests check unchanged state bytes and metadata. A copied
+lock remains independently acquirable and is never treated as the original owner.
+
+The final original runner returned exit 0, with **107 unique checks across five
+files**, zero failures or skips, in **13.410 seconds**. Its JSON report is
+`/private/tmp/gaovm-paired-rollback.To8HQ9/ownership-regression-final.jsonl`:
+
+| Test file | Checks |
+| --- | ---: |
+| `daemon_ownership_move_test.dart` | 12 |
+| `daemon_ownership_test.dart` | 4 |
+| `maintenance_directory_move_test.dart` | 25 |
+| `maintenance_state_fence_test.dart` | 45 |
+| `cold_state_lease_test.dart` | 21 |
+
+Test-first checks reproduced the missing rebind entry, an overly strict refusal
+when a different generation occupied the old slot, and premature ownership loss
+on close during a pending rebind. Their original failed runners have exited and
+the following inputs were rechecked to exist, without repair, retry or deletion:
+
+- `/private/tmp/gvm-owner-move-GiZi5w`
+- `/private/tmp/gvm-owner-move-KvaN3F`
+- `/private/tmp/gvm-owner-move-6BBKwy`
+
+Final daemon analysis has no issues; root analysis exits 0 with the same nine
+pre-existing UI informational notices. All three changed Dart files pass pinned
+format checks and the staged diff passes whitespace checks. The unrelated UI
+lockfile remains byte-identical and excluded. Remote CI, full/default-concurrency
+tests, AOT recompilation and real installed/native product acceptance were not
+run for this slice. Service/process observations in the cold-boundary fixtures
+remain fixtures; filesystem moves, metadata, kernel locks and the independent
+child exclusion check are real.
+
+This is not paired rollback admission: restoring a different state inode at the
+canonical path under a persistent fence still requires a separately validated
+replacement/checkpoint protocol. The complete old-app/whole-state rollback and
+its interruption recovery are unfinished; no fence check was relaxed to hide
+that gap. The other M8/release gaps and two prior source-Dart startup failures
+remain open. No push, PR, release, installed app/state/service/VM operation,
+machine switch or Apple Silicon/VZ/GaoOS execution occurred. M8/MVP and the full
+goal remain open.
