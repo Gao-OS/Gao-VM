@@ -18,6 +18,10 @@ const _usage = '''Usage:
     --work-dir PATH --inspection-dir PATH --bundle-id ID
     --old-version X.Y.Z --new-version X.Y.Z --team-id TEAMID
     --catalog-schema N
+  maintain_macos.dart validate-upgrade --app PATH --state-dir PATH
+    --work-dir PATH --inspection-dir PATH --bundle-id ID
+    --old-version X.Y.Z --new-version X.Y.Z --team-id TEAMID
+    --catalog-schema N
   maintain_macos.dart uninstall-app --app PATH --state-dir PATH
     --work-dir PATH --inspection-dir PATH --bundle-id ID
     --version X.Y.Z --team-id TEAMID
@@ -26,9 +30,11 @@ const _usage = '''Usage:
     --version X.Y.Z --team-id TEAMID
     --from preparation|retirement --catalog-schema N
 
-Explicit cold-operator publication, sealed validation recovery or data-preserving
-uninstall; does not activate, register, stop, migrate, commit, roll back, or remove
-retained files. Quiesce clients, services
+Explicit cold-operator publication, controlled validation, sealed recovery or
+data-preserving uninstall; does not activate, register, stop, commit, roll back,
+or remove retained files. Only validate-upgrade can apply controlled catalog and
+legacy migration; it awaits its owned candidate exit and rechecks sealed evidence.
+Quiesce clients, services
 and VMs first. All paths are explicit canonical absolute paths. State, work and
 inspection are private; work and inspection are disjoint from all app inputs.
 Fresh publication requires empty work and inspection directories. Every resume
@@ -50,6 +56,8 @@ Future<void> main(List<String> arguments) async {
       {'uninstall-app', 'resume-uninstall'}.contains(arguments.first);
   final validationRecovery =
       arguments.isNotEmpty && arguments.first == 'resume-validation';
+  final validationLaunch =
+      arguments.isNotEmpty && arguments.first == 'validate-upgrade';
   try {
     stdout.writeln(
       jsonEncode(
@@ -71,6 +79,8 @@ Future<void> main(List<String> arguments) async {
             ? 'gaovm.cold-uninstall-command.v1'
             : validationRecovery
             ? 'gaovm.cold-validation-recovery-command.v1'
+            : validationLaunch
+            ? 'gaovm.cold-validation-launch-command.v1'
             : 'gaovm.cold-publication-command.v1',
         'status': incompatible ? 'refused' : 'unverified',
         'stage': error is ColdPublicationFailure ? error.stage : 'inputs',

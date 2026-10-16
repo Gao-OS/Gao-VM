@@ -251,9 +251,7 @@ final class ColdMaintenanceOptions {
 bool _overlap(String a, String b) =>
     a == b || a.startsWith('$b/') || b.startsWith('$a/');
 
-Future<ProcessResult> awaitColdCommandExit(
-  Future<ProcessResult> Function() action,
-) async {
+Future<T> awaitColdCommandExit<T>(Future<T> Function() action) async {
   try {
     return await action();
   } on MaintenanceCommandFailure catch (error) {

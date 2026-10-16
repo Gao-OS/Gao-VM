@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 import 'package:gaovm_models/gaovm_models.dart';
 import 'package:gaovmd/gaovmd.dart';
+import 'package:gaovmd/src/candidate_validation_launch.dart';
 import 'package:gaovmd/src/cold_catalog_inspection.dart';
 import 'package:gaovmd/src/cold_state_lease.dart';
 import 'package:gaovmd/src/daemon_component_info.dart';
@@ -1631,6 +1632,365 @@ void main() {
     }
 
     test(
+      'outside-app launcher verifies and validates the candidate without ordinary startup',
+      () async {
+        activeRetirementChecks++;
+        MaintenanceTree? pair;
+        Directory? shortState;
+        var retain = false;
+        try {
+          shortState = Directory(
+            await (await Directory(
+              '/private/tmp',
+            ).createTemp('gvm-launch-')).resolveSymbolicLinks(),
+          );
+          imageFileMode(shortState.path, 0x1c0);
+          // Keep every copied source/destination in the same private parent.
+          // Darwin inherits /private/tmp's group, unlike the system temp tree.
+          app = Directory('${shortState.path}/GaoVM.app');
+          candidate = Directory('${shortState.path}/Candidate.app');
+          await _fixture(app);
+          await _fixture(candidate);
+          work = await Directory('${shortState.path}/work').create();
+          scratch = await Directory(
+            '${shortState.path}/publication-inspection',
+          ).create();
+          for (final directory in [work, scratch]) {
+            imageFileMode(directory.path, 0x1c0);
+          }
+          state = await Directory('${shortState.path}/state').create();
+          imageFileMode(state.path, 0x1c0);
+          final database = await GaoVmDatabase.open('${state.path}/gaovm.db');
+          database.close();
+          imageFileMode('${state.path}/gaovm.db', 0x180);
+          await command(arguments());
+          pair = await MaintenanceTree.open(
+            Directory('${work.path}/preparation'),
+          );
+          final original = await pair.capture(nativeMetadata: true);
+          scratch = await Directory(
+            '${shortState.path}/launch-inspection',
+          ).create();
+          imageFileMode(scratch.path, 0x1c0);
+          final args = arguments(from: 'publication')..[0] = 'validate-upgrade';
+          args.removeRange(args.indexOf('--from'), args.indexOf('--from') + 2);
+          ValidationLaunchGrant? observedGrant;
+          final result = await runMacOsColdPublication(
+            args,
+            host: host,
+            observer: MacOsOpenReferences(
+              command: (_, _) async => ProcessResult(pid, 1, '', ''),
+            ),
+            inventory: (_) async => DriverInventorySnapshot(
+              processes: [],
+              unresolvedProcessIds: [],
+            ),
+            candidateLauncher: (executable, childArguments, nonce) async {
+              expect(childArguments.take(2), [
+                '--validate-upgrade',
+                '--launch-grant-stdin',
+              ]);
+              expect(childArguments, isNot(contains(nonce)));
+              final identity = DriverProcessIdentity(
+                pid: pid,
+                uid: 501,
+                executablePath: executable,
+                startedAtMicroseconds: 1,
+                pidVersion: 1,
+              );
+              final grant = ValidationLaunchGrant(
+                nonce: nonce,
+                process: identity,
+              );
+              observedGrant = grant;
+              final validated = await runMacOsCandidateValidation(
+                ['validate-upgrade', ...childArguments.skip(2)],
+                host: host,
+                observer: MacOsOpenReferences(
+                  command: (_, _) async => ProcessResult(pid, 1, '', ''),
+                ),
+                inventory: (path) async => DriverInventorySnapshot(
+                  processes: path == executable ? [identity] : [],
+                  unresolvedProcessIds: [],
+                ),
+                currentExecutable: () async => executable,
+                doctorHost: _ValidationDoctorHost(() async {}),
+                launchGrant: grant,
+              );
+              return OwnedCandidateValidationResult(
+                ProcessResult(pid, 0, jsonEncode(validated), ''),
+                grant,
+              );
+            },
+          );
+          expect(observedGrant, isNotNull);
+          final intentBytes = await File(
+            '${work.path}/validation/intent.json',
+          ).readAsString();
+          expect(intentBytes, isNot(contains(observedGrant!.nonce)));
+          expect(
+            (jsonDecode(intentBytes) as Map)['launch_grant_digest'],
+            observedGrant!.digest,
+          );
+          expect(result['phase'], 'candidate_validated');
+          expect(result['candidate_exit_confirmed'], true);
+          expect(result['post_exit_reverified'], true);
+          expect(result['ordinary_ready'], false);
+          expect(result['background_workers_started'], false);
+          expect(result['driver_sessions_started'], false);
+          expect(result['committed'], false);
+          expect(result['activation_authorized'], false);
+          expect(result['rollback_authorized'], false);
+          await pair.verify(original, nativeMetadata: true);
+          await expectLater(
+            MaintenanceStateFence.requireUnfenced(state),
+            throwsA(isA<MaintenanceFenceActive>()),
+          );
+        } catch (_) {
+          retainInputs = true;
+          retain = true;
+          rethrow;
+        } finally {
+          pair?.close();
+          activeRetirementChecks--;
+          if (retain && shortState != null) {
+            print('retain candidate launch state: ${shortState.path}');
+          } else {
+            await shortState?.delete(recursive: true);
+          }
+        }
+      },
+      timeout: const Timeout(Duration(minutes: 8)),
+    );
+
+    test(
+      'validation handoff releases parent app and state references before child creation',
+      () async {
+        activeRetirementChecks++;
+        MaintenanceTree? retainedWork;
+        try {
+          await command(arguments());
+          retainedWork = await MaintenanceTree.open(work);
+          final workBefore = await retainedWork.capture(nativeMetadata: true);
+          final stateBefore = await File(
+            '${state.path}/gaovm.db',
+          ).readAsBytes();
+          await freshInspection('handoff-references-inspection');
+          final args = arguments(from: 'publication')..[0] = 'validate-upgrade';
+          args.removeRange(args.indexOf('--from'), args.indexOf('--from') + 2);
+          var observed = false;
+          await expectLater(
+            runMacOsColdPublication(
+              args,
+              host: host,
+              observer: MacOsOpenReferences(
+                command: (_, _) async => ProcessResult(pid, 1, '', ''),
+              ),
+              inventory: (_) async => DriverInventorySnapshot(
+                processes: [],
+                unresolvedProcessIds: [],
+              ),
+              candidateLauncher: (_, _, _) async {
+                // A separate native observer selects only THIS parent process.
+                // Unlike directory(), it opens no observer target in the parent.
+                for (final path in [
+                  app.path,
+                  state.path,
+                  '${work.path}/retirement/GaoVM.app',
+                  '${work.path}/preparation/candidate-app/payload.app',
+                ]) {
+                  final references = await runMaintenanceCommand(
+                    '/usr/sbin/lsof',
+                    ['-nP', '-a', '-p', '$pid', '-F0p', '+D', path],
+                  );
+                  expect(references.stderr, isEmpty);
+                  expect(
+                    references.exitCode,
+                    1,
+                    reason: 'parent still references $path',
+                  );
+                  expect(
+                    references.stdout,
+                    isEmpty,
+                    reason: 'parent still references $path',
+                  );
+                }
+                final process = await Process.start(
+                  Platform.resolvedExecutable,
+                  [
+                    '--packages=${Directory.current.path}/.dart_tool/package_config.json',
+                    '${Directory.current.path}/test/fixtures/candidate_handoff_ownership_probe.dart',
+                    state.path,
+                    work.path,
+                  ],
+                  includeParentEnvironment: false,
+                  environment: const {'PATH': '/usr/bin:/bin'},
+                );
+                final probe = OwnedTestProcess(process);
+                try {
+                  await process.stdin.close();
+                  final result = await probe.result(
+                    timeout: const Duration(seconds: 30),
+                  );
+                  expect(result.exitCode, 0, reason: '${result.stderr}');
+                  expect(result.stderr, isEmpty);
+                  expect(jsonDecode(result.stdout as String), {
+                    'state_owned': true,
+                    'namespace_locks': 4,
+                  });
+                } finally {
+                  if (!await probe.terminate()) {
+                    retainInputs = true;
+                    throw StateError(
+                      'retain unconfirmed handoff ownership probe',
+                    );
+                  }
+                }
+                observed = true;
+                throw const FormatException(
+                  'controlled refusal after native reference check',
+                );
+              },
+            ),
+            throwsA(
+              isA<ColdPublicationFailure>().having(
+                (failure) => failure.cause,
+                'owned handoff boundary',
+                isA<FormatException>().having(
+                  (error) => error.message,
+                  'controlled refusal',
+                  'controlled refusal after native reference check',
+                ),
+              ),
+            ),
+          );
+          expect(observed, true);
+          await retainedWork.verify(workBefore, nativeMetadata: true);
+          expect(
+            await File('${state.path}/gaovm.db').readAsBytes(),
+            stateBefore,
+          );
+          expect(await Directory('${work.path}/validation').exists(), false);
+          await expectLater(
+            MaintenanceStateFence.requireUnfenced(state),
+            throwsA(isA<MaintenanceFenceActive>()),
+          );
+        } catch (_) {
+          retainInputs = true;
+          rethrow;
+        } finally {
+          retainedWork?.close();
+          activeRetirementChecks--;
+        }
+      },
+      timeout: const Timeout(Duration(minutes: 8)),
+    );
+
+    for (final failure in [
+      'untrusted-signature',
+      'live-daemon',
+      'unresolved-daemon',
+      'live-driver',
+      'wrong-schema',
+      'partial-validation',
+    ]) {
+      test(
+        'verified validation launch admission refuses $failure before child creation',
+        () async {
+          activeRetirementChecks++;
+          MaintenanceTree? retainedWork, retainedState;
+          try {
+            await command(arguments());
+            if (failure == 'partial-validation') {
+              final partial = await Directory(
+                '${work.path}/.validation.partial',
+              ).create();
+              imageFileMode(partial.path, 0x1c0);
+            }
+            retainedWork = await MaintenanceTree.open(work);
+            retainedState = await MaintenanceTree.open(state);
+            final workBefore = await retainedWork.capture(nativeMetadata: true);
+            final stateBefore = await retainedState.capture(
+              nativeMetadata: true,
+            );
+            await freshInspection('launch-refusal-inspection');
+            final args = arguments(
+              from: 'publication',
+              schema: failure == 'wrong-schema' ? 20 : 21,
+            )..[0] = 'validate-upgrade';
+            args.removeRange(
+              args.indexOf('--from'),
+              args.indexOf('--from') + 2,
+            );
+            host.rejectSignature = failure == 'untrusted-signature';
+            var launched = false;
+            final executions = host.executedRoles.length;
+            await expectLater(
+              runMacOsColdPublication(
+                args,
+                host: host,
+                observer: MacOsOpenReferences(
+                  command: (_, _) async => ProcessResult(pid, 1, '', ''),
+                ),
+                inventory: (path) async {
+                  final daemon = path == '${app.path}/Contents/MacOS/gaovmd';
+                  final driver =
+                      path == '${app.path}/Contents/Helpers/gaovm-driver-vz';
+                  return DriverInventorySnapshot(
+                    processes:
+                        (failure == 'live-daemon' && daemon ||
+                            failure == 'live-driver' && driver)
+                        ? [
+                            DriverProcessIdentity(
+                              pid: 123,
+                              uid: 501,
+                              executablePath: path,
+                              startedAtMicroseconds: 1,
+                              pidVersion: 1,
+                            ),
+                          ]
+                        : [],
+                    unresolvedProcessIds:
+                        failure == 'unresolved-daemon' && daemon ? [123] : [],
+                  );
+                },
+                candidateLauncher: (_, _, _) async {
+                  launched = true;
+                  throw StateError(
+                    'untrusted or non-cold candidate must never launch',
+                  );
+                },
+              ),
+              throwsA(isA<ColdPublicationFailure>()),
+            );
+            expect(launched, false);
+            if ({
+              'untrusted-signature',
+              'partial-validation',
+            }.contains(failure)) {
+              expect(host.executedRoles.length, executions);
+            }
+            expect(await scratch.list().toList(), isEmpty);
+            await retainedWork.verify(workBefore, nativeMetadata: true);
+            await retainedState.verify(stateBefore, nativeMetadata: true);
+            await expectLater(
+              MaintenanceStateFence.requireUnfenced(state),
+              throwsA(isA<MaintenanceFenceActive>()),
+            );
+          } catch (_) {
+            retainInputs = true;
+            rethrow;
+          } finally {
+            retainedState?.close();
+            retainedWork?.close();
+            activeRetirementChecks--;
+          }
+        },
+        timeout: const Timeout(Duration(minutes: 8)),
+      );
+    }
+
+    test(
       'candidate validation refuses a different executable before native helpers or state admission',
       () async {
         final before = await File('${state.path}/gaovm.db').readAsBytes();
@@ -2287,6 +2647,152 @@ void main() {
           } finally {
             pair?.close();
             state?.close();
+            activeRetirementChecks--;
+            active--;
+          }
+        },
+        timeout: const Timeout(Duration(minutes: 8)),
+      );
+      test(
+        'an owned launch cannot adopt a different sealed validation before native helpers',
+        () async {
+          active++;
+          activeRetirementChecks++;
+          MaintenanceTree? state, work;
+          try {
+            final inspection = await Directory(
+              '${recoveryTemporary.path}/foreign-launch-inspection',
+            ).create();
+            imageFileMode(inspection.path, 0x1c0);
+            final intent =
+                jsonDecode(
+                      await File(
+                        '${recoveryWork.path}/validation/intent.json',
+                      ).readAsString(),
+                    )
+                    as Map;
+            final publication = Map<String, Object?>.from(
+              intent['publication'] as Map,
+            );
+            final process = publication.remove('executing_process');
+            final grant = ValidationLaunchGrant.fromJson({
+              'format': 'gaovm.validation-launch-grant.v1',
+              'nonce': 'cd' * 32,
+              'process': process,
+            });
+            state = await MaintenanceTree.open(recoveryState);
+            work = await MaintenanceTree.open(recoveryWork);
+            final current = await state.capture(nativeMetadata: true);
+            final retained = await work.capture(nativeMetadata: true);
+            final roles = recoveryHost.executedRoles.length;
+            await expectLater(
+              runMacOsColdValidationRecovery(
+                [...recoveryArguments, '--inspection-dir', inspection.path],
+                host: recoveryHost,
+                observer: references(),
+                inventory: (_) async =>
+                    throw StateError('no native census before launch binding'),
+                expectedLaunch: ValidationLaunchExpectation(
+                  grant: grant,
+                  preparationDigest: intent['preparation_digest'] as String,
+                  publication: publication,
+                  record: validated,
+                ),
+              ),
+              throwsA(
+                isA<ColdPublicationFailure>()
+                    .having(
+                      (failure) => failure.stage,
+                      'checkpoint refusal',
+                      'validation_checkpoint',
+                    )
+                    .having(
+                      (failure) => failure.cause,
+                      'launch mismatch',
+                      isA<FormatException>(),
+                    ),
+              ),
+            );
+            expect(recoveryHost.executedRoles.length, roles);
+            expect(await inspection.list().toList(), isEmpty);
+            await state.verify(current, nativeMetadata: true);
+            await work.verify(retained, nativeMetadata: true);
+          } catch (_) {
+            retain = true;
+            rethrow;
+          } finally {
+            work?.close();
+            state?.close();
+            activeRetirementChecks--;
+            active--;
+          }
+        },
+        timeout: const Timeout(Duration(minutes: 8)),
+      );
+      test(
+        'a modeled bound v2 checkpoint remains recoverable without inventing a launch grant',
+        () async {
+          active++;
+          activeRetirementChecks++;
+          final intentFile = File(
+            '${recoveryWork.path}/validation/intent.json',
+          );
+          final recordFile = File(
+            '${recoveryWork.path}/validation/completed/record.json',
+          );
+          final originalIntent = await intentFile.readAsString();
+          final originalRecord = await recordFile.readAsString();
+          var restore = false;
+          Future<void> writeSealed(File file, String bytes) async {
+            imageFileMode(file.path, 0x180);
+            await file.writeAsString(bytes, flush: true);
+            imageFileMode(file.path, 0x100);
+          }
+
+          try {
+            // Model the previous producer's sealed format on this test-owned
+            // workspace. This is compatibility evidence, not an old-binary E2E.
+            final intent =
+                Map<String, Object?>.from(jsonDecode(originalIntent) as Map)
+                  ..['format'] = 'gaovm.candidate-validation-intent.v2'
+                  ..remove('launch_grant_digest');
+            final encoded = '${jsonEncode(intent)}\n';
+            final record =
+                Map<String, Object?>.from(jsonDecode(originalRecord) as Map)
+                  ..['intent_digest'] =
+                      'sha256:${sha256.convert(utf8.encode(encoded))}';
+            restore = true;
+            await writeSealed(intentFile, encoded);
+            await writeSealed(recordFile, '${jsonEncode(record)}\n');
+            final inspection = await Directory(
+              '${recoveryTemporary.path}/v2-compatibility-inspection',
+            ).create();
+            imageFileMode(inspection.path, 0x1c0);
+            final recovered = await runMacOsColdPublication(
+              [...recoveryArguments, '--inspection-dir', inspection.path],
+              host: recoveryHost,
+              observer: references(),
+              inventory: (_) async => DriverInventorySnapshot(
+                processes: [],
+                unresolvedProcessIds: [],
+              ),
+            );
+            expect(recovered['phase'], 'candidate_validation_recovered');
+            expect(recovered['public_api_rerun'], false);
+            expect(recovered['state_unchanged'], true);
+            expect(recovered['committed'], false);
+            expect(recovered['activation_authorized'], false);
+            expect(recovered['rollback_authorized'], false);
+            await writeSealed(intentFile, originalIntent);
+            await writeSealed(recordFile, originalRecord);
+            restore = false;
+          } catch (_) {
+            retain = true;
+            rethrow;
+          } finally {
+            // A failure retains the modeled checkpoint for diagnosis rather
+            // than rewriting uncertain inputs as a teardown side effect.
+            if (restore) retain = true;
             activeRetirementChecks--;
             active--;
           }

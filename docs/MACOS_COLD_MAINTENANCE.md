@@ -3,17 +3,19 @@
 [`tool/maintain_macos.dart`](../daemon/gaovmd/tool/maintain_macos.dart) composes
 the accepted [explicit cold operator workflow](proposals/MACOS_UPGRADE_ROLLBACK.md)
 through immutable preparation, old-app retirement and independent candidate
-publication, sealed validation-checkpoint recovery and a separate recoverable
+publication, an outside-app verified candidate-validation launcher, sealed
+validation-checkpoint recovery and a separate recoverable
 data-preserving uninstall. It is
 separate from the public API client and never exposes a driver passthrough.
-It performs no registration, stop, VM action, catalog migration, activation,
-upgrade commit, rollback or retained-file cleanup.
+It performs no registration, stop, VM action, activation, upgrade commit, rollback
+or retained-file cleanup. Only `validate-upgrade` can apply controlled catalog/
+legacy migration through the candidate-only validation composition.
 
 **This is not a production-ready upgrade transaction.** A successful publication
 intentionally leaves ordinary startup blocked by a persistent fence. Activation,
 explicit commit and paired whole-state/app rollback remain unfinished. Recovery
-below is limited to complete sealed validation checkpoints. The separate
-candidate-only validation entry below is not activation.
+below is limited to complete sealed validation checkpoints. Neither candidate
+validation nor its outside-app launcher is activation.
 The command must not be substituted for a complete upgrade, and this document
 does not authorize running it against an actual installation.
 
@@ -45,8 +47,9 @@ socket or a copied lock file.
 All paths must be canonical and absolute. App inputs end in `.app`; state and
 existing work/inspection directories must be private and same-user owned, with
 work and inspection exactly `0700` and without ACL grants. These directories
-and app inputs must be mutually disjoint. Every fresh action requires empty
-work and inspection directories; no existing output is reused or normalized.
+and app inputs must be mutually disjoint. Fresh publication/uninstall requires
+empty work and inspection directories; no existing output is normalized.
+Validation requires completed publication work and a new empty inspection directory.
 Work must support the no-replace same-filesystem moves to/from the installation
 slot; there is no cross-filesystem copy-and-delete substitute for those moves.
 
@@ -156,18 +159,18 @@ installed native upgrade result. Earlier timed-out inputs remain retained; see t
 [acceptance ledger](MVP_ACCEPTANCE.md). The complete upgrade transaction is still
 unfinished.
 
-The installed candidate daemon now has a one-shot internal entry. This is not
-an action of the outside-app publication tool, a generic fence bypass or a
-production-ready launcher. An operator must independently establish the trusted
-candidate identity before executing it; an outside-app verified launcher is
-still unfinished. This source interface does not authorize executing any command
-against an actual installation as part of the current development task.
+The outside-app tool's `validate-upgrade` action independently verifies the
+published candidate, complete original app/state rollback pair and original cold
+source before executing the installed candidate daemon. This is not a generic
+fence bypass or a complete production upgrade transaction. This source interface
+does not authorize executing any command against an actual installation as part
+of the current development task.
 
 After completed publication, with a new empty private inspection directory and
 the working directory outside all protected trees, the interface is:
 
 ```sh
-/absolute/install/GaoVM.app/Contents/MacOS/gaovmd --validate-upgrade \
+/absolute/outside-protected/gaovm-maintenance validate-upgrade \
   --app /absolute/install/GaoVM.app \
   --state-dir /absolute/private-state \
   --work-dir /absolute/private-upgrade-work \
@@ -178,12 +181,26 @@ the working directory outside all protected trees, the interface is:
 ```
 
 The schema input describes the pre-migration catalog, independently rechecked
-against the publication and cold source (0 means pre-catalog). The executable
-must resolve to exactly the explicitly selected installed candidate daemon.
-Source Dart execution, another binary or a staged candidate cannot opt in.
+against the publication and cold source (0 means pre-catalog). The validation
+child must resolve to exactly the explicitly selected installed candidate daemon.
+Source Dart execution of that child, another binary or a staged candidate cannot
+opt in; this does not prohibit the outside-app operator's source invocation.
 Native signatures, component/contract identity, publication/preparation receipts,
 service status, unresolved/other processes and real state/work/fence ownership
 are still checked; only the exact versioned candidate self PID is admitted.
+
+The launcher first holds all cold ownership and verifies the complete inputs,
+then releases the actual state/work/fence/namespace locks and all protected
+app/state readers while retaining the persistent startup marker and only the
+in-memory manifest/identity expectations. A read-only app descriptor in the
+parent would still block the child's real open-reference check. The one-shot child
+independently reacquires those locks and rechecks admission; a receipt or copied
+lock never substitutes for ownership. A private stdin handshake binds a random
+256-bit per-launch nonce to the parent's native observation of the original
+child's versioned PID/UID/start time/executable. No nonce enters arguments,
+environment, logs or durable records; only its grant digest is sealed in the
+v3 validation intent. The internal daemon entry remains `--validate-upgrade`;
+its private `--launch-grant-stdin` handoff is not an ordinary startup option.
 
 The actual catalog is migrated under the original-state lease, its writer closes,
 and the normal read handlers/doctor are exercised over the restricted private
@@ -193,13 +210,29 @@ released, and the persistent read-only interval is verified unchanged. See the
 [validation composition](MACOS_VALIDATION_ISOLATION.md#candidate-only-controlled-validation)
 for the exact limits and evidence.
 
-Success is one `gaovm.cold-validation-command.v1` JSON object with
+The launcher drains bounded stdout/stderr and waits for the original child exit,
+without applying the short native-probe deadline to a catalog migration. It
+then independently reopens sealed recovery with zero candidate/daemon/driver
+processes and actual state ownership. The sealed intent/record must match this
+launch grant, preflight preparation/publication bindings and the child's exact
+stdout record. Complete post-validation state, original rollback inputs and
+candidate bytes/native metadata are rechecked after native observations. No
+automatic retry, adoption of another launch, registration or fence removal occurs.
+The candidate reader is reopened only after the original child exit, spans
+independent native-identity recovery and the final full manifest comparison,
+and never grants a parent-PID exception to cold admission.
+
+Launcher success is one `gaovm.cold-validation-launch-command.v1` JSON object with
 `phase: candidate_validated` and the applied catalog schema. A sealed full record
 is retained at `work/validation/completed/record.json`, with an independent full
 post-validation state snapshot at `work/validation/validated-state`. The original
 rollback pair remains intact. The process exits; ordinary startup stays fenced,
 and `committed`, `activation_authorized` and `rollback_authorized` stay false.
 Neither a green doctor nor this receipt authorizes registration or commit.
+The launcher additionally reports `candidate_exit_confirmed: true` and
+`post_exit_reverified: true`. The candidate's own sealed record keeps the
+`gaovm.cold-validation-command.v1` format. Interruptions/failures retain all
+outputs and the fence; do not remove inputs while original child work is pending.
 
 Partial/unknown validation output is retained. A blind repeat refuses it.
 Do not delete the fence/output to force retry, reuse publication-only recovery
@@ -236,8 +269,9 @@ no longer referenced by the migrated catalog. No API or worker is started.
 The fixed `validation/` directory must contain exactly `intent.json`,
 `validated-state/`, `.gaovm-maintenance.lock` and either `completed/` or
 `.completed.partial/`. Both completion forms require the same complete sealed
-`record.json`. The v2 intent binds the original validation workspace inode;
-older unbound intents are retained and refused, not silently upgraded. Missing
+`record.json`. Bound v2 and v3 intents bind the original validation workspace
+inode; v3 additionally records a launch-grant digest when launched that way.
+Older unbound intents are retained and refused, not silently upgraded. Missing
 or unknown entries, partial state snapshots, changed bytes/metadata/identities,
 an active or unresolved process and mismatched explicit inputs are refused.
 

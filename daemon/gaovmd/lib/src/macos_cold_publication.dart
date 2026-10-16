@@ -1,5 +1,10 @@
+import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
+import 'package:crypto/crypto.dart';
+
+import 'candidate_validation_launch.dart';
 import 'cold_catalog_inspection.dart';
 import 'cold_state_lease.dart';
 import 'image_filesystem.dart';
@@ -10,11 +15,13 @@ import 'macos_open_references.dart';
 import 'macos_release_inspection.dart';
 import 'maintenance_command.dart';
 import 'maintenance_state_fence.dart';
+import 'maintenance_tree.dart';
 
 export 'macos_cold_command.dart' show ColdPublicationFailure;
 
 part 'macos_cold_uninstall.dart';
 part 'macos_cold_validation_recovery.dart';
+part 'macos_candidate_validation_launch.dart';
 
 /// The source/operator executable interface, not a daemon API or driver proxy.
 /// Injection is confined to native observations, never command-line bypasses.
@@ -24,7 +31,17 @@ Future<Map<String, Object?>> runMacOsColdPublication(
   ReleaseInspectionHost host = const MacOsReleaseInspectionHost(),
   MacOsOpenReferences? observer,
   Future<DriverInventorySnapshot> Function(String)? inventory,
+  CandidateValidationLauncher? candidateLauncher,
 }) async {
+  if (arguments.isNotEmpty && arguments.first == 'validate-upgrade') {
+    return runMacOsColdValidationLaunch(
+      arguments,
+      host: host,
+      observer: observer,
+      inventory: inventory,
+      launcher: candidateLauncher,
+    );
+  }
   if (arguments.isNotEmpty && arguments.first == 'resume-validation') {
     return runMacOsColdValidationRecovery(
       arguments,

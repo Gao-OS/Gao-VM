@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:crypto/crypto.dart';
 
+import 'candidate_validation_launch.dart';
 import 'candidate_validation_session.dart';
 import 'cold_catalog_inspection.dart';
 import 'cold_state_lease.dart';
@@ -27,6 +28,7 @@ Future<Map<String, Object?>> runMacOsCandidateValidation(
   Future<DriverInventorySnapshot> Function(String)? inventory,
   Future<String> Function()? currentExecutable,
   DoctorHost? doctorHost,
+  ValidationLaunchGrant? launchGrant,
 }) async {
   final options = _validationOptions(arguments);
   final execution = OwnedColdInspection(host);
@@ -93,6 +95,9 @@ Future<Map<String, Object?>> runMacOsCandidateValidation(
       host: coldHost,
       maintenanceFence: fence,
     );
+    launchGrant?.verifyProcess(
+      coldHost.validationAdmissionEvidence['executing_process'],
+    );
     stage = 'pre_validation';
     before = scratch.createDirectory('before');
     await scratch.sync();
@@ -124,7 +129,7 @@ Future<Map<String, Object?>> runMacOsCandidateValidation(
     );
     journal = work.createDirectory('.validation.partial');
     final intent = <String, Object?>{
-      'format': 'gaovm.candidate-validation-intent.v2',
+      'format': 'gaovm.candidate-validation-intent.v3',
       'workspace_identity': await journal.maintenanceIdentity(),
       'source_app': options.app,
       'source_state': options.state,
@@ -137,6 +142,7 @@ Future<Map<String, Object?>> runMacOsCandidateValidation(
           'sha256:${sha256.convert(utf8.encode(jsonEncode(prepared.toJson())))}',
       'publication': coldHost.validationAdmissionEvidence,
       'fence_path': fence.path,
+      'launch_grant_digest': launchGrant?.digest,
     };
     await _writeValidationRecord(journal, 'intent.json', intent);
     await journal.sync();

@@ -98,9 +98,25 @@ path, the complete signed publication/preparation records and matching native
 identity, a held persistent fence and the actual original-state kernel lease.
 Native census permits only this exact versioned self PID; another daemon,
 driver, unresolved PID or changed self identity still prevents cold admission.
-The v2 durable intent binds the validation workspace inode,
+The v3 durable intent binds the validation workspace inode,
 publication/preparation digests and the candidate inode/manifest plus the
-observed self identity. Marker files and copied locks are not ownership grants.
+observed self identity. An outside-app verified launch additionally binds the
+private stdin grant digest; direct internal validation has a null grant digest.
+Complete bound v2 intents remain recoverable, while unbound v1 intents refuse.
+Marker files and copied locks are not ownership grants.
+
+The outside-app maintenance tool verifies the candidate before starting it,
+releases its real state/work/namespace ownership for the child's independent
+admission, closes every protected app/state reader, and retains the persistent
+marker plus in-memory expected evidence. Even read-only parent app descriptors
+would otherwise block native open-reference admission. It observes the original child's
+versioned native identity before sending a private per-launch grant over stdin.
+After that same child exits, it independently re-establishes a zero-process cold
+boundary and verifies that sealed recovery matches this launch's grant,
+preflight bindings and exact stdout record. It never adopts another launch's
+completion or equates process exit with a completed upgrade transaction.
+The candidate reader is reopened after the owned exit, before native recovery,
+and kept through the final complete comparison; no parent-PID exemption is added.
 
 Under that same lease, the coordinator opens the actual catalog for controlled
 schema/legacy migration, closes the writer and reopens it natively read-only.

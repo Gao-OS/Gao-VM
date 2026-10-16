@@ -6,6 +6,7 @@ import 'package:crypto/crypto.dart';
 import 'package:gaovm_models/gaovm_models.dart';
 import 'package:sqlite3/sqlite3.dart';
 
+import 'candidate_validation_launch.dart';
 import 'cold_state_lease.dart';
 import 'driver_runtime_metadata.dart';
 import 'image_filesystem.dart';

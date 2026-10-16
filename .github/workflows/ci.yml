@@ -128,6 +128,7 @@ jobs:
         run: >-
           dart test test/macos_release_inspection_test.dart
           test/cold_publication_tool_test.dart
+          test/candidate_validation_launch_test.dart
           test/macos_driver_inventory_test.dart --concurrency=1
 
       - name: Check validation request and catalog write isolation

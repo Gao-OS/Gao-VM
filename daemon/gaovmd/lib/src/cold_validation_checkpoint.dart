@@ -34,6 +34,7 @@ final class ColdValidationCheckpoint {
     required String newVersion,
     required String teamIdentifier,
     required int sourceCatalogSchema,
+    ValidationLaunchExpectation? expectedLaunch,
   }) async {
     final root = work.directory('validation');
     OwnedImageLock? lock;
@@ -74,8 +75,14 @@ final class ColdValidationCheckpoint {
       } finally {
         checkpoint.close();
       }
-      if (intent.length != 12 ||
-          intent['format'] != 'gaovm.candidate-validation-intent.v2' ||
+      final boundIntent =
+          intent.length == 12 &&
+              intent['format'] == 'gaovm.candidate-validation-intent.v2' ||
+          intent.length == 13 &&
+              intent['format'] == 'gaovm.candidate-validation-intent.v3' &&
+              (intent['launch_grant_digest'] == null ||
+                  _digest(intent['launch_grant_digest']));
+      if (!boundIntent ||
           !_same(
             intent['workspace_identity'],
             await root.maintenanceIdentity(),
@@ -119,6 +126,7 @@ final class ColdValidationCheckpoint {
           'unrecognized sealed validation checkpoint or explicit inputs disagree',
         );
       }
+      expectedLaunch?.verify(intent, record);
       PublicCapabilities.fromJson(
         record['public_capabilities'] as Map<String, Object?>,
       );

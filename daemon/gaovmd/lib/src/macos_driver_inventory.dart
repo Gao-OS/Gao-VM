@@ -90,6 +90,14 @@ final class MacOsDriverInventory {
       () => _inspect(path, pid),
     ).timeout(const Duration(seconds: 5));
   }
+
+  /// Retain ownership until the original native observation actually settles.
+  Future<DriverProcessIdentity?> inspectForMaintenance(int pid) {
+    if (pid <= 0 || pid > 0x7fffffff) throw ArgumentError.value(pid, 'pid');
+    if (!Platform.isMacOS) throw UnsupportedError('macOS inventory required');
+    final path = executablePath;
+    return Isolate.run(() => _inspect(path, pid));
+  }
 }
 
 /// Caller must establish generation ownership before invoking this primitive.

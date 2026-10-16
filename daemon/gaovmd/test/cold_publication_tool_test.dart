@@ -41,6 +41,7 @@ void main() {
     expect(result.stdout, contains('publish-upgrade'));
     expect(result.stdout, contains('resume-publication'));
     expect(result.stdout, contains('resume-validation'));
+    expect(result.stdout, contains('validate-upgrade'));
     expect(result.stdout, contains('uninstall-app'));
     expect(result.stdout, contains('resume-uninstall'));
     expect(result.stdout, contains('does not activate'));
@@ -75,6 +76,41 @@ void main() {
   resumeValidation[0] = 'resume-validation';
   final fromIndex = resumeValidation.indexOf('--from');
   resumeValidation.removeRange(fromIndex, fromIndex + 2);
+  final validation = [...resumeValidation]..[0] = 'validate-upgrade';
+  for (final invalid in [
+    ['validate-upgrade'],
+    ['validate-upgrade', '--app'],
+    [...validation, '--from', 'publication'],
+    [...validation, '--candidate-app', '/other/Candidate.app'],
+    [...validation, '--allow-unsafe', 'true'],
+    [...validation, '--launch-grant-stdin', 'true'],
+    [...validation, '--catalog-schema', '21'],
+    [...validation]..[validation.indexOf('--catalog-schema') + 1] = '021',
+    [...validation]..[validation.indexOf('--catalog-schema') + 1] = '-1',
+    [...validation]
+      ..[validation.indexOf('--catalog-schema') + 1] = '2147483648',
+  ]) {
+    test(
+      'malformed verified validation launch refuses before path inspection: $invalid',
+      () async {
+        final result = await run(invalid);
+        expect(
+          result.exitCode,
+          2,
+          reason: '${result.stderr}\n${result.stdout}',
+        );
+        expect(result.stderr, isEmpty);
+        final report = jsonDecode(result.stdout as String) as Map;
+        expect(report['format'], 'gaovm.cold-validation-launch-command.v1');
+        expect(report['stage'], 'inputs');
+        expect(report['status'], 'refused');
+        expect(report['retain_inputs_and_outputs'], true);
+        expect(report['activation_authorized'], false);
+        expect(report['rollback_authorized'], false);
+        expect(report['committed'], false);
+      },
+    );
+  }
   for (final invalid in [
     ['resume-validation'],
     ['resume-validation', '--app'],

@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:gaovmd/gaovmd.dart';
+import 'package:gaovmd/src/candidate_validation_launch.dart';
 import 'package:gaovmd/src/daemon_launch_configuration.dart';
 import 'package:gaovmd/src/daemon_component_info.dart';
 import 'package:gaovmd/src/macos_cold_validation.dart';
@@ -30,10 +31,14 @@ Future<void> main(List<String> args) async {
   }
   if (args.isNotEmpty && args.first == '--validate-upgrade') {
     try {
+      final privateGrant = args.length > 1 && args[1] == '--launch-grant-stdin';
+      final grant = privateGrant
+          ? await readValidationLaunchGrant(stdin)
+          : null;
       final result = await runMacOsCandidateValidation([
         'validate-upgrade',
-        ...args.skip(1),
-      ]);
+        ...args.skip(privateGrant ? 2 : 1),
+      ], launchGrant: grant);
       stdout.writeln(jsonEncode(result));
     } catch (error) {
       final cause = error is ColdPublicationFailure ? error.cause : error;

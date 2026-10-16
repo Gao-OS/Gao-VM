@@ -7,6 +7,7 @@ Future<Map<String, Object?>> runMacOsColdValidationRecovery(
   ReleaseInspectionHost host = const MacOsReleaseInspectionHost(),
   MacOsOpenReferences? observer,
   Future<DriverInventorySnapshot> Function(String)? inventory,
+  ValidationLaunchExpectation? expectedLaunch,
 }) async {
   if (arguments.isEmpty || arguments.first != 'resume-validation') {
     throw const FormatException('explicit resume-validation action required');
@@ -78,6 +79,7 @@ Future<Map<String, Object?>> runMacOsColdValidationRecovery(
       newVersion: options.newVersion,
       teamIdentifier: options.team,
       sourceCatalogSchema: options.catalogSchema!,
+      expectedLaunch: expectedLaunch,
     );
     stage = 'cold';
     coldHost = await MacOsColdStateHost.openPublished(
