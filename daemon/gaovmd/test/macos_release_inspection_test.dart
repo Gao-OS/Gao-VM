@@ -6020,6 +6020,759 @@ void main() {
       return (prepared, fence, transaction);
     }
 
+    Future<ColdRollbackPreparation> prepareRollback(
+      MaintenanceStateFence fence, {
+      bool acceptHistoryRewind = true,
+      int? sourceCatalogSchema = 21,
+      MacOsOpenReferences? observer,
+    }) => ColdRollbackPreparation.prepare(
+      lease,
+      fence,
+      backups,
+      'upgrade',
+      acceptHistoryRewind: acceptHistoryRewind,
+      oldVersion: '0.1.0',
+      newVersion: '0.1.0',
+      teamIdentifier: 'ABCDEFGHIJ',
+      sourceCatalogSchema: sourceCatalogSchema,
+      host: host,
+      observer:
+          observer ??
+          MacOsOpenReferences(
+            command: (_, _) async => ProcessResult(pid, 1, '', ''),
+          ),
+      inventory: (_) async =>
+          DriverInventorySnapshot(processes: [], unresolvedProcessIds: []),
+    );
+
+    Future<ColdRollbackPreparation> reopenRollback(
+      MaintenanceStateFence fence,
+      OwnedImageDirectory scratch,
+    ) => ColdRollbackPreparation.open(
+      lease,
+      fence,
+      backups,
+      'upgrade',
+      scratch,
+      acceptHistoryRewind: true,
+      oldVersion: '0.1.0',
+      newVersion: '0.1.0',
+      teamIdentifier: 'ABCDEFGHIJ',
+      sourceCatalogSchema: 21,
+      host: host,
+      observer: MacOsOpenReferences(
+        command: (_, _) async => ProcessResult(pid, 1, '', ''),
+      ),
+      inventory: (_) async =>
+          DriverInventorySnapshot(processes: [], unresolvedProcessIds: []),
+    );
+
+    for (final condition in [
+      'unchanged external files',
+      'changed external bytes',
+      'external writer',
+    ]) {
+      test(
+        'rollback preparation handles pre-catalog $condition without initializing a catalog',
+        () async {
+          activeRetirementChecks++;
+          ColdRollbackPreparation? rollback;
+          MaintenanceTree? current;
+          try {
+            lease.close();
+            await File(
+              '${state.path}/gaovm.db',
+            ).rename('${temporary.path}/retained-modern.db');
+            final kernel = await File(
+              '${temporary.path}/rollback-kernel',
+            ).writeAsString('original kernel', flush: true);
+            final disk = await File(
+              '${temporary.path}/rollback-disk',
+            ).writeAsString('original external disk', flush: true);
+            for (final file in [kernel, disk]) imageFileMode(file.path, 0x180);
+            await File('${state.path}/config.json').writeAsString(
+              jsonEncode({
+                'boot': {'loader': 'linux', 'kernelPath': kernel.path},
+                'disk': {'path': disk.path},
+              }),
+              flush: true,
+            );
+            imageFileMode('${state.path}/config.json', 0x180);
+            lease = await ColdStateLease.acquire(
+              state,
+              bundleIdentifier: 'org.gaovm.tests.Release',
+              host: coldHost,
+            );
+            final (snapshot, fence, upgrade) = await fencedPreparation();
+            upgrade.close();
+            snapshot.close();
+            await File(
+              '${state.path}/gaovm.db',
+            ).writeAsString('retain failed first migration', flush: true);
+            imageFileMode('${state.path}/gaovm.db', 0x180);
+            if (condition == 'changed external bytes') {
+              await disk.writeAsString('external disk changed', flush: true);
+            }
+            current = await MaintenanceTree.open(state);
+            final before = await current.capture(nativeMetadata: true);
+            final references = MacOsOpenReferences(
+              command: (_, arguments) async =>
+                  condition == 'external writer' && arguments.last == disk.path
+                  ? ProcessResult(pid, 0, 'p${pid + 1}\x00f3\x00\n', '')
+                  : ProcessResult(pid, 1, '', ''),
+            );
+            Future<void> prepare() async {
+              rollback = await prepareRollback(
+                fence,
+                sourceCatalogSchema: null,
+                observer: references,
+              );
+            }
+
+            if (condition == 'unchanged external files') {
+              await prepare();
+              expect(rollback!.toJson()['catalog_schema'], isNull);
+              expect(
+                await FileSystemEntity.type(
+                  '${rollback!.statePath}/gaovm.db',
+                  followLinks: false,
+                ),
+                FileSystemEntityType.notFound,
+              );
+              await rollback!.verify();
+            } else {
+              await expectLater(
+                prepare(),
+                condition == 'external writer'
+                    ? throwsA(isA<ColdStateFailure>())
+                    : throwsFormatException,
+              );
+            }
+            await current.verify(before, nativeMetadata: true);
+            expect(await kernel.readAsString(), 'original kernel');
+            expect(
+              await disk.readAsString(),
+              condition == 'changed external bytes'
+                  ? 'external disk changed'
+                  : 'original external disk',
+            );
+            await expectLater(
+              MaintenanceStateFence.requireUnfenced(state),
+              throwsA(isA<MaintenanceFenceActive>()),
+            );
+          } catch (_) {
+            retainInputs = true;
+            rethrow;
+          } finally {
+            rollback?.close();
+            current?.close();
+            activeRetirementChecks--;
+          }
+        },
+        timeout: const Timeout(Duration(minutes: 3)),
+      );
+    }
+
+    for (final lateWriter in [false, true]) {
+      test(
+        'rollback preparation refuses an original-state reference ${lateWriter ? "after checkpoint" : "before copying"}',
+        () async {
+          activeRetirementChecks++;
+          ColdRollbackPreparation? rollback;
+          MaintenanceTree? current;
+          try {
+            final (snapshot, fence, upgrade) = await fencedPreparation();
+            upgrade.close();
+            snapshot.close();
+            current = await MaintenanceTree.open(state);
+            final before = await current.capture(nativeMetadata: true);
+            final references = MacOsOpenReferences(
+              command: (_, arguments) async =>
+                  arguments.last ==
+                          '${backups.path}/upgrade/original-state/payload' &&
+                      (!lateWriter ||
+                          maintenancePathEntryExists(
+                            '${backups.path}/rollback/prepared/record.json',
+                          ))
+                  ? ProcessResult(pid, 0, 'p${pid + 1}\x00f3\x00\n', '')
+                  : ProcessResult(pid, 1, '', ''),
+            );
+            await expectLater(() async {
+              rollback = await prepareRollback(fence, observer: references);
+            }, throwsA(isA<ColdStateFailure>()));
+            if (!lateWriter) {
+              for (final name in ['app', 'state']) {
+                expect(
+                  maintenancePathEntryExists('${backups.path}/rollback/$name'),
+                  isFalse,
+                );
+              }
+            }
+            await current.verify(before, nativeMetadata: true);
+            await lease.verify();
+            final root = await OwnedImageDirectory.open(state);
+            final contender = await root.tryAcquireMaintenanceLock(
+              '.gaovmd.lock',
+              create: false,
+            );
+            try {
+              expect(contender, isNull);
+            } finally {
+              contender?.close();
+              root.close();
+            }
+            await expectLater(
+              MaintenanceStateFence.requireUnfenced(state),
+              throwsA(isA<MaintenanceFenceActive>()),
+            );
+          } catch (_) {
+            retainInputs = true;
+            rethrow;
+          } finally {
+            rollback?.close();
+            current?.close();
+            activeRetirementChecks--;
+          }
+        },
+        timeout: const Timeout(Duration(minutes: 3)),
+      );
+    }
+
+    test(
+      'rollback preparation requires history rewind acceptance before writing output',
+      () async {
+        activeRetirementChecks++;
+        try {
+          final (_, fence, _) = await fencedPreparation();
+          final tree = await MaintenanceTree.open(temporary);
+          try {
+            final before = await tree.capture(nativeMetadata: true);
+            await expectLater(
+              prepareRollback(fence, acceptHistoryRewind: false),
+              throwsFormatException,
+            );
+            await tree.verify(before, nativeMetadata: true);
+          } finally {
+            tree.close();
+          }
+        } catch (_) {
+          retainInputs = true;
+          rethrow;
+        } finally {
+          activeRetirementChecks--;
+        }
+      },
+      timeout: const Timeout(Duration(minutes: 3)),
+    );
+
+    test(
+      'rollback preparation retains both owners until pending verification settles',
+      () async {
+        activeRetirementChecks++;
+        ColdRollbackPreparation? rollback;
+        Future<void>? observed;
+        final entered = Completer<void>(), release = Completer<void>();
+        Object? failure;
+        try {
+          final (snapshot, fence, upgrade) = await fencedPreparation();
+          upgrade.close();
+          snapshot.close();
+          rollback = await prepareRollback(fence);
+          coldHost.onStatus = () async {
+            if (!entered.isCompleted) entered.complete();
+            await release.future;
+          };
+          observed = rollback.verify().then<void>(
+            (_) {},
+            onError: (Object error, StackTrace stack) {
+              failure = error;
+            },
+          );
+          await entered.future;
+          expect(rollback.close, throwsStateError);
+          await expectLater(rollback.verify(), throwsStateError);
+          for (final path in [state.path, rollback.statePath]) {
+            final root = await OwnedImageDirectory.open(Directory(path));
+            final contender = await root.tryAcquireMaintenanceLock(
+              '.gaovmd.lock',
+              create: false,
+            );
+            try {
+              expect(contender, isNull);
+            } finally {
+              contender?.close();
+              root.close();
+            }
+          }
+          release.complete();
+          await observed;
+          expect(failure, isNull);
+          rollback.close();
+          final root = await OwnedImageDirectory.open(
+            Directory(rollback.statePath),
+          );
+          final next = await DaemonOwnership.tryAcquire(root);
+          try {
+            expect(next, isNotNull);
+            await next!.verify();
+          } finally {
+            next?.close();
+            root.close();
+          }
+          await lease.verify();
+        } catch (_) {
+          retainInputs = true;
+          rethrow;
+        } finally {
+          if (!release.isCompleted) release.complete();
+          await observed;
+          coldHost.onStatus = null;
+          rollback?.close();
+          activeRetirementChecks--;
+        }
+      },
+      timeout: const Timeout(Duration(minutes: 3)),
+    );
+
+    test(
+      'rollback preparation uses the complete old pair without opening a damaged current catalog',
+      () async {
+        activeRetirementChecks++;
+        try {
+          final (snapshot, fence, upgrade) = await fencedPreparation();
+          upgrade.close();
+          snapshot.close();
+          await File('${state.path}/gaovm.db').writeAsString(
+            'incomplete migration; preserve for investigation',
+            flush: true,
+          );
+          await File(
+            '${state.path}/unknown-data',
+          ).writeAsString('post-upgrade data must survive', flush: true);
+          final current = await MaintenanceTree.open(state);
+          final pair = await MaintenanceTree.open(
+            Directory('${backups.path}/upgrade'),
+          );
+          ColdRollbackPreparation? rollback;
+          try {
+            final currentBefore = await current.capture(nativeMetadata: true);
+            final pairBefore = await pair.capture(nativeMetadata: true);
+            rollback = await prepareRollback(fence);
+            final report = rollback.toJson();
+            expect(report['phase'], 'rollback_prepared');
+            expect(report['catalog_schema'], 21);
+            expect(report['ordinary_startup_fenced'], true);
+            expect(report['installed_pair_restored'], false);
+            expect(report['committed'], false);
+            expect(report['startup_allowed'], false);
+            expect(
+              await File('${rollback.statePath}/unknown-data').readAsString(),
+              'preserve state',
+            );
+            expect(
+              await File(
+                '${rollback.appPath}/Contents/Resources/pair-only',
+              ).readAsString(),
+              'preserve unknown app resource',
+            );
+            final root = await OwnedImageDirectory.open(
+              Directory(rollback.statePath),
+            );
+            final contender = await DaemonOwnership.tryAcquire(root);
+            try {
+              expect(contender, isNull);
+            } finally {
+              contender?.close();
+              root.close();
+            }
+            for (final entry in {
+              '${backups.path}/upgrade/original-app/payload.app':
+                  rollback.appPath,
+              '${backups.path}/upgrade/original-state/payload':
+                  rollback.statePath,
+            }.entries) {
+              final original = await MaintenanceTree.open(Directory(entry.key));
+              final restored = await MaintenanceTree.open(
+                Directory(entry.value),
+              );
+              try {
+                await restored.verify(
+                  await original.capture(nativeMetadata: true),
+                  nativeMetadata: true,
+                );
+              } finally {
+                restored.close();
+                original.close();
+              }
+            }
+            final process = await Process.start(Platform.resolvedExecutable, [
+              '--packages=${Directory.current.path}/.dart_tool/package_config.json',
+              '${Directory.current.path}/test/fixtures/hold_daemon_ownership.dart',
+              rollback.statePath,
+            ]);
+            final child = OwnedTestProcess(process);
+            children.add(child);
+            await process.stdin.close();
+            final probe = await child.result();
+            expect(probe.exitCode, 3);
+            expect((probe.stdout as String).trim(), 'busy');
+            expect(child.exitConfirmed, true);
+            await rollback.verify();
+            await current.verify(currentBefore, nativeMetadata: true);
+            await pair.verify(pairBefore, nativeMetadata: true);
+            await expectLater(
+              MaintenanceStateFence.requireUnfenced(state),
+              throwsA(isA<MaintenanceFenceActive>()),
+            );
+          } finally {
+            rollback?.close();
+            pair.close();
+            current.close();
+          }
+        } catch (_) {
+          retainInputs = true;
+          rethrow;
+        } finally {
+          activeRetirementChecks--;
+        }
+      },
+      timeout: const Timeout(Duration(minutes: 3)),
+    );
+
+    for (final target in {
+      'original snapshot': 'upgrade',
+      'restoration storage': 'rollback',
+    }.entries) {
+      test(
+        'rollback preparation refuses a late changed ${target.key} namespace lock',
+        () async {
+          activeRetirementChecks++;
+          ColdRollbackPreparation? rollback;
+          try {
+            final (snapshot, fence, upgrade) = await fencedPreparation();
+            upgrade.close();
+            snapshot.close();
+            var changed = false;
+            final lock = File(
+              '${backups.path}/${target.value}/.gaovm-maintenance.lock',
+            );
+            coldHost.onStatus = () async {
+              if (!changed &&
+                  File(
+                    '${backups.path}/rollback/prepared/record.json',
+                  ).existsSync()) {
+                changed = true;
+                await lock.writeAsString(
+                  'foreign namespace bytes',
+                  flush: true,
+                );
+              }
+            };
+            await expectLater(() async {
+              rollback = await prepareRollback(fence);
+            }(), throwsFormatException);
+            expect(changed, true);
+            expect(await lock.readAsString(), 'foreign namespace bytes');
+            await lease.verify();
+            await expectLater(
+              MaintenanceStateFence.requireUnfenced(state),
+              throwsA(isA<MaintenanceFenceActive>()),
+            );
+          } catch (_) {
+            retainInputs = true;
+            rethrow;
+          } finally {
+            coldHost.onStatus = null;
+            rollback?.close();
+            activeRetirementChecks--;
+          }
+        },
+        timeout: const Timeout(Duration(minutes: 3)),
+      );
+    }
+
+    for (final partial in [false, true]) {
+      test(
+        'rollback preparation reopens a complete ${partial ? "sealed partial" : "checkpoint"} under fresh real ownership',
+        () async {
+          activeRetirementChecks++;
+          ColdRollbackPreparation? rollback;
+          MaintenanceStateFence? recoveredFence;
+          OwnedImageDirectory? scratch;
+          MaintenanceTree? retained;
+          try {
+            final (snapshot, fence, upgrade) = await fencedPreparation();
+            upgrade.close();
+            snapshot.close();
+            await File(
+              '${state.path}/gaovm.db',
+            ).writeAsString('retain interrupted migration', flush: true);
+            rollback = await prepareRollback(fence);
+            final before = rollback.toJson();
+            retained = await MaintenanceTree.open(Directory(rollback.path));
+            final manifest = await retained.capture(nativeMetadata: true);
+            rollback.close();
+            if (partial) {
+              await Directory(
+                '${rollback.path}/prepared',
+              ).rename('${rollback.path}/.prepared.partial');
+            }
+            fence.close();
+            lease.close();
+            recoveredFence = await MaintenanceStateFence.open(state);
+            lease = await ColdStateLease.acquire(
+              state,
+              bundleIdentifier: 'org.gaovm.tests.Release',
+              host: coldHost,
+              maintenanceFence: recoveredFence,
+            );
+            final directory = await Directory(
+              '${temporary.path}/rollback-recovery-inspection',
+            ).create();
+            imageFileMode(directory.path, 0x1c0);
+            scratch = await OwnedImageDirectory.open(directory);
+            rollback = await reopenRollback(recoveredFence, scratch);
+            expect(rollback.toJson(), before);
+            await rollback.verify();
+            if (partial) {
+              Map<String, Object?> normalized(Map<String, Object?> value) {
+                final copy =
+                    jsonDecode(jsonEncode(value)) as Map<String, Object?>;
+                // Only the journal root mtime changes when its fixed completion
+                // entry moves; every payload's complete native manifest stays exact.
+                ((copy[''] as Map)['metadata'] as Map).remove('modified');
+                return copy;
+              }
+
+              expect(
+                normalized(await retained.capture(nativeMetadata: true)),
+                normalized(manifest),
+              );
+              expect(
+                await Directory('${rollback.path}/.prepared.partial').exists(),
+                false,
+              );
+              expect(
+                await Directory('${rollback.path}/prepared').exists(),
+                true,
+              );
+            } else {
+              await retained.verify(manifest, nativeMetadata: true);
+            }
+            expect(
+              await File('${state.path}/gaovm.db').readAsString(),
+              'retain interrupted migration',
+            );
+            final root = await OwnedImageDirectory.open(
+              Directory(rollback.statePath),
+            );
+            final contender = await DaemonOwnership.tryAcquire(root);
+            try {
+              expect(contender, isNull);
+            } finally {
+              contender?.close();
+              root.close();
+            }
+            await expectLater(
+              MaintenanceStateFence.requireUnfenced(state),
+              throwsA(isA<MaintenanceFenceActive>()),
+            );
+          } catch (_) {
+            retainInputs = true;
+            rethrow;
+          } finally {
+            rollback?.close();
+            retained?.close();
+            scratch?.close();
+            recoveredFence?.close();
+            activeRetirementChecks--;
+          }
+        },
+        timeout: const Timeout(Duration(minutes: 3)),
+      );
+    }
+
+    for (final change in [
+      'unknown entry',
+      'incomplete record',
+      'changed current state',
+      'substituted state',
+      'forged commit',
+    ]) {
+      test(
+        'rollback preparation recovery retains $change without repair or helper execution',
+        () async {
+          activeRetirementChecks++;
+          ColdRollbackPreparation? rollback;
+          OwnedImageDirectory? scratch;
+          MaintenanceTree? retained;
+          try {
+            final (snapshot, fence, upgrade) = await fencedPreparation();
+            upgrade.close();
+            snapshot.close();
+            rollback = await prepareRollback(fence);
+            final path = rollback.path, restored = rollback.statePath;
+            rollback.close();
+            switch (change) {
+              case 'unknown entry':
+                final file = await File(
+                  '$path/unknown',
+                ).writeAsString('retain foreign output');
+                imageFileMode(file.path, 0x180);
+              case 'incomplete record':
+                await Directory(
+                  '$path/prepared',
+                ).rename('$path/.prepared.partial');
+                await File(
+                  '$path/.prepared.partial/record.json',
+                ).rename('$path/.prepared.partial/incomplete-record');
+              case 'changed current state':
+                await File(
+                  '${state.path}/unknown-data',
+                ).writeAsString('retain intervening write', flush: true);
+              case 'substituted state':
+                final directory = await Directory(
+                  '${temporary.path}/replacement',
+                ).create();
+                imageFileMode(directory.path, 0x1c0);
+                final parent = await OwnedImageDirectory.open(directory);
+                final original = await MaintenanceTree.open(
+                  Directory(restored),
+                );
+                try {
+                  await original.snapshotTo(parent, 'copy');
+                } finally {
+                  original.close();
+                  parent.close();
+                }
+                await Directory(
+                  restored,
+                ).rename('${temporary.path}/retained-restoration-inode');
+                await Directory(
+                  '${directory.path}/copy/payload',
+                ).rename(restored);
+              case 'forged commit':
+                final file = File('$path/prepared/record.json');
+                final record =
+                    jsonDecode(await file.readAsString())
+                        as Map<String, Object?>;
+                record['committed'] = true;
+                imageFileMode(file.path, 0x180);
+                await file.writeAsString(
+                  '${jsonEncode(record)}\n',
+                  flush: true,
+                );
+                imageFileMode(file.path, 0x100);
+            }
+            final directory = await Directory(
+              '${temporary.path}/refused-recovery-inspection',
+            ).create();
+            imageFileMode(directory.path, 0x1c0);
+            scratch = await OwnedImageDirectory.open(directory);
+            retained = await MaintenanceTree.open(temporary);
+            final before = await retained.capture(nativeMetadata: true);
+            final executed = host.executedRoles.length;
+            await expectLater(
+              () async {
+                rollback = await reopenRollback(fence, scratch!);
+              }(),
+              throwsA(
+                anyOf(isA<FormatException>(), isA<FileSystemException>()),
+              ),
+            );
+            expect(host.executedRoles.length, executed);
+            await retained.verify(before, nativeMetadata: true);
+            await lease.verify();
+            await expectLater(
+              MaintenanceStateFence.requireUnfenced(state),
+              throwsA(isA<MaintenanceFenceActive>()),
+            );
+          } catch (_) {
+            retainInputs = true;
+            rethrow;
+          } finally {
+            rollback?.close();
+            retained?.close();
+            scratch?.close();
+            activeRetirementChecks--;
+          }
+        },
+        timeout: const Timeout(Duration(minutes: 3)),
+      );
+    }
+
+    for (final change in [
+      'current state',
+      'restoration bytes',
+      'restoration metadata',
+      'completion flags',
+    ]) {
+      test(
+        'rollback preparation refuses a post-checkpoint change to $change',
+        () async {
+          activeRetirementChecks++;
+          ColdRollbackPreparation? rollback;
+          try {
+            final (snapshot, fence, upgrade) = await fencedPreparation();
+            upgrade.close();
+            snapshot.close();
+            var changed = false;
+            coldHost.onStatus = () async {
+              final record = File(
+                '${backups.path}/rollback/prepared/record.json',
+              );
+              if (changed || !record.existsSync()) return;
+              changed = true;
+              switch (change) {
+                case 'current state':
+                  await File(
+                    '${state.path}/unknown-data',
+                  ).writeAsString('retain newer state', flush: true);
+                case 'restoration bytes':
+                  await File(
+                    '${backups.path}/rollback/state/payload/unknown-data',
+                  ).writeAsString('retain altered copy', flush: true);
+                case 'restoration metadata':
+                  imageFileMode(
+                    '${backups.path}/rollback/app/payload.app/Contents/Resources/pair-only',
+                    0x1a0,
+                  );
+                case 'completion flags':
+                  final value =
+                      jsonDecode(await record.readAsString())
+                          as Map<String, Object?>;
+                  value['committed'] = true;
+                  imageFileMode(record.path, 0x180);
+                  await record.writeAsString(
+                    '${jsonEncode(value)}\n',
+                    flush: true,
+                  );
+                  imageFileMode(record.path, 0x100);
+              }
+            };
+            await expectLater(() async {
+              rollback = await prepareRollback(fence);
+            }(), throwsFormatException);
+            expect(changed, true);
+            expect(await Directory('${backups.path}/rollback').exists(), true);
+            await lease.verify();
+            await expectLater(
+              MaintenanceStateFence.requireUnfenced(state),
+              throwsA(isA<MaintenanceFenceActive>()),
+            );
+          } catch (_) {
+            retainInputs = true;
+            rethrow;
+          } finally {
+            coldHost.onStatus = null;
+            rollback?.close();
+            activeRetirementChecks--;
+          }
+        },
+        timeout: const Timeout(Duration(minutes: 3)),
+      );
+    }
+
     test(
       'prepared upgrade publishes a candidate without releasing original state ownership',
       () async {
