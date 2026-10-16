@@ -1712,3 +1712,100 @@ failure/crash/low-disk matrix remain unfinished. Historical nonzero-schema
 migration still lacks dedicated command evidence. No push, PR, release, real
 installed app/state/service/VM operation, machine switch or Apple Silicon/
 VZ/GaoOS execution occurred. M8/MVP and the full goal remain open.
+
+## 2026-10-16 verified outside-app candidate-validation launch
+
+Local commit `291ac89` adds the outside-app maintenance `validate-upgrade`
+action. It verifies the signed published candidate, original app/state rollback
+pair, strict pre-migration source and actual cold ownership before launching the
+exact installed candidate daemon. It releases actual state/work/namespace locks
+for the child's independent admission while leaving the persistent startup fence
+in place. This is controlled validation, not ordinary startup or activation.
+See the [operator boundary](MACOS_COLD_MAINTENANCE.md#candidate-only-validation).
+
+A private stdin grant binds a fresh 256-bit nonce to the original child's native
+PID/UID/executable/start time/PID version. The nonce is not placed in arguments,
+environment, logs or durable files; only its digest enters the bound v3 intent.
+Both output pipes are bounded and drained, including on failure. The launcher
+waits for its original child exit, independently reacquires cold ownership and
+re-verifies sealed recovery against the exact grant, preflight publication/
+preparation and stdout record. It checks complete candidate bytes/native metadata
+after the last native callback. Complete bound v2 checkpoints remain recoverable;
+the compatibility test models an old sealed checkpoint with test-owned files,
+not an old-binary E2E upgrade. Unbound v1 checkpoints still refuse.
+
+Native handoff regression testing exposed a real parent-reference bug: a held
+read-only candidate directory descriptor appeared in `lsof +D` output even with
+exit status 1. The red runner exited after **149.631 seconds**. The fix closes
+every protected app/state reader before child creation and retains only expected
+evidence in memory. After the owned exit it reopens a candidate reader spanning
+native-identity recovery and the final complete comparison. No parent-PID
+exception, signature relaxation or cold-admission bypass was added.
+
+The final handoff check uses actual native `lsof` observations of the parent
+against all four protected app/state trees. A separate real Dart child also
+acquires the existing state kernel owner and all four existing namespace locks,
+then exits before cleanup. This proves cross-process handoff, not ARM64 candidate
+execution. The complete launch check exercises real SQLite, files and restricted
+validation handlers, with explicit signature/service/process/ARM64 observation
+fixtures. Its candidate boundary is in-process, not an installed native upgrade.
+The final two-check runner emitted successful terminal JSON in **360.799
+seconds**; its original PID was then confirmed absent. No replacement runner was
+started. Owned native/probe children have confirmed original exits.
+
+Final reports under `/private/tmp/gaovm-candidate-launch.DmIuBr/` cover **129
+unique checks across eight files**, zero failures or skips, not the full suite:
+
+| Report (`.jsonl`) | Checks | Seconds |
+| --- | ---: | ---: |
+| `candidate-recovery-final` | 20 | 973.776 |
+| `v2-compatibility-final` | 1 | 247.260 |
+| `launch-admission-final` | 6 | 255.482 |
+| `launch-handoff-final` | 2 | 360.799 |
+| `owned-launch-final` | 13 | 11.096 |
+| `sqlite-isolation` | 27 | 6.628 |
+| `operator-cli-final` | 47 | 322.766 |
+| `native-process-final` | 13 | 3.503 |
+
+The eight files are candidate entrypoint, private launch, cold operator, native
+driver inventory, release inspection, maintenance command, SQLite database and
+native read-only validation tests. Malformed CLI inputs and untrusted/non-cold
+launches refuse before child creation, leave source/work unchanged and retain
+the fence. The recovery cohort rejects adoption of a different launch. Original CLI ten-second,
+candidate-entry thirty-second and full-launch eight-minute test deadlines were
+not increased. Separate repeated entry/positive reports are not double-counted.
+
+An earlier fixture mixed `/private/tmp` source ownership (GID 0) with a system
+temporary destination (GID 20); strict native metadata publication refused with
+EPERM. The corrected positive fixture keeps all trees beneath one private parent;
+product ownership/metadata requirements were not weakened. Failed inputs remain:
+
+- `/private/var/folders/s0/hl1d3jkx5jx3gs69033nc6d80000gp/T/gvm-release-inspection-uYH32M`
+- `/private/var/folders/s0/hl1d3jkx5jx3gs69033nc6d80000gp/T/gvm-release-inspection-DzirJK`
+- `/private/tmp/gvm-launch-RF6fEw`
+- `/private/var/folders/s0/hl1d3jkx5jx3gs69033nc6d80000gp/T/gvm-release-inspection-X7qM7H`
+
+The initial missing-action red checkpoint, metadata failure and native handoff
+failure were not promoted, retried in place or deleted. These four paths and all
+six earlier retained paths were rechecked to exist. Original failed runners have
+exited; incomplete/failed output remains diagnostic evidence, not commit authority.
+
+Final daemon analysis has no issues. Root analysis exits 0 with the same nine
+pre-existing UI informational notices. Pinned non-UI formatting checks **395
+files**, zero changes. Schema/OpenAPI validation and `git diff --check` pass;
+all 88 scoped Markdown file targets exist (anchors not checked). Both final Intel
+AOT executables compile. Empty-environment/no-HOME operator help, malformed
+launch, daemon component-info and redacted private-grant refusal pass with
+confirmed original child exits. These are entry checks, not ARM64 execution.
+The new private-launch test is selected in the existing macOS CI gate; remote CI
+and the full/default-concurrency suite were not run. The unrelated UI lockfile
+remains byte-identical and excluded. The two earlier positive local daemon-startup
+failures remain unfixed, not reclassified as passing.
+
+The verified outside-app validation launcher is now implemented. Cold commit,
+arbitrary interrupted migration/validation recovery, activation, paired whole-
+state/app rollback, first install and the full failure/crash/low-disk matrix
+remain unfinished. Historical nonzero-schema migration still lacks dedicated
+command evidence. No push, PR, release, real installed app/state/service/VM
+operation, machine switch or Apple Silicon/VZ/GaoOS execution occurred. M8/MVP
+and the full goal remain open.
