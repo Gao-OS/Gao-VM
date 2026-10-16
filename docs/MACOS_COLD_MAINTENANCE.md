@@ -396,6 +396,33 @@ intervening writes or unresolved processes can make it refuse. Fixed sealed
 directory and injected-failure coverage is not arbitrary interrupted upgrade,
 process-kill/power-loss or native installed acceptance.
 
+## Internal rollback preservation boundary
+
+There is still no `rollback-upgrade` operator command. The internal
+`ColdRollbackPreparation.prepare/open` can verify and independently stage the
+matching old app and whole old state without replacing the current generation.
+Its `preserveCurrentState` now implements the first cutover phase: move the entire
+current/failed state directory into the fixed `retained-current/state` checkpoint,
+keeping its actual kernel owner and publishing a second persistent startup fence
+before that path exists. The original canonical path stays fenced too, including
+while vacant and after the maintenance process releases its locks.
+
+`PreservedColdState.open` can reopen the fixed completed checkpoint, or finish a
+post-move checkpoint with a complete sealed preparation and either a missing
+completion or a complete sealed staged completion. It requires the exact original
+state inode, both active fences, complete native contents, fresh kernel ownership
+and cold observations; it never infers permission from JSON alone. Incomplete or foreign entries are
+retained and refused. Preservation includes `run/`: entries not representable by
+the full native manifest, such as links or special files, are refused rather than
+silently omitted. This is not a general interrupted-rollback recovery protocol.
+
+These internal results keep `canonical_state_restored`, `committed`,
+`startup_allowed` and `service_actions_performed` false. They do not install the
+old app/state at canonical paths, retire either fence, register or start a service,
+or authorize manual fence removal. Final paired replacement and rollback commit
+remain separate unfinished work; the cold-commit/manual-start sequence above is
+not a claim that rollback is complete.
+
 ## Data-preserving cold uninstall
 
 `uninstall-app` is a separate explicit action, not a side effect of publication.

@@ -2074,3 +2074,100 @@ started. The remaining M8/first-install/historical-schema/crash/low-disk gaps an
 manual native lifecycle/Apple Silicon/VZ/GaoOS acceptance remain open. No push, PR,
 release, real installed app/state/service/VM operation or machine switch occurred.
 M8/MVP and the full goal remain open.
+
+## 2026-10-16 retained current-state generation with persistent fencing
+
+Local implementation commit `372931c`, with test-only follow-up `cfe8f4d`, adds
+`ColdStateLease.preserveForRollback`, `PreservedColdState.open` and the first
+cutover phase `ColdRollbackPreparation.preserveCurrentState`. After revalidating
+the old pair, original external inputs and current cold boundary, the preparation
+can withdraw the entire current/failed state directory to the fixed
+`retained-current/state` checkpoint. It does not open or repair a damaged current
+catalog, install the old pair or grant startup permission.
+
+A second persistent startup fence is reserved for the retained path before that
+state directory exists. The original canonical-path fence remains active. The
+same actual kernel owner is rebound across the no-replace directory move without
+unlocking; a successful result consumes the original lease. Pending work refuses
+close/reentry. Failures retain readers/ownership through the original future and
+until explicit close. Closing either completed or failed work releases handles,
+not either persistent marker. Ordinary admission remains blocked at both names,
+including the vacant original slot. Original `verifyFor` and ordinary daemon
+admission were not relaxed to accept a different state inode.
+
+The complete native state manifest includes `run/`, unlike the persistent-state
+snapshot view. The positive fixture includes nested VM disk/NVRAM bytes, retained
+failed artifacts, serial history, unknown staging and runtime metadata. All bytes
+and native metadata survive the move. A real Unix socket fixture is refused and
+left at the original path with its owner and fence; special entries are not
+silently omitted. This fail-closed restriction is not full crashed-runtime
+preservation support.
+
+Fixed reopen requires explicit original/retained selectors, both active fences,
+the original actual state/workspace identities, complete native contents, exact
+sealed records and fresh real kernel ownership. It accepts a complete checkpoint
+without rewriting it. For the post-move gap, complete sealed preparation plus the
+proved moved original inode can finish a missing completion, or atomically
+promote a complete sealed `.completed.partial`. Native cold observations and a
+full filesystem-only closure precede completion and are rechecked afterward.
+Unknown/incomplete/ambiguous entries, changed bytes/metadata, forged flags, copied
+state, missing ownership files and an occupied original slot refuse without
+repair or early cold-helper execution. Registered services, unresolved processes,
+external references and late byte changes cannot promote the checkpoint.
+
+Native retired/published host reopen explicitly validates both fences and original
+state provenance while retaining immutable retirement/publication records. The
+normal native reopen route still refuses the relocated state without that proof;
+the destination fence cannot masquerade as its own original. Complete native-host
+reopen leaves the checkpoint, both app generations and retained state unchanged.
+Signature/component/service/process observations in these positive tests remain
+fixtures, not genuine installed acceptance.
+
+The final original runners returned exit 0 with **278 unique Dart checks across
+8 files**, zero failures or skips, including 26 new component checks. Reports are
+under `/private/tmp/gaovm-state-preservation.YHkkKk/`:
+
+| Report | Checks | Seconds |
+| --- | ---: | ---: |
+| `state-regression-final.jsonl` | 161 across 7 files | 57.079 |
+| `native-retirement-regression.jsonl` | 45 | 165.549 |
+| `paired-regression.jsonl` | 72 | 207.282 |
+
+The latter two groups share `macos_release_inspection_test.dart` but select
+distinct tests. Supporting checks cover cold leases/state snapshots, maintenance
+fences/trees/directory moves and daemon ownership/rebind. Separate final Intel
+AOT compilation of the outside-app maintenance tool and daemon succeeded. Five
+empty-environment read-only AOT checks passed (`aot-entrypoints.jsonl`): both help
+entries, daemon component evidence and refusal of commit/recovery without explicit
+inputs/acknowledgement. These are unsigned local executables, not installed native
+product acceptance. Final daemon analysis has no issues; root analysis exits 0
+with the same nine existing UI informational notices. The daemon's 321 Dart files
+pass pinned formatting, and scoped diffs pass whitespace checks. The unrelated UI
+lockfile remains byte-identical and excluded.
+
+Test-first checks caught acceptance of storage made non-private after fence
+publication and missing post-move completion recovery. Initial missing-interface
+checks failed compilation before fixture creation. The original failed runners
+have exited; these failed fixtures were rechecked to exist and retained without
+repair, retry in place or deletion:
+
+- `/private/tmp/gvm-mf-K7XqV7`
+- `/private/tmp/gvm-mf-kzeKUY`
+- `/private/tmp/gvm-mf-EkbEnq`
+
+This is internal preservation/reopen, not a `rollback-upgrade` command or a
+committed rollback. The original canonical state slot must remain vacant in this
+phase; admitting the staged old state's different inode under continuous fencing,
+canonical old-app/whole-state replacement and interrupted replacement recovery
+remain unfinished. All preservation records keep `canonical_state_restored`,
+`committed`, `startup_allowed` and `service_actions_performed` false. Neither fence
+was retired. The final rollback-commit/fence-retirement sequence is a separate
+operator decision; the accepted upgrade sequence remains cold commit followed by
+manual registration/start, never automatic startup or a native-readiness claim.
+
+The full/default-concurrency suite and remote CI were not run. The two prior
+source-Dart daemon-startup failures remain unfixed and unrerun. The remaining
+M8/first-install/historical-schema/crash/power-loss/low-disk gaps and manual native
+lifecycle/Apple Silicon/VZ/GaoOS acceptance remain open. No push, PR, release,
+real installed app/state/service/VM operation, machine switch or Chrome integration
+occurred. M8/MVP and the full goal remain open.
