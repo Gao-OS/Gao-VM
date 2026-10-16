@@ -2171,3 +2171,78 @@ M8/first-install/historical-schema/crash/power-loss/low-disk gaps and manual nat
 lifecycle/Apple Silicon/VZ/GaoOS acceptance remain open. No push, PR, release,
 real installed app/state/service/VM operation, machine switch or Chrome integration
 occurred. M8/MVP and the full goal remain open.
+
+## 2026-10-16 old-state installation behind unchanged persistent fences
+
+Local commit `cd6a6eb` adds the next internal primitive,
+`ColdStateLease.restoreForRollback` and its held `ColdStateRestoration` result.
+An independently held old whole state moves without replacement to the original
+canonical state slot. The same actual old-state kernel owner is rebound without
+unlocking; the failed/current generation and its kernel owner remain retained.
+Both persistent startup markers stay active and unchanged. No old app is moved.
+
+A separate sealed checkpoint binds the old state identity/full native manifest,
+preservation intent and both fence identities/digests, actual source/target
+parents, workspace identity and all old/current app placements and contents.
+The caller's filesystem-only callback proves the matching old pair and external
+inputs before the move. All state/app/journal evidence is independently reread
+after the last native observations. Only the held typed restoration context can
+admit this exact replacement inode for owner rebind; ordinary daemon admission,
+the original fence's `verifyFor` and normal preservation reopen remain strict.
+
+Success reports `phase: old_state_restored` and
+`canonical_state_restored: true`, but `installed_pair_restored`, `committed`,
+`startup_allowed` and `service_actions_performed` stay false. Original handles are
+consumed only on success, without prematurely releasing either real lock. Both
+restoration and typed verification refuse close/reentry while pending. An
+occupied target is neither overwritten nor adopted. Late changed state bytes
+refuse success and retain the actual post-move placement and both owners until
+explicit close; there is no automatic undo, cleanup or blind retry.
+
+Final original runners returned exit 0 with **285 unique Dart checks across
+9 files**, zero failures or skips, including 7 new component checks. Reports are
+under `/private/tmp/gaovm-state-restoration.iGthI8/`:
+
+| Report | Checks | Seconds |
+| --- | ---: | ---: |
+| `state-regression-final.jsonl` | 166 across 8 files | 75.405 |
+| `native-retirement-regression.jsonl` | 47 | 199.347 |
+| `paired-regression.jsonl` | 72 | 231.923 |
+
+The native/paired groups select distinct checks in the same file. Positive
+restoration covers complete SQLite/disk/image/VM/NVRAM/artifact/log/legacy/runtime
+trees, both kernel owners, unchanged original marker bytes, pending lifetime,
+late mutation refusal and foreign destination preservation. Retired and published
+native-host composition both pass without service actions. Files, native metadata,
+directory moves and kernel locks are real; positive signature/component/service/
+process observations remain fixtures, not installed native acceptance.
+
+Pinned daemon formatting passes for 323 Dart files. Daemon analysis has no issues;
+root analysis exits 0 with the same nine existing UI informational notices.
+Separate Intel AOT compilation of the daemon and outside-app maintenance tool
+succeeds. Five empty-environment read-only entry checks pass in
+`aot-entrypoints.jsonl`: both help entries, daemon component evidence and
+commit/recovery refusal without explicit inputs/acknowledgement. Scoped diffs
+pass whitespace checks. The unrelated UI lockfile is byte-identical and excluded.
+
+Test-first verification reproduced premature close during typed asynchronous
+admission; the lifetime guard fixes it. The failed original runner exited, and
+`/private/tmp/gvm-restore-hoVOW1` was rechecked to exist with both state placements
+and retained without repair, retry in place or deletion. Missing-interface and
+fixture API compilation failures occurred before creating runtime fixtures.
+
+This is not yet composed into `ColdRollbackPreparation` or exposed as an operator
+command. Fixed reopen of this restored-state phase, canonical old-app/whole-state
+paired installation, interrupted replacement recovery and rollback commit remain
+unfinished. Do not pass an occupied canonical slot to preservation recovery or
+alter a marker to bypass its refusal. Neither fence was retired. The accepted
+upgrade sequence remains acknowledged cold commit followed by manual registration/
+start; rollback fence retirement is a separate unresolved operator decision.
+
+The full/default-concurrency suite and remote CI were not run. The two prior
+source-Dart startup failures remain unfixed and unrerun. First install,
+historical-schema command integration, arbitrary migration/validation interruption,
+crash/power-loss/low-disk coverage and manual installed/Apple Silicon/VZ/GaoOS
+acceptance remain open. No push, PR, release, real installed app/state/service/VM
+operation, machine switch or Chrome integration occurred. M8/MVP and the full
+M0–M8 goal remain open.
