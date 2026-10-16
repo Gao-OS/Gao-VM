@@ -34,6 +34,90 @@ final class PreservedColdState {
     return jsonDecode(jsonEncode(_record)) as Map<String, Object?>;
   }
 
+  // Only restoration recovery may read this occupied-original-slot layout.
+  // No public admission, native helper or ownership is granted here: the caller
+  // must independently close the full restoration read set before either.
+  static Future<PreservedColdState> _readForRestoration(
+    MaintenanceStateFence original,
+    OwnedImageDirectory storage,
+    String name, {
+    required String bundleIdentifier,
+    required String installationPath,
+  }) async {
+    if (!RegExp(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$').hasMatch(name) ||
+        name.endsWith('.partial') ||
+        original.retiredForCommit) {
+      throw const FormatException('fixed preserved checkpoint required');
+    }
+    await original.verify();
+    await _private(storage);
+    final ownedStorage = await OwnedImageDirectory.open(
+      Directory(storage.path),
+    );
+    OwnedImageDirectory? root, state;
+    OwnedImageLock? lock;
+    MaintenanceStateFence? destination;
+    try {
+      lock = await ownedStorage.tryAcquireMaintenanceLock(
+        _lockName,
+        create: false,
+      );
+      if (lock == null)
+        throw StateError('preservation namespace already owned');
+      await _lockFile(ownedStorage, _lockName);
+      root = ownedStorage.directory(name);
+      await _private(root);
+      final intent = await _read(root, 'intent.json');
+      if (intent.length != 10 ||
+          intent['format'] != 'gaovm.cold-state-preservation-intent.v1' ||
+          intent['source_state'] != original.sourceStatePath ||
+          intent['source_app'] != installationPath ||
+          intent['bundle_identifier'] != bundleIdentifier ||
+          intent['original_fence_path'] != original.path ||
+          intent['state_manifest'] is! Map<String, Object?> ||
+          !_same(
+            intent['workspace_identity'],
+            await root.maintenanceIdentity(),
+          )) {
+        throw const FormatException('preserved recovery inputs changed');
+      }
+      state = root.directory('state');
+      await _private(state);
+      destination = await MaintenanceStateFence.open(Directory(state.path));
+      await original.verifyRelocatedOriginal(
+        state,
+        destination,
+        bundleIdentifier: bundleIdentifier,
+        appPath: installationPath,
+      );
+      final source = ColdStateLease._unowned(
+        state,
+        bundleIdentifier,
+        installationPath,
+      ).._maintenanceFence = destination;
+      return PreservedColdState._(
+          source,
+          original,
+          ownedStorage,
+          lock,
+          root,
+          destination,
+          intent,
+        )
+        .._state = state
+        .._record = _completedRecord(intent, state.path)
+        .._completionName = 'completed'
+        .._closed = true;
+    } catch (_) {
+      state?.close();
+      destination?.close();
+      root?.close();
+      lock?.close();
+      ownedStorage.close();
+      rethrow;
+    }
+  }
+
   /// Reopen only the fixed post-move preservation checkpoint. All selectors
   /// come from the caller; recorded paths never choose a filesystem mutation.
   /// Both persistent fences and fresh actual state ownership are mandatory.

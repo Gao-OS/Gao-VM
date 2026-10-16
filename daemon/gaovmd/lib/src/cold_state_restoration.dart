@@ -1,8 +1,8 @@
 part of 'cold_state_lease.dart';
 
 /// A fenced old-state installation, NOT a restored app/state pair or a startup
-/// permit. Both source leases are consumed only on success. Borrowed native
-/// hosts and the original fence must remain open until this context closes.
+/// permit. Both source leases are consumed only on success. Forward callers keep
+/// borrowed hosts and the original fence open; recovery consumes its new hosts.
 final class ColdStateRestoration {
   ColdStateRestoration._(
     this._old,
@@ -23,17 +23,288 @@ final class ColdStateRestoration {
   final OwnedImageLock _lock;
   final Map<String, Object?> _intent;
   final Map<String, MaintenanceTree?> _apps;
+  final _recoveredHosts = <MacOsColdStateHost>[];
   OwnedImageDirectory? _state;
   Map<String, Object?>? _record;
   String? _completionName;
   bool _busy = false, _closed = false, _ownsStates = false;
+  bool _recovering = false;
 
   String get path => _intent['target_state'] as String;
   Map<String, Object?> toJson() {
-    if (_closed || _record == null || _completionName != 'completed') {
+    if (_closed ||
+        _recovering ||
+        _record == null ||
+        _completionName != 'completed') {
       throw StateError('complete available state restoration required');
     }
     return jsonDecode(jsonEncode(_record)) as Map<String, Object?>;
+  }
+
+  /// Reopen only the explicitly selected post-move checkpoint. The complete
+  /// filesystem read set precedes both real state owners and any host callback. Returned
+  /// native hosts are consumed and closed by this context, including on failure;
+  /// callbacks must drain their work and not retain/close the borrowed proof or
+  /// retained fence. [verifyPreparedInputs] rechecks the matching old pair and
+  /// external inputs using filesystem checks only, after native observations and
+  /// before completing the fixed phase. This proof never grants ordinary startup.
+  static Future<ColdStateRestoration> open(
+    OwnedImageDirectory storage,
+    String name, {
+    required Directory stagedOldState,
+    required Directory oldApp,
+    required Directory retainedApp,
+    required Directory installationApp,
+    required MaintenanceStateFence original,
+    required ({OwnedImageDirectory storage, String name}) preservation,
+    required String bundleIdentifier,
+    required Future<void> Function() verifyPreparedInputs,
+    required Future<ColdStateHost> Function(ColdStateRestoration) openOldHost,
+    required Future<ColdStateHost> Function(
+      ColdStateRestoration,
+      MaintenanceStateFence,
+    )
+    openCurrentHost,
+  }) async {
+    if (!RegExp(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$').hasMatch(name) ||
+        name.endsWith('.partial') ||
+        original.retiredForCommit ||
+        stagedOldState.path != stagedOldState.absolute.path ||
+        maintenancePathEntryExists(stagedOldState.path)) {
+      throw const FormatException('fixed post-move state restoration required');
+    }
+    await original.verify();
+    await PreservedColdState._private(storage);
+    final target = original.sourceStatePath;
+    final output = '${storage.path}/$name';
+    final retainedPath =
+        '${preservation.storage.path}/${preservation.name}/state';
+    final protected = {
+      stagedOldState.path,
+      target,
+      retainedPath,
+      oldApp.path,
+      retainedApp.path,
+      installationApp.path,
+    };
+    final executable = await File(
+      Platform.resolvedExecutable,
+    ).resolveSymbolicLinks();
+    final script = Platform.script.scheme == 'file'
+        ? await File.fromUri(Platform.script).resolveSymbolicLinks()
+        : null;
+    for (final input in protected) {
+      if (!input.startsWith('/') ||
+          storage.path == input ||
+          storage.path.startsWith('$input/') ||
+          PreservedColdState._overlap(output, input) ||
+          PreservedColdState._inside(executable, input) ||
+          script != null && PreservedColdState._inside(script, input)) {
+        throw const FormatException(
+          'recovery overlaps protected input or code',
+        );
+      }
+    }
+    if (PreservedColdState._inside(executable, output) ||
+        script != null && PreservedColdState._inside(script, output)) {
+      throw const FormatException('recovery executable must remain outside');
+    }
+    final ownedStorage = await OwnedImageDirectory.open(
+      Directory(storage.path),
+    );
+    OwnedImageDirectory? root, sourceParent, targetParent, state;
+    OwnedImageLock? lock;
+    PreservedColdState? current;
+    DaemonOwnership? oldOwner, currentOwner;
+    ColdStateRestoration? result;
+    final apps = <String, MaintenanceTree?>{};
+    try {
+      lock = await ownedStorage.tryAcquireMaintenanceLock(
+        _lockName,
+        create: false,
+      );
+      if (lock == null) throw StateError('restoration namespace already owned');
+      await PreservedColdState._lockFile(ownedStorage, _lockName);
+      root = ownedStorage.directory(name);
+      await PreservedColdState._private(root);
+      final intent = await PreservedColdState._read(root, 'intent.json');
+      final expectedApps = {
+        oldApp.path,
+        retainedApp.path,
+        installationApp.path,
+      };
+      final appEvidence = intent['apps'];
+      if (intent.length != 14 ||
+          intent['format'] != 'gaovm.cold-state-restoration-intent.v1' ||
+          intent['source_state'] != stagedOldState.path ||
+          intent['target_state'] != target ||
+          intent['bundle_identifier'] != bundleIdentifier ||
+          intent['retained_state'] != retainedPath ||
+          intent['state_manifest'] is! Map<String, Object?> ||
+          appEvidence is! Map<String, Object?> ||
+          appEvidence.length != expectedApps.length ||
+          !appEvidence.keys.toSet().containsAll(expectedApps) ||
+          appEvidence[oldApp.path] == null ||
+          appEvidence[retainedApp.path] == null) {
+        throw const FormatException(
+          'restoration intent or explicit inputs changed',
+        );
+      }
+      sourceParent = await OwnedImageDirectory.open(stagedOldState.parent);
+      targetParent = await OwnedImageDirectory.open(Directory(target).parent);
+      if (sourceParent.path != stagedOldState.parent.path ||
+          targetParent.path != Directory(target).parent.path) {
+        throw const FormatException('canonical recovery parents required');
+      }
+      await _parent(sourceParent);
+      await _parent(targetParent);
+      state = await OwnedImageDirectory.open(Directory(target));
+      if (state.path != target)
+        throw const FormatException('canonical restored state required');
+      current = await PreservedColdState._readForRestoration(
+        original,
+        preservation.storage,
+        preservation.name,
+        bundleIdentifier: bundleIdentifier,
+        installationPath: installationApp.path,
+      );
+      for (final entry in appEvidence.entries) {
+        if (entry.value == null) {
+          apps[entry.key] = null;
+        } else {
+          final evidence = entry.value;
+          if (evidence is! Map<String, Object?> ||
+              evidence.length != 2 ||
+              evidence['identity'] is! Map<String, Object?> ||
+              evidence['manifest'] is! Map<String, Object?>) {
+            throw const FormatException('complete app binding required');
+          }
+          apps[entry.key] = await MaintenanceTree.open(Directory(entry.key));
+        }
+      }
+      final old = ColdStateLease._unowned(state, bundleIdentifier, oldApp.path);
+      final hasComplete = maintenancePathEntryExists('${root.path}/completed');
+      final hasPartial = maintenancePathEntryExists(
+        '${root.path}/.completed.partial',
+      );
+      if (hasComplete && hasPartial) {
+        throw const FormatException('ambiguous state restoration completion');
+      }
+      final completionName = hasComplete
+          ? 'completed'
+          : hasPartial
+          ? '.completed.partial'
+          : null;
+      result =
+          ColdStateRestoration._(
+              old,
+              current,
+              ownedStorage,
+              lock,
+              root,
+              sourceParent,
+              targetParent,
+              intent,
+              apps,
+            )
+            .._state = state
+            .._completionName = completionName
+            .._recovering = true;
+      result._record = result._completedRecord;
+      // No helper or lock creation before the complete, independently bound
+      // restored/retained/app/fence/parent/journal proof closes successfully.
+      await result._verifyFiles(moved: true);
+      oldOwner = await DaemonOwnership.tryAcquireForRestoration(state, result);
+      if (oldOwner == null)
+        throw const ColdStateFailure(
+          'ownership',
+          'restored state already owned',
+        );
+      currentOwner = await DaemonOwnership.tryAcquireForRestoration(
+        current._state!,
+        result,
+      );
+      if (currentOwner == null)
+        throw const ColdStateFailure(
+          'ownership',
+          'retained state already owned',
+        );
+      old._ownership = oldOwner;
+      current._source._ownership = currentOwner;
+      Future<ColdStateHost> loadHost(
+        Future<ColdStateHost> Function() open,
+        String app,
+        String installation,
+      ) async {
+        final host = await open();
+        if (host is MacOsColdStateHost) result!._recoveredHosts.add(host);
+        final actualInstallation = host is MacOsColdStateHost
+            ? host.installationPath
+            : host.appPath;
+        if (host.appPath != app ||
+            actualInstallation != installation ||
+            host is MacOsColdStateHost && host.isValidatingCandidate) {
+          throw const FormatException(
+            'recovered host disagrees with explicit app selectors',
+          );
+        }
+        await result!._verifyFiles(moved: true);
+        return host;
+      }
+
+      old._host = await loadHost(
+        () => openOldHost(result!),
+        oldApp.path,
+        oldApp.path,
+      );
+      current._source._host = await loadHost(
+        () => openCurrentHost(result!, current!._destination),
+        retainedApp.path,
+        installationApp.path,
+      );
+      result._recovering = false;
+      await result.verify();
+      await verifyPreparedInputs();
+      await result._verifyFiles(moved: true);
+      if (completionName != 'completed') {
+        if (completionName == null) {
+          final partial = root.createDirectory('.completed.partial');
+          try {
+            await PreservedColdState._write(
+              partial,
+              'record.json',
+              result._record!,
+            );
+            await partial.sync();
+          } finally {
+            partial.close();
+          }
+        }
+        await root.renameDirectoryNoReplace('.completed.partial', 'completed');
+        result._completionName = 'completed';
+        await result.verify();
+        await verifyPreparedInputs();
+        await result._verifyFiles(moved: true);
+      }
+      result._ownsStates = true;
+      return result;
+    } catch (_) {
+      currentOwner?.close();
+      oldOwner?.close();
+      current?._closeResources();
+      if (result != null) {
+        result._closeUntransferred();
+      } else {
+        for (final app in apps.values) app?.close();
+        state?.close();
+        sourceParent?.close();
+        targetParent?.close();
+        root?.close();
+        lock?.close();
+        ownedStorage.close();
+      }
+      rethrow;
+    }
   }
 
   static Future<ColdStateRestoration> _create(
@@ -261,17 +532,46 @@ final class ColdStateRestoration {
 
   /// Typed, filesystem-only admission for the already held old-state owner.
   /// Not an ordinary-startup route, raw lock getter or arbitrary callback.
-  Future<void> verifyFor(OwnedImageDirectory state) async {
+  Future<void> verifyFor(OwnedImageDirectory state) =>
+      _verifyAdmission(state, retained: false);
+
+  /// Recovery may reacquire only either of this proof's two exact state inodes.
+  /// This filesystem proof does not assert ownership or ordinary admission.
+  Future<void> verifyOwnershipFor(OwnedImageDirectory state) =>
+      _verifyAdmission(state, retained: state.path == _current.path);
+
+  /// Native retirement recovery must borrow the same original/retained fences;
+  /// the original occupied slot is admitted only by the complete typed proof.
+  Future<void> verifyRetainedFor(
+    OwnedImageDirectory state,
+    MaintenanceStateFence original,
+    MaintenanceStateFence retained,
+  ) {
+    if (!identical(original, _current._original) ||
+        !identical(retained, _current._destination)) {
+      throw const FormatException('exact restoration fences required');
+    }
+    // The full admission proof already checks relocated provenance and both
+    // exact borrowed fences. Keep its pending-close guard through the last read.
+    return _verifyAdmission(state, retained: true);
+  }
+
+  Future<void> _verifyAdmission(
+    OwnedImageDirectory state, {
+    required bool retained,
+  }) async {
     if (_closed || _busy) {
       throw StateError('restored state admission is unavailable');
     }
     _busy = true;
     try {
       if (_state == null ||
-          state.path != path ||
+          state.path != (retained ? _current.path : path) ||
           !PreservedColdState._same(
             await state.maintenanceIdentity(),
-            _intent['state_identity'],
+            retained
+                ? _current._intent['state_identity']
+                : _intent['state_identity'],
           )) {
         throw const FormatException('exact restored state admission required');
       }
@@ -406,7 +706,7 @@ final class ColdStateRestoration {
   }
 
   Future<void> verify() async {
-    if (_closed || _busy || _state == null || _record == null) {
+    if (_closed || _busy || _recovering || _state == null || _record == null) {
       throw StateError('complete available restored state required');
     }
     _busy = true;
@@ -457,6 +757,7 @@ final class ColdStateRestoration {
   void _closeUntransferred() {
     if (_closed) return;
     _closed = true;
+    for (final host in _recoveredHosts) host.close();
     _state?.close();
     for (final app in _apps.values) {
       app?.close();

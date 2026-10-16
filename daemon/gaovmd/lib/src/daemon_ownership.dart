@@ -26,6 +26,32 @@ final class DaemonOwnership {
     MaintenanceStateFence fence,
   ) => _tryAcquire(root, maintenanceFence: fence);
 
+  /// Fixed restored-state recovery proves both complete generations before
+  /// acquiring an EXISTING ownership file. It cannot recreate or normalize it.
+  static Future<DaemonOwnership?> tryAcquireForRestoration(
+    OwnedImageDirectory root,
+    ColdStateRestoration restoration,
+  ) async {
+    await restoration.verifyOwnershipFor(root);
+    if (root.mode & 0x3f != 0) {
+      throw const FormatException('daemon state directory must be private');
+    }
+    final lock = await root.tryAcquireMaintenanceLock(
+      '.gaovmd.lock',
+      create: false,
+    );
+    if (lock == null) return null;
+    try {
+      await restoration.verifyOwnershipFor(root);
+      final ownership = DaemonOwnership._(root, lock);
+      await ownership.verify();
+      return ownership;
+    } catch (_) {
+      lock.close();
+      rethrow;
+    }
+  }
+
   static Future<DaemonOwnership?> _tryAcquire(
     OwnedImageDirectory root, {
     MaintenanceStateFence? maintenanceFence,

@@ -37,6 +37,7 @@ final class _AppRetirement {
     required MacOsOpenReferences observer,
     required Future<DriverInventorySnapshot> Function(String) inventory,
     MaintenanceStateFence? preservedOriginal,
+    ColdStateRestoration? stateRestoration,
     ({
       OwnedImageDirectory storage,
       String name,
@@ -54,7 +55,8 @@ final class _AppRetirement {
         _overlap(originalApp.path, state.path) ||
         _overlap('${storage.path}/$name', originalApp.path) ||
         _overlap('${storage.path}/$name', state.path) ||
-        maintenancePathEntryExists('${storage.path}/.$name.partial')) {
+        maintenancePathEntryExists('${storage.path}/.$name.partial') ||
+        stateRestoration != null && preservedOriginal == null) {
       throw const FormatException(
         'explicit disjoint retirement targets required',
       );
@@ -78,7 +80,13 @@ final class _AppRetirement {
           bundleIdentifier: bundleIdentifier,
           appPath: originalApp.path,
         );
-        if (maintenancePathEntryExists(origin.sourceStatePath)) {
+        if (stateRestoration != null) {
+          await stateRestoration.verifyRetainedFor(
+            stateRoot,
+            preservedOriginal,
+            fence,
+          );
+        } else if (maintenancePathEntryExists(origin.sourceStatePath)) {
           throw const FormatException(
             'vacated original state slot is occupied',
           );

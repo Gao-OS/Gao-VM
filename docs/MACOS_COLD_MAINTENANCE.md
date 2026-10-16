@@ -440,13 +440,38 @@ target or changed provenance refuse success without automatic undo or repair;
 a failure does not prove that the state move did not happen. Preserve every
 input and checkpoint, await the original future and only then close handles.
 
+`ColdStateRestoration.open` reopens only an explicitly selected post-move
+checkpoint. The caller supplies the vacated staging slot, old/retained/logical
+app slots, held original fence, preservation storage/name and restoration
+storage/name; journal paths do not select arbitrary targets. The complete native
+read set, both markers, exact parent/workspace/state identities and sealed records
+are verified before either real state ownership or any host callback. Recovery
+opens existing ownership and namespace files without recreating or normalizing
+them. A contended state owner refuses before helpers and releases only newly
+acquired recovery handles, not markers or another owner's lock.
+
+Complete recovery is read-only. A post-move checkpoint with complete sealed
+preparation and the exact moved old inode may finish a missing completion or
+atomically promote a complete sealed `.completed.partial` without rewriting it.
+Fresh cold observations, both kernel owners and the caller's filesystem-only
+old-pair/external-input checks precede completion and are rechecked afterward.
+Incomplete/ambiguous records, copied state, changed inputs or unknown entries
+are retained and refused; recovery never reruns the state move or infers startup
+permission from a JSON flag. Pending callbacks retain both owners and cannot
+report completion or close the context early. Native hosts returned by recovery
+factories are owned and closed by that context, including on failure.
+
+Native retired/published host recovery can borrow the restoration's exact retained
+fence and typed proof to verify the occupied canonical slot. The normal native
+and preservation routes still refuse that layout without this proof. Published
+host recovery repeats its existing isolated startup-refusal probe, never an
+ordinary startup against either actual state generation. Do not reuse another
+recovery route or alter markers to bypass a refusal.
+
 This is not yet composed into `ColdRollbackPreparation` or an operator command.
-There is no fixed reopen for this restored-state phase; the ordinary preservation
-reopen still refuses an occupied original slot. Do not reuse that route or alter
-markers to bypass the refusal. Old-app/whole-state paired installation,
-interrupted replacement recovery and rollback commit remain unfinished. The
-cold-commit/manual-start upgrade sequence above does not settle rollback fence
-retirement or imply that rollback is complete.
+Old-app/whole-state paired installation, interrupted paired replacement and
+rollback commit remain unfinished. The cold-commit/manual-start upgrade sequence
+above does not settle rollback fence retirement or imply that rollback is complete.
 
 ## Data-preserving cold uninstall
 

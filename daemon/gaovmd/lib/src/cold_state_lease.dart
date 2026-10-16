@@ -43,10 +43,18 @@ final class ColdStateLease {
   ) : installationPath = _host is MacOsColdStateHost
           ? _host.installationPath
           : _host.appPath;
+  // Recovery builds filesystem proof before acquiring owners or opening native
+  // hosts. This private shell is always consumed/closed to public lease APIs.
+  ColdStateLease._unowned(
+    this._root,
+    this._bundleIdentifier,
+    this.installationPath,
+  ) : _maintenanceFence = null,
+      _closed = true;
   final OwnedImageDirectory _root;
-  final DaemonOwnership _ownership;
+  late final DaemonOwnership _ownership;
   final String _bundleIdentifier;
-  ColdStateHost _host;
+  late ColdStateHost _host;
   MaintenanceStateFence? _maintenanceFence;
   MacOsColdStateHost? _ownedRetiredHost;
   bool _retiring = false;

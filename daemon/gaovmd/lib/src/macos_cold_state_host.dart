@@ -148,6 +148,7 @@ final class MacOsColdStateHost implements ColdStateHost {
     required String teamIdentifier,
     required int catalogSchema,
     MaintenanceStateFence? preservedOriginal,
+    ColdStateRestoration? stateRestoration,
     ReleaseInspectionHost host = const MacOsReleaseInspectionHost(),
     MacOsOpenReferences? observer,
     Future<DriverInventorySnapshot> Function(String)? inventory,
@@ -162,6 +163,7 @@ final class MacOsColdStateHost implements ColdStateHost {
     teamIdentifier: teamIdentifier,
     catalogSchema: catalogSchema,
     preservedOriginal: preservedOriginal,
+    stateRestoration: stateRestoration,
     host: _PublicationExecution(host),
     observer: observer ?? MacOsOpenReferences(),
     inventory:
@@ -187,6 +189,7 @@ final class MacOsColdStateHost implements ColdStateHost {
     required int retiredCatalogSchema,
     required int catalogSchema,
     MaintenanceStateFence? preservedOriginal,
+    ColdStateRestoration? stateRestoration,
     ReleaseInspectionHost host = const MacOsReleaseInspectionHost(),
     MacOsOpenReferences? observer,
     Future<DriverInventorySnapshot> Function(String)? inventory,
@@ -201,6 +204,7 @@ final class MacOsColdStateHost implements ColdStateHost {
     teamIdentifier: teamIdentifier,
     catalogSchema: retiredCatalogSchema,
     preservedOriginal: preservedOriginal,
+    stateRestoration: stateRestoration,
     host: _PublicationExecution(host),
     observer: observer ?? MacOsOpenReferences(),
     inventory:

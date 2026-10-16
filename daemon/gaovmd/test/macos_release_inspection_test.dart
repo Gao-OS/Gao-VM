@@ -789,7 +789,7 @@ void main() {
           MacOsColdStateHost? oldHost;
           PreservedColdState? preserved;
           ColdStateRestoration? restored;
-          MaintenanceTree? oldTree, restoredTree, retainedTree;
+          MaintenanceTree? oldTree, restoredTree, retainedTree, recoveryTree;
           final parent = await OwnedImageDirectory.open(temporary);
           final work = parent.createDirectory('state-restoration');
           try {
@@ -888,6 +888,125 @@ void main() {
                 throwsA(isA<MaintenanceFenceActive>()),
               );
             }
+            final retainedApp = Directory(lease.appPath);
+            restored.close();
+            oldHost.close();
+            oldHost = null;
+            recoveryTree = await MaintenanceTree.open(temporary);
+            final recoveryBefore = await recoveryTree.capture(
+              nativeMetadata: true,
+            );
+            final recoveryProbes = <String>[];
+            final probeState =
+                '${temporary.path}/publications/upgrade/probe/state';
+            host.onAdmission = (executable, arguments) async {
+              expect(executable, '${app.path}/Contents/MacOS/gaovmd');
+              expect(arguments, [
+                '--state-dir',
+                probeState,
+                '--socket-path',
+                '$probeState/run/gaovmd.sock',
+                '--driver-bin',
+                '${app.path}/Contents/Helpers/gaovm-driver-vz',
+                '--openapi-path',
+                '${app.path}/Contents/Resources/schemas/openapi/gaovm-v1.yaml',
+              ]);
+              recoveryProbes.add(probeState);
+              return null;
+            };
+            restored = await ColdStateRestoration.open(
+              work,
+              'restore-old-state',
+              stagedOldState: Directory('${temporary.path}/old-state'),
+              oldApp: oldApp,
+              retainedApp: retainedApp,
+              installationApp: app,
+              original: fence,
+              preservation: (storage: work, name: 'retained-current'),
+              bundleIdentifier: 'org.gaovm.tests.Release',
+              verifyPreparedInputs: () async {
+                await restoredTree!.verify(oldBefore, nativeMetadata: true);
+                await retainedTree!.verify(
+                  retainedBefore,
+                  nativeMetadata: true,
+                );
+              },
+              openOldHost: (_) => MacOsColdStateHost.open(
+                oldApp,
+                bundleIdentifier: 'org.gaovm.tests.Release',
+                version: '0.1.0',
+                teamIdentifier: 'ABCDEFGHIJ',
+                catalogSchema: 0,
+                host: host,
+                observer: observer(),
+                inventory: inventory,
+              ),
+              openCurrentHost: (proof, retainedFence) async {
+                Future<MacOsColdStateHost> recover(
+                  ColdStateRestoration? context,
+                ) async {
+                  if (!published) {
+                    return MacOsColdStateHost.openRetired(
+                      app,
+                      Directory(preserved!.path),
+                      retainedFence,
+                      storage,
+                      'old',
+                      bundleIdentifier: 'org.gaovm.tests.Release',
+                      version: '0.1.0',
+                      teamIdentifier: 'ABCDEFGHIJ',
+                      catalogSchema: 0,
+                      preservedOriginal: fence,
+                      stateRestoration: context,
+                      host: host,
+                      observer: observer(),
+                      inventory: inventory,
+                    );
+                  }
+                  final publication = await OwnedImageDirectory.open(
+                    Directory('${temporary.path}/publications'),
+                  );
+                  try {
+                    return await MacOsColdStateHost.openPublished(
+                      app,
+                      Directory(preserved!.path),
+                      retainedFence,
+                      storage,
+                      'old',
+                      publication,
+                      'upgrade',
+                      bundleIdentifier: 'org.gaovm.tests.Release',
+                      oldVersion: '0.1.0',
+                      newVersion: '0.1.0',
+                      teamIdentifier: 'ABCDEFGHIJ',
+                      retiredCatalogSchema: 0,
+                      catalogSchema: 0,
+                      preservedOriginal: fence,
+                      stateRestoration: context,
+                      host: host,
+                      observer: observer(),
+                      inventory: inventory,
+                    );
+                  } finally {
+                    publication.close();
+                  }
+                }
+
+                final roles = host.executedRoles.length;
+                final statuses = host.statusCalls;
+                final probes = host.admissions;
+                await expectLater(recover(null), throwsFormatException);
+                expect(host.executedRoles.length, roles);
+                expect(host.statusCalls, statuses);
+                expect(host.admissions, probes);
+                return recover(proof);
+              },
+            );
+            await restored.verify();
+            await recoveryTree.verify(recoveryBefore, nativeMetadata: true);
+            expect(restored.toJson()['startup_allowed'], false);
+            expect(recoveryProbes, published ? [probeState] : isEmpty);
+            expect(host.admissions, admissions + (published ? 1 : 0));
           } catch (_) {
             retainInputs = true;
             rethrow;
@@ -896,6 +1015,7 @@ void main() {
             preserved?.close();
             oldLease?.close();
             oldHost?.close();
+            recoveryTree?.close();
             retainedTree?.close();
             restoredTree?.close();
             oldTree?.close();
