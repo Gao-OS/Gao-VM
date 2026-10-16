@@ -4,17 +4,19 @@
 the accepted [explicit cold operator workflow](proposals/MACOS_UPGRADE_ROLLBACK.md)
 through immutable preparation, old-app retirement and independent candidate
 publication, an outside-app verified candidate-validation launcher, sealed
-validation-checkpoint recovery and a separate recoverable
+validation-checkpoint recovery, explicit cold commit and a separate recoverable
 data-preserving uninstall. It is
 separate from the public API client and never exposes a driver passthrough.
-It performs no registration, stop, VM action, activation, upgrade commit, rollback
+It performs no registration, stop, VM action, activation, rollback
 or retained-file cleanup. Only `validate-upgrade` can apply controlled catalog/
 legacy migration through the candidate-only validation composition.
 
 **This is not a production-ready upgrade transaction.** A successful publication
-intentionally leaves ordinary startup blocked by a persistent fence. Activation,
-explicit commit and paired whole-state/app rollback remain unfinished. Recovery
-below is limited to complete sealed validation checkpoints. Neither candidate
+intentionally leaves ordinary startup blocked by a persistent fence. A separate
+explicit cold commit can retire that fence after full revalidation and startup
+acknowledgement; it does not start a service or prove readiness. Paired whole-state/
+app rollback and native lifecycle acceptance remain unfinished. Recovery below
+recognizes only complete fixed sealed checkpoints. Neither candidate
 validation nor its outside-app launcher is activation.
 The command must not be substituted for a complete upgrade, and this document
 does not authorize running it against an actual installation.
@@ -50,8 +52,11 @@ work and inspection exactly `0700` and without ACL grants. These directories
 and app inputs must be mutually disjoint. Fresh publication/uninstall requires
 empty work and inspection directories; no existing output is normalized.
 Validation requires completed publication work and a new empty inspection directory.
+Commit requires completed validation and another new empty inspection directory;
+explicit recovery requires the corresponding retained fixed checkpoint.
 Work must support the no-replace same-filesystem moves to/from the installation
-slot; there is no cross-filesystem copy-and-delete substitute for those moves.
+slot and, for commit, from the state fence's parent into the work checkpoint.
+There is no cross-filesystem copy-and-delete substitute for those moves.
 
 ```sh
 /absolute/outside-protected/gaovm-maintenance publish-upgrade \
@@ -237,7 +242,7 @@ outputs and the fence; do not remove inputs while original child work is pending
 Partial/unknown validation output is retained. A blind repeat refuses it.
 Do not delete the fence/output to force retry, reuse publication-only recovery
 after migration, or substitute the new snapshot for the original rollback pair.
-The future commit must independently re-establish the cold boundary and validate
+The separate commit must independently re-establish the cold boundary and validate
 the retained app/state identities and intervening-write boundary.
 
 ## Sealed validation recovery
@@ -287,8 +292,109 @@ Success is a `gaovm.cold-validation-recovery-command.v1` JSON object with
 `public_api_rerun: false` and `state_unchanged: true`. The applied catalog and IDs
 are rechecked, but this is not a new API/doctor run. Ordinary startup stays
 fenced, with `committed`, `activation_authorized` and `rollback_authorized` false.
-Cold commit, arbitrary interrupted-validation recovery and whole-state rollback
-remain unfinished; this command is not a complete upgrade transaction.
+Arbitrary interrupted-validation recovery and whole-state rollback remain
+unfinished; this command is not a complete upgrade transaction.
+
+## Explicit cold commit and manual startup
+
+The accepted sequence is **cold commit, then manual operator registration/start**.
+After completed candidate validation, use the original source schema (0 for
+pre-catalog state), the same explicit release identities and a new empty private
+inspection directory:
+
+```sh
+/absolute/outside-protected/gaovm-maintenance commit-upgrade \
+  --allow-startup \
+  --app /absolute/install/GaoVM.app \
+  --state-dir /absolute/private-state \
+  --work-dir /absolute/private-upgrade-work \
+  --inspection-dir /absolute/private-new-commit-inspection \
+  --bundle-id org.example.GaoVM \
+  --old-version 0.1.0 --new-version 0.1.1 --team-id ABCDEFGHIJ \
+  --catalog-schema 0
+```
+
+Exactly one standalone `--allow-startup` is required. It acknowledges lifting the
+startup fence, not permission for the tool to register/start anything. The tool
+freshly verifies zero daemon/driver processes, no unresolved processes, owning
+service `notRegistered`, native candidate identity and the real state kernel
+lease. It recovers and rechecks the complete current validated state, original
+app/state pair and external inputs. No migration, API validation, background
+worker, driver or service action is rerun. A coldness or intervening-write
+failure refuses without repairing the evidence or recreating a retired fence.
+
+Internally, `ColdCommitCheckpoint.prepare` requires a successfully recovered
+`ColdValidationCheckpoint` and its continuously held real cold owner. Imported
+JSON, an opened-but-unrecovered checkpoint or a closed owner cannot opt in.
+
+The new private `commit/intent.json` binds the actual work/checkpoint/state/fence
+identities, release inputs, validation intent/record digests, publication and
+preparation bindings, and the closed-session state digest. The sealed
+`commit/prepared/record.json` has format `gaovm.cold-commit-preparation.v1` and
+phase `cold_commit_prepared`. Both are fsynced before no-replace publication from
+`.commit.partial`. Ordinary startup remains fenced; `committed` and
+`activation_authorized` are false. `state_unchanged: true` refers to the retained
+state, not the newly created preparation output; no API validation is rerun.
+
+With explicit acknowledgement, a complete terminal candidate is sealed under
+`commit/.completed.partial/record.json`. This candidate alone is **not commit
+authority**, even though its proposed terminal flags are true. After complete
+reverification following the last native observer, the exact original fence
+inode moves atomically without replacement to `commit/retired-fence`. That move
+is the commit point; there is no copy/delete fallback. Both parent directories
+are synced, the whole evidence is reverified, the complete terminal directory
+is published as `completed`, and everything is rechecked before success. The
+real state lease remains held throughout, preventing ordinary startup from
+acquiring that state during the final checks. The original app/state rollback
+pair, failed TestRuns, managed files and external bytes are not changed or cleaned.
+
+Success is one `gaovm.cold-upgrade-commit.v1` JSON object, with
+`phase: upgrade_committed`, `committed: true`, `startup_allowed: true`,
+`ordinary_startup_fenced: false`, `manual_start_required: true`,
+`service_actions_performed: false` and `ordinary_ready: false`. `state_unchanged`
+refers to both retained state generations, not the new commit output or fence
+placement. The operator separately registers/starts the service and tests actual
+readiness; this result is not installed, Apple Silicon, VZ or Guest acceptance.
+
+## Explicit commit recovery
+
+A blind repeat of `commit-upgrade` refuses existing output. For an interrupted
+commit, retain all fixed outputs and use **`resume-commit --allow-startup`**, with
+the same explicit inputs and another new empty private inspection directory:
+
+```sh
+/absolute/outside-protected/gaovm-maintenance resume-commit \
+  --allow-startup \
+  --app /absolute/install/GaoVM.app \
+  --state-dir /absolute/private-state \
+  --work-dir /absolute/private-upgrade-work \
+  --inspection-dir /absolute/private-new-commit-recovery-inspection \
+  --bundle-id org.example.GaoVM \
+  --old-version 0.1.0 --new-version 0.1.1 --team-id ABCDEFGHIJ \
+  --catalog-schema 0
+```
+
+Recovery recognizes only complete sealed preparation in `.commit.partial`
+(`prepared` or `.prepared.partial`) or published `commit/prepared`. Only the
+published preparation can additionally contain `.completed.partial`, with either
+the original active fence or the exact retained `retired-fence`. Final
+`completed` requires the retained fence. Impossible combinations, unknown entries,
+incomplete records, substituted identities and forged flags refuse without
+repair, cleanup or promotion. Existing namespace locks are reacquired, never
+inferred from a marker or recreated if missing. Every record is reread after
+the last native observer; original pending native exits drain while ownership
+remains held. A valid fixed partial can be promoted only after fresh real cold
+ownership and full validation recovery. A complete committed checkpoint is
+reverified without rewriting it. Recovery does not rerun migration or the API.
+
+An error can occur **after** the fence move. Error JSON therefore reports
+`committed: null` and `startup_allowed: null`, not an invented uncommitted state.
+Do not manually clear, recreate or move the fence, delete output, automatically
+undo, or infer completion from JSON/file existence. Explicit recovery must
+re-establish coldness and both state/app identities; service registration,
+intervening writes or unresolved processes can make it refuse. Fixed sealed
+directory and injected-failure coverage is not arbitrary interrupted upgrade,
+process-kill/power-loss or native installed acceptance.
 
 ## Data-preserving cold uninstall
 
@@ -361,14 +467,17 @@ locks, promote intent-only output, undo a move or clear the startup fence.
 ## Failures and verification boundary
 
 The separate [validation request/catalog restrictions](MACOS_VALIDATION_ISOLATION.md)
-provide internal fail-closed HTTP and native SQLite read-only components. They
-do not introduce an activation/commit command, startup-fence bypass or disabled
-worker composition; those remain unfinished.
+provide the fail-closed HTTP and native SQLite read-only components used by the
+candidate-only composition above. They do not introduce an ordinary startup
+bypass or service activation. Cold commit is the separate acknowledged action
+described above, not a change to restricted validation admission.
 
 Malformed/refused input returns exit 2; unverified native/filesystem/maintenance
-completion returns exit 3. JSON includes the failed stage and false authorization/
-commit flags. A failure is **not** proof that a rename did not happen. Retain all
-inputs, snapshots, work, inspection output and the fence for investigation.
+completion returns exit 3. JSON includes the failed stage and false activation/
+rollback authorization. Commit errors use the unknown (`null`) commit/startup
+flags described above; other actions keep `committed: false`. A failure is
+**not** proof that a rename did not happen. Retain all inputs, snapshots, work,
+inspection output and every original/retained fence placement for investigation.
 Do not retry with a different `--from` merely to bypass a refusal, manually clear
 the fence, remove unknown entries, or overwrite a target.
 
@@ -380,7 +489,7 @@ abandoning it on an observation deadline. Neither path restarts a command.
 Local positive integration checks use real private files, SQLite, native metadata,
 directory moves and kernel locks, with explicit external signature/ARM64/
 component/service/process observation fixtures. Process-level help/input refusal
-uses the real source command. These are not genuine signed installed-product,
+uses the real source command and Intel AOT entry checks. These are not genuine signed installed-product,
 power-loss, whole-upgrade, Apple Silicon/VZ/GaoOS or M8/MVP acceptance results.
 Apple Silicon execution remains assigned to the user.
 

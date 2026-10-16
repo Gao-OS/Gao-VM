@@ -1564,6 +1564,33 @@ void main() {
   }, skip: !Platform.isMacOS);
 
   group('cold publication command', () {
+    test(
+      'cold commit command requires explicit startup acknowledgement',
+      () async {
+        final roles = host.executedRoles.length;
+        for (final arguments in [
+          ['commit-upgrade'],
+          ['commit-upgrade', '--allow-startup', '--allow-startup'],
+          ['commit-upgrade', '--allow-startup=false'],
+          ['resume-commit'],
+          ['resume-commit', '--allow-startup', '--allow-startup'],
+          ['resume-commit', '--allow-startup=false'],
+        ]) {
+          await expectLater(
+            runMacOsColdPublication(arguments, host: host),
+            throwsA(
+              isA<FormatException>().having(
+                (error) => error.message,
+                'explicit acknowledgement',
+                contains('--allow-startup'),
+              ),
+            ),
+          );
+        }
+        expect(host.executedRoles.length, roles);
+      },
+    );
+
     late Directory state, candidate, work, scratch;
     setUp(() async {
       state = await Directory('${temporary.path}/command-state').create();
@@ -2596,6 +2623,1036 @@ void main() {
         }
         await recoveryTemporary.delete(recursive: true);
       });
+
+      Future<T> withRecoveredCheckpoint<T>(
+        String name,
+        Future<T> Function(ColdValidationCheckpoint, OwnedImageDirectory)
+        action,
+      ) async {
+        active++;
+        activeRetirementChecks++;
+        OwnedImageDirectory? work, inspection;
+        MaintenanceStateFence? fence;
+        ColdValidationCheckpoint? checkpoint;
+        MacOsColdStateHost? coldHost;
+        ColdStateLease? lease;
+        ColdStateSnapshot? snapshot;
+        try {
+          final directory = await Directory(
+            '${recoveryTemporary.path}/$name',
+          ).create();
+          imageFileMode(directory.path, 0x1c0);
+          inspection = await OwnedImageDirectory.open(directory);
+          work = await OwnedImageDirectory.open(recoveryWork);
+          fence = await MaintenanceStateFence.open(recoveryState);
+          final app = Directory('${recoveryTemporary.path}/GaoVM.app');
+          checkpoint = await ColdValidationCheckpoint.open(
+            work,
+            fence,
+            appPath: app.path,
+            statePath: recoveryState.path,
+            bundleIdentifier: 'org.gaovm.tests.Release',
+            oldVersion: '0.1.0',
+            newVersion: '0.1.0',
+            teamIdentifier: 'ABCDEFGHIJ',
+            sourceCatalogSchema: 0,
+          );
+          coldHost = await MacOsColdStateHost.openPublished(
+            app,
+            recoveryState,
+            fence,
+            work,
+            'retirement',
+            work,
+            'publication',
+            bundleIdentifier: 'org.gaovm.tests.Release',
+            oldVersion: '0.1.0',
+            newVersion: '0.1.0',
+            teamIdentifier: 'ABCDEFGHIJ',
+            retiredCatalogSchema: 0,
+            catalogSchema: 0,
+            host: recoveryHost,
+            observer: references(),
+            inventory: (_) async => DriverInventorySnapshot(
+              processes: [],
+              unresolvedProcessIds: [],
+            ),
+          );
+          lease = await ColdStateLease.acquire(
+            recoveryState,
+            bundleIdentifier: 'org.gaovm.tests.Release',
+            host: coldHost,
+            maintenanceFence: fence,
+          );
+          snapshot = await ColdStateSnapshot.prepare(
+            lease,
+            inspection,
+            observer: references(),
+            inventory: (_) async => DriverInventorySnapshot(
+              processes: [],
+              unresolvedProcessIds: [],
+            ),
+          );
+          await checkpoint.recover(
+            snapshot,
+            work,
+            coldHost,
+            inspectionHost: recoveryHost,
+            observer: references(),
+          );
+          return await action(checkpoint, work);
+        } catch (_) {
+          retain = true;
+          rethrow;
+        } finally {
+          checkpoint?.close();
+          snapshot?.close();
+          lease?.close();
+          coldHost?.close();
+          fence?.close();
+          inspection?.close();
+          work?.close();
+          activeRetirementChecks--;
+          active--;
+        }
+      }
+
+      Future<void> restoreSuccessfulTestCommit(OwnedImageDirectory work) async {
+        // Test-only restoration after every expected assertion passed. This
+        // shared disposable fixture is not a product rollback or failure path.
+        final marker = validated['fence_path'] as String;
+        final checkpoint = work.directory('commit');
+        final parent = await OwnedImageDirectory.open(Directory(marker).parent);
+        final retired = checkpoint.directory('retired-fence');
+        try {
+          final restored = await retired.moveForMaintenanceTo(
+            checkpoint,
+            parent,
+            marker.substring(parent.path.length + 1),
+          );
+          restored.close();
+        } finally {
+          retired.close();
+          parent.close();
+          checkpoint.close();
+        }
+        await Directory('${work.path}/commit').delete(recursive: true);
+        await File('${work.path}/.gaovm-cold-commit.lock').delete();
+      }
+
+      test(
+        'cold commit preparation seals the validated generation while preserving both states and the fence',
+        () async {
+          await withRecoveredCheckpoint('commit-preparation-inspection', (
+            validation,
+            work,
+          ) async {
+            final current = await MaintenanceTree.open(recoveryState);
+            final pair = await MaintenanceTree.open(
+              Directory('${recoveryWork.path}/preparation'),
+            );
+            ColdCommitCheckpoint? commit;
+            try {
+              final stateBefore = await current.capture(nativeMetadata: true);
+              final pairBefore = await pair.capture(nativeMetadata: true);
+              commit = await ColdCommitCheckpoint.prepare(
+                validation,
+                work,
+                observer: references(),
+              );
+              final result = commit.toJson();
+              expect(result['format'], 'gaovm.cold-commit-preparation.v1');
+              expect(result['phase'], 'cold_commit_prepared');
+              expect(result['checkpoint_path'], '${recoveryWork.path}/commit');
+              expect(result['ordinary_startup_fenced'], true);
+              expect(result['activation_authorized'], false);
+              expect(result['committed'], false);
+              expect(result['state_unchanged'], true);
+              expect(result['public_api_rerun'], false);
+              expect(
+                result['validation_record_digest'],
+                'sha256:${sha256.convert(utf8.encode('${jsonEncode(validated)}\n'))}',
+              );
+              final sealed = await File(
+                '${recoveryWork.path}/commit/prepared/record.json',
+              ).readAsString();
+              expect(jsonDecode(sealed), result);
+              final contender = await work.tryAcquireMaintenanceLock(
+                '.gaovm-cold-commit.lock',
+                create: false,
+              );
+              try {
+                expect(contender, isNull);
+              } finally {
+                contender?.close();
+              }
+              expect(
+                await Directory(
+                  '${recoveryWork.path}/.commit.partial',
+                ).exists(),
+                false,
+              );
+              await current.verify(stateBefore, nativeMetadata: true);
+              await pair.verify(pairBefore, nativeMetadata: true);
+              await expectLater(
+                MaintenanceStateFence.requireUnfenced(recoveryState),
+                throwsA(isA<MaintenanceFenceActive>()),
+              );
+              commit.close();
+              commit = null;
+              // Only this proven successful test-owned output is removed so
+              // the shared disposable validation fixture remains unchanged.
+              await Directory(
+                '${recoveryWork.path}/commit',
+              ).delete(recursive: true);
+              await File(
+                '${recoveryWork.path}/.gaovm-cold-commit.lock',
+              ).delete();
+            } finally {
+              commit?.close();
+              pair.close();
+              current.close();
+            }
+          });
+        },
+        timeout: const Timeout(Duration(minutes: 8)),
+      );
+      for (final recordPartial in [false, true]) {
+        test(
+          'cold commit recovery publishes a complete sealed ${recordPartial ? "record" : "directory"} under the fresh cold owner',
+          () async {
+            await withRecoveredCheckpoint(
+              'commit-recovery-${recordPartial ? "record" : "directory"}-inspection',
+              (validation, work) async {
+                final state = await MaintenanceTree.open(recoveryState);
+                final pair = await MaintenanceTree.open(
+                  Directory('${recoveryWork.path}/preparation'),
+                );
+                ColdCommitCheckpoint? commit;
+                try {
+                  final current = await state.capture(nativeMetadata: true);
+                  final original = await pair.capture(nativeMetadata: true);
+                  commit = await ColdCommitCheckpoint.prepare(
+                    validation,
+                    work,
+                    observer: references(),
+                  );
+                  final expected = commit.toJson();
+                  final bytes = await File(
+                    '${recoveryWork.path}/commit/prepared/record.json',
+                  ).readAsBytes();
+                  commit.close();
+                  commit = null;
+                  // Model a fully sealed crash position, not a process-kill E2E.
+                  await work.renameDirectoryNoReplace(
+                    'commit',
+                    '.commit.partial',
+                  );
+                  if (recordPartial) {
+                    final staging = work.directory('.commit.partial');
+                    try {
+                      await staging.renameDirectoryNoReplace(
+                        'prepared',
+                        '.prepared.partial',
+                      );
+                    } finally {
+                      staging.close();
+                    }
+                  }
+                  commit = await ColdCommitCheckpoint.open(
+                    validation,
+                    work,
+                    observer: references(),
+                  );
+                  expect(commit.toJson(), expected);
+                  expect(
+                    await File(
+                      '${recoveryWork.path}/commit/prepared/record.json',
+                    ).readAsBytes(),
+                    bytes,
+                  );
+                  expect(
+                    await Directory(
+                      '${recoveryWork.path}/.commit.partial',
+                    ).exists(),
+                    false,
+                  );
+                  await state.verify(current, nativeMetadata: true);
+                  await pair.verify(original, nativeMetadata: true);
+                  await expectLater(
+                    MaintenanceStateFence.requireUnfenced(recoveryState),
+                    throwsA(isA<MaintenanceFenceActive>()),
+                  );
+                  commit.close();
+                  commit = null;
+                  await Directory(
+                    '${recoveryWork.path}/commit',
+                  ).delete(recursive: true);
+                  await File(
+                    '${recoveryWork.path}/.gaovm-cold-commit.lock',
+                  ).delete();
+                } finally {
+                  commit?.close();
+                  pair.close();
+                  state.close();
+                }
+              },
+            );
+          },
+          timeout: const Timeout(Duration(minutes: 8)),
+        );
+      }
+      test(
+        'cold commit retains its owner until the original native observation exits',
+        () async {
+          await withRecoveredCheckpoint('commit-owned-exit-inspection', (
+            validation,
+            work,
+          ) async {
+            final state = await MaintenanceTree.open(recoveryState);
+            final pair = await MaintenanceTree.open(
+              Directory('${recoveryWork.path}/preparation'),
+            );
+            ColdCommitCheckpoint? commit;
+            OwnedTestProcess? owned;
+            Process? child;
+            Future<void>? pending;
+            OwnedImageLock? contender;
+            Object? failure;
+            var settled = false;
+            try {
+              final current = await state.capture(nativeMetadata: true);
+              final original = await pair.capture(nativeMetadata: true);
+              child = await Process.start('/bin/cat', []);
+              final originalExit = child.exitCode;
+              owned = OwnedTestProcess(child);
+              final observed = Completer<void>();
+              recoveryHost.onStatus = () async {
+                recoveryHost.onStatus = null;
+                observed.complete();
+                throw MaintenanceCommandFailure(
+                  'injected pending native observation',
+                  child!.pid,
+                  exitConfirmed: false,
+                  ownedExit: originalExit,
+                );
+              };
+              pending =
+                  ColdCommitCheckpoint.prepare(
+                    validation,
+                    work,
+                    observer: references(),
+                  ).then<void>(
+                    (value) {
+                      commit = value;
+                      settled = true;
+                    },
+                    onError: (Object error, StackTrace _) {
+                      failure = error;
+                      settled = true;
+                    },
+                  );
+              await Future.any([
+                observed.future,
+                pending.then((_) {
+                  throw StateError('commit settled before native observation');
+                }),
+              ]);
+              await Future<void>.delayed(Duration.zero);
+              expect(owned.exitConfirmed, false);
+              expect(settled, false);
+              contender = await work.tryAcquireMaintenanceLock(
+                '.gaovm-cold-commit.lock',
+                create: false,
+              );
+              expect(contender, isNull);
+              await expectLater(
+                MaintenanceStateFence.requireUnfenced(recoveryState),
+                throwsA(isA<MaintenanceFenceActive>()),
+              );
+              await child.stdin.close();
+              expect((await owned.result()).exitCode, 0);
+              await pending;
+              expect(
+                failure,
+                isA<MaintenanceCommandFailure>()
+                    .having((e) => e.exitConfirmed, 'exit confirmed', true)
+                    .having((e) => e.pid, 'original owned PID', child.pid),
+              );
+              expect(commit, isNull);
+              expect(
+                await Directory('${work.path}/.commit.partial').exists(),
+                false,
+              );
+              expect(await Directory('${work.path}/commit').exists(), false);
+              await state.verify(current, nativeMetadata: true);
+              await pair.verify(original, nativeMetadata: true);
+              await File('${work.path}/.gaovm-cold-commit.lock').delete();
+            } finally {
+              recoveryHost.onStatus = null;
+              contender?.close();
+              await child?.stdin.close();
+              if (owned != null && !await owned.terminate()) {
+                recoveryHost.retainInputs = true;
+              }
+              await pending;
+              commit?.close();
+              pair.close();
+              state.close();
+            }
+          });
+        },
+        timeout: const Timeout(Duration(minutes: 8)),
+      );
+      test(
+        'cold commit rejects a late forged authorization and retains the published output',
+        () async {
+          await withRecoveredCheckpoint('commit-late-record-inspection', (
+            validation,
+            work,
+          ) async {
+            final state = await MaintenanceTree.open(recoveryState);
+            final pair = await MaintenanceTree.open(
+              Directory('${recoveryWork.path}/preparation'),
+            );
+            final retained = await MaintenanceTree.open(recoveryWork);
+            var changed = false;
+            try {
+              final current = await state.capture(nativeMetadata: true);
+              final original = await pair.capture(nativeMetadata: true);
+              final record = File('${work.path}/commit/prepared/record.json');
+              recoveryHost.onStatus = () async {
+                if (!record.existsSync() || changed) return;
+                changed = true;
+                final forged =
+                    Map<String, Object?>.from(
+                        jsonDecode(await record.readAsString()) as Map,
+                      )
+                      ..['activation_authorized'] = true
+                      ..['committed'] = true;
+                imageFileMode(record.path, 0x180);
+                await record.writeAsString(
+                  '${jsonEncode(forged)}\n',
+                  flush: true,
+                );
+                imageFileMode(record.path, 0x100);
+              };
+              await expectLater(
+                ColdCommitCheckpoint.prepare(
+                  validation,
+                  work,
+                  observer: references(),
+                ),
+                throwsFormatException,
+              );
+              recoveryHost.onStatus = null;
+              expect(changed, true);
+              expect(
+                (jsonDecode(await record.readAsString()) as Map)['committed'],
+                true,
+              );
+              final outputs = await retained.capture(nativeMetadata: true);
+              final roles = recoveryHost.executedRoles.length;
+              await expectLater(
+                ColdCommitCheckpoint.open(
+                  validation,
+                  work,
+                  observer: references(),
+                ),
+                throwsFormatException,
+              );
+              expect(recoveryHost.executedRoles.length, roles);
+              await retained.verify(outputs, nativeMetadata: true);
+              await state.verify(current, nativeMetadata: true);
+              await pair.verify(original, nativeMetadata: true);
+              await expectLater(
+                MaintenanceStateFence.requireUnfenced(recoveryState),
+                throwsA(isA<MaintenanceFenceActive>()),
+              );
+              // Product refusal retains this output. Only the now-verified
+              // negative test removes its own disposable commit namespace.
+              await Directory('${work.path}/commit').delete(recursive: true);
+              await File('${work.path}/.gaovm-cold-commit.lock').delete();
+            } finally {
+              recoveryHost.onStatus = null;
+              retained.close();
+              pair.close();
+              state.close();
+            }
+          });
+        },
+        timeout: const Timeout(Duration(minutes: 8)),
+      );
+      test(
+        'cold commit rejects a late forged terminal candidate before retiring the fence',
+        () async {
+          await withRecoveredCheckpoint('commit-terminal-tamper-inspection', (
+            validation,
+            work,
+          ) async {
+            final state = await MaintenanceTree.open(recoveryState);
+            final pair = await MaintenanceTree.open(
+              Directory('${recoveryWork.path}/preparation'),
+            );
+            final retained = await MaintenanceTree.open(recoveryWork);
+            ColdCommitCheckpoint? commit;
+            var changed = false;
+            try {
+              final current = await state.capture(nativeMetadata: true);
+              final original = await pair.capture(nativeMetadata: true);
+              commit = await ColdCommitCheckpoint.prepare(
+                validation,
+                work,
+                observer: references(),
+              );
+              final record = File(
+                '${work.path}/commit/.completed.partial/record.json',
+              );
+              recoveryHost.onStatus = () async {
+                if (!record.existsSync() || changed) return;
+                changed = true;
+                final forged = Map<String, Object?>.from(
+                  jsonDecode(await record.readAsString()) as Map,
+                )..['startup_allowed'] = false;
+                imageFileMode(record.path, 0x180);
+                await record.writeAsString(
+                  '${jsonEncode(forged)}\n',
+                  flush: true,
+                );
+                imageFileMode(record.path, 0x100);
+              };
+              await expectLater(
+                commit.commit(allowStartup: true, observer: references()),
+                throwsFormatException,
+              );
+              recoveryHost.onStatus = null;
+              expect(changed, true);
+              expect(await record.exists(), true);
+              expect(
+                await Directory('${work.path}/commit/retired-fence').exists(),
+                false,
+              );
+              expect(
+                await Directory('${work.path}/commit/completed').exists(),
+                false,
+              );
+              commit.close();
+              commit = null;
+              final outputs = await retained.capture(nativeMetadata: true);
+              final roles = recoveryHost.executedRoles.length;
+              await expectLater(
+                ColdCommitCheckpoint.open(
+                  validation,
+                  work,
+                  observer: references(),
+                ),
+                throwsFormatException,
+              );
+              expect(recoveryHost.executedRoles.length, roles);
+              await retained.verify(outputs, nativeMetadata: true);
+              await state.verify(current, nativeMetadata: true);
+              await pair.verify(original, nativeMetadata: true);
+              await expectLater(
+                MaintenanceStateFence.requireUnfenced(recoveryState),
+                throwsA(isA<MaintenanceFenceActive>()),
+              );
+              // Only this successful negative test removes its own output.
+              await Directory('${work.path}/commit').delete(recursive: true);
+              await File('${work.path}/.gaovm-cold-commit.lock').delete();
+            } finally {
+              recoveryHost.onStatus = null;
+              commit?.close();
+              retained.close();
+              pair.close();
+              state.close();
+            }
+          });
+        },
+        timeout: const Timeout(Duration(minutes: 8)),
+      );
+      for (final missing in [false, true]) {
+        test(
+          'cold commit recovery retains ${missing ? "incomplete" : "unknown"} partial output without promotion',
+          () async {
+            await withRecoveredCheckpoint(
+              'commit-${missing ? "missing" : "unknown"}-inspection',
+              (validation, work) async {
+                final state = await MaintenanceTree.open(recoveryState);
+                final pair = await MaintenanceTree.open(
+                  Directory('${recoveryWork.path}/preparation'),
+                );
+                final retained = await MaintenanceTree.open(recoveryWork);
+                ColdCommitCheckpoint? commit;
+                try {
+                  final current = await state.capture(nativeMetadata: true);
+                  final original = await pair.capture(nativeMetadata: true);
+                  commit = await ColdCommitCheckpoint.prepare(
+                    validation,
+                    work,
+                    observer: references(),
+                  );
+                  commit.close();
+                  commit = null;
+                  await work.renameDirectoryNoReplace(
+                    'commit',
+                    '.commit.partial',
+                  );
+                  final partial = '${work.path}/.commit.partial';
+                  if (missing) {
+                    await File('$partial/prepared/record.json').delete();
+                  } else {
+                    await File('$partial/unknown').writeAsString('retain me\n');
+                    imageFileMode('$partial/unknown', 0x180);
+                  }
+                  final outputs = await retained.capture(nativeMetadata: true);
+                  final roles = recoveryHost.executedRoles.length;
+                  await expectLater(
+                    ColdCommitCheckpoint.open(
+                      validation,
+                      work,
+                      observer: references(),
+                    ),
+                    throwsFormatException,
+                  );
+                  expect(recoveryHost.executedRoles.length, roles);
+                  expect(await Directory(partial).exists(), true);
+                  expect(
+                    await Directory('${work.path}/commit').exists(),
+                    false,
+                  );
+                  await retained.verify(outputs, nativeMetadata: true);
+                  await state.verify(current, nativeMetadata: true);
+                  await pair.verify(original, nativeMetadata: true);
+                  await expectLater(
+                    MaintenanceStateFence.requireUnfenced(recoveryState),
+                    throwsA(isA<MaintenanceFenceActive>()),
+                  );
+                  await Directory(partial).delete(recursive: true);
+                  await File('${work.path}/.gaovm-cold-commit.lock').delete();
+                } finally {
+                  commit?.close();
+                  retained.close();
+                  pair.close();
+                  state.close();
+                }
+              },
+            );
+          },
+          timeout: const Timeout(Duration(minutes: 8)),
+        );
+      }
+      test(
+        'cold commit refuses a closed recovered validation before creating output',
+        () async {
+          await withRecoveredCheckpoint('commit-closed-owner-inspection', (
+            validation,
+            work,
+          ) async {
+            final state = await MaintenanceTree.open(recoveryState);
+            final retained = await MaintenanceTree.open(recoveryWork);
+            try {
+              final current = await state.capture(nativeMetadata: true);
+              final outputs = await retained.capture(nativeMetadata: true);
+              final roles = recoveryHost.executedRoles.length;
+              validation.close();
+              await expectLater(
+                ColdCommitCheckpoint.prepare(
+                  validation,
+                  work,
+                  observer: references(),
+                ),
+                throwsFormatException,
+              );
+              expect(recoveryHost.executedRoles.length, roles);
+              await retained.verify(outputs, nativeMetadata: true);
+              await state.verify(current, nativeMetadata: true);
+              await expectLater(
+                MaintenanceStateFence.requireUnfenced(recoveryState),
+                throwsA(isA<MaintenanceFenceActive>()),
+              );
+            } finally {
+              retained.close();
+              state.close();
+            }
+          });
+        },
+        timeout: const Timeout(Duration(minutes: 8)),
+      );
+      test(
+        'cold commit allows manual startup only after explicit acknowledgement and full verification',
+        () async {
+          await withRecoveredCheckpoint('commit-final-inspection', (
+            validation,
+            work,
+          ) async {
+            final state = await MaintenanceTree.open(recoveryState);
+            final pair = await MaintenanceTree.open(
+              Directory('${recoveryWork.path}/preparation'),
+            );
+            ColdCommitCheckpoint? commit;
+            try {
+              final current = await state.capture(nativeMetadata: true);
+              final original = await pair.capture(nativeMetadata: true);
+              final marker = validated['fence_path'] as String;
+              final markerBytes = await File(
+                '$marker/intent.json',
+              ).readAsBytes();
+              commit = await ColdCommitCheckpoint.prepare(
+                validation,
+                work,
+                observer: references(),
+              );
+              final roles = recoveryHost.executedRoles.length;
+              await expectLater(
+                commit.commit(allowStartup: false, observer: references()),
+                throwsFormatException,
+              );
+              expect(recoveryHost.executedRoles.length, roles);
+              await expectLater(
+                MaintenanceStateFence.requireUnfenced(recoveryState),
+                throwsA(isA<MaintenanceFenceActive>()),
+              );
+              final result = await commit.commit(
+                allowStartup: true,
+                observer: references(),
+              );
+              expect(result['format'], 'gaovm.cold-upgrade-commit.v1');
+              expect(result['phase'], 'upgrade_committed');
+              expect(result['committed'], true);
+              expect(result['startup_allowed'], true);
+              expect(result['service_actions_performed'], false);
+              expect(result['ordinary_ready'], false);
+              expect(result['state_unchanged'], true);
+              expect(await Directory(marker).exists(), false);
+              expect(
+                await File(
+                  '${work.path}/commit/retired-fence/intent.json',
+                ).readAsBytes(),
+                markerBytes,
+              );
+              expect(
+                jsonDecode(
+                  await File(
+                    '${work.path}/commit/completed/record.json',
+                  ).readAsString(),
+                ),
+                result,
+              );
+              commit.close();
+              commit = null;
+              // A fully sealed post-retirement placement, not process-kill E2E.
+              final checkpoint = work.directory('commit');
+              try {
+                await checkpoint.renameDirectoryNoReplace(
+                  'completed',
+                  '.completed.partial',
+                );
+              } finally {
+                checkpoint.close();
+              }
+              commit = await ColdCommitCheckpoint.open(
+                validation,
+                work,
+                observer: references(),
+              );
+              expect(
+                await commit.commit(allowStartup: true, observer: references()),
+                result,
+              );
+              expect(
+                await Directory(
+                  '${work.path}/commit/.completed.partial',
+                ).exists(),
+                false,
+              );
+              await MaintenanceStateFence.requireUnfenced(recoveryState);
+              final root = await OwnedImageDirectory.open(recoveryState);
+              DaemonOwnership? contender;
+              try {
+                contender = await DaemonOwnership.tryAcquire(root);
+                expect(contender, isNull);
+              } finally {
+                contender?.close();
+                root.close();
+              }
+              await state.verify(current, nativeMetadata: true);
+              await pair.verify(original, nativeMetadata: true);
+              commit.close();
+              commit = null;
+              await restoreSuccessfulTestCommit(work);
+            } finally {
+              commit?.close();
+              pair.close();
+              state.close();
+            }
+          });
+        },
+        timeout: const Timeout(Duration(minutes: 8)),
+      );
+      test(
+        'cold commit operator preserves both states and refuses a blind repeated commit',
+        () async {
+          active++;
+          activeRetirementChecks++;
+          final state = await MaintenanceTree.open(recoveryState);
+          final pair = await MaintenanceTree.open(
+            Directory('${recoveryWork.path}/preparation'),
+          );
+          final outputs = await MaintenanceTree.open(recoveryWork);
+          OwnedImageDirectory? work;
+          try {
+            final current = await state.capture(nativeMetadata: true);
+            final original = await pair.capture(nativeMetadata: true);
+            final inspection = await Directory(
+              '${recoveryTemporary.path}/commit-operator-inspection',
+            ).create();
+            imageFileMode(inspection.path, 0x1c0);
+            final result = await runMacOsColdPublication(
+              [
+                'commit-upgrade',
+                '--allow-startup',
+                ...recoveryArguments.skip(1),
+                '--inspection-dir',
+                inspection.path,
+              ],
+              host: recoveryHost,
+              observer: references(),
+              inventory: (_) async => DriverInventorySnapshot(
+                processes: [],
+                unresolvedProcessIds: [],
+              ),
+            );
+            expect(result['format'], 'gaovm.cold-upgrade-commit.v1');
+            expect(result['action'], 'commit-upgrade');
+            expect(result['status'], 'observed');
+            expect(result['committed'], true);
+            expect(result['startup_allowed'], true);
+            expect(result['service_actions_performed'], false);
+            expect(result['ordinary_ready'], false);
+            expect(result['applied_catalog_schema'], 21);
+            await MaintenanceStateFence.requireUnfenced(recoveryState);
+            final retained = await outputs.capture(nativeMetadata: true);
+            final repeated = await Directory(
+              '${recoveryTemporary.path}/commit-blind-retry-inspection',
+            ).create();
+            imageFileMode(repeated.path, 0x1c0);
+            final roles = recoveryHost.executedRoles.length;
+            await expectLater(
+              runMacOsColdPublication(
+                [
+                  'commit-upgrade',
+                  '--allow-startup',
+                  ...recoveryArguments.skip(1),
+                  '--inspection-dir',
+                  repeated.path,
+                ],
+                host: recoveryHost,
+                observer: references(),
+                inventory: (_) async =>
+                    throw StateError('no native census on blind retry'),
+              ),
+              throwsA(
+                isA<ColdPublicationFailure>().having(
+                  (error) => error.stage,
+                  'refusal before native work',
+                  'inputs',
+                ),
+              ),
+            );
+            expect(recoveryHost.executedRoles.length, roles);
+            expect(await repeated.list().toList(), isEmpty);
+            await outputs.verify(retained, nativeMetadata: true);
+            await state.verify(current, nativeMetadata: true);
+            await pair.verify(original, nativeMetadata: true);
+            final blockedInspection = await Directory(
+              '${recoveryTemporary.path}/commit-unresolved-resume-inspection',
+            ).create();
+            imageFileMode(blockedInspection.path, 0x1c0);
+            await expectLater(
+              runMacOsColdPublication(
+                [
+                  'resume-commit',
+                  '--allow-startup',
+                  ...recoveryArguments.skip(1),
+                  '--inspection-dir',
+                  blockedInspection.path,
+                ],
+                host: recoveryHost,
+                observer: references(),
+                inventory: (_) async => DriverInventorySnapshot(
+                  processes: [],
+                  unresolvedProcessIds: [pid + 500],
+                ),
+              ),
+              throwsA(
+                isA<ColdPublicationFailure>().having(
+                  (error) => error.stage,
+                  'unresolved process refusal before state inspection',
+                  'cold',
+                ),
+              ),
+            );
+            expect(await blockedInspection.list().toList(), isEmpty);
+            await outputs.verify(retained, nativeMetadata: true);
+            await state.verify(current, nativeMetadata: true);
+            await pair.verify(original, nativeMetadata: true);
+            final resumeInspection = await Directory(
+              '${recoveryTemporary.path}/commit-operator-resume-inspection',
+            ).create();
+            imageFileMode(resumeInspection.path, 0x1c0);
+            final recovered = await runMacOsColdPublication(
+              [
+                'resume-commit',
+                '--allow-startup',
+                ...recoveryArguments.skip(1),
+                '--inspection-dir',
+                resumeInspection.path,
+              ],
+              host: recoveryHost,
+              observer: references(),
+              inventory: (_) async => DriverInventorySnapshot(
+                processes: [],
+                unresolvedProcessIds: [],
+              ),
+            );
+            expect(recovered['committed'], true);
+            expect(recovered['startup_allowed'], true);
+            expect(recovered['service_actions_performed'], false);
+            expect(recovered['action'], 'resume-commit');
+            expect(
+              recovered['validation_record_digest'],
+              result['validation_record_digest'],
+            );
+            await outputs.verify(retained, nativeMetadata: true);
+            await state.verify(current, nativeMetadata: true);
+            await pair.verify(original, nativeMetadata: true);
+            work = await OwnedImageDirectory.open(recoveryWork);
+            await restoreSuccessfulTestCommit(work);
+          } catch (_) {
+            retain = true;
+            rethrow;
+          } finally {
+            work?.close();
+            outputs.close();
+            pair.close();
+            state.close();
+            activeRetirementChecks--;
+            active--;
+          }
+        },
+        timeout: const Timeout(Duration(minutes: 8)),
+      );
+      test(
+        'cold commit resumes a sealed terminal candidate retained before fence retirement',
+        () async {
+          active++;
+          activeRetirementChecks++;
+          final state = await MaintenanceTree.open(recoveryState);
+          final pair = await MaintenanceTree.open(
+            Directory('${recoveryWork.path}/preparation'),
+          );
+          OwnedImageDirectory? work;
+          var interrupted = false;
+          try {
+            final current = await state.capture(nativeMetadata: true);
+            final original = await pair.capture(nativeMetadata: true);
+            final inspection = await Directory(
+              '${recoveryTemporary.path}/commit-before-retirement-inspection',
+            ).create();
+            imageFileMode(inspection.path, 0x1c0);
+            final record = File(
+              '${recoveryWork.path}/commit/.completed.partial/record.json',
+            );
+            recoveryHost.onStatus = () async {
+              if (!record.existsSync() || interrupted) return;
+              interrupted = true;
+              throw StateError(
+                'injected observation failure before retirement',
+              );
+            };
+            await expectLater(
+              runMacOsColdPublication(
+                [
+                  'commit-upgrade',
+                  '--allow-startup',
+                  ...recoveryArguments.skip(1),
+                  '--inspection-dir',
+                  inspection.path,
+                ],
+                host: recoveryHost,
+                observer: references(),
+                inventory: (_) async => DriverInventorySnapshot(
+                  processes: [],
+                  unresolvedProcessIds: [],
+                ),
+              ),
+              throwsA(
+                isA<ColdPublicationFailure>().having(
+                  (error) => error.stage,
+                  'injected pre-retirement interruption',
+                  'commit',
+                ),
+              ),
+            );
+            recoveryHost.onStatus = null;
+            expect(interrupted, true);
+            expect(await record.exists(), true);
+            expect(
+              await Directory(
+                '${recoveryWork.path}/commit/retired-fence',
+              ).exists(),
+              false,
+            );
+            await expectLater(
+              MaintenanceStateFence.requireUnfenced(recoveryState),
+              throwsA(isA<MaintenanceFenceActive>()),
+            );
+            await state.verify(current, nativeMetadata: true);
+            await pair.verify(original, nativeMetadata: true);
+            final resumeInspection = await Directory(
+              '${recoveryTemporary.path}/commit-before-retirement-resume-inspection',
+            ).create();
+            imageFileMode(resumeInspection.path, 0x1c0);
+            final recovered = await runMacOsColdPublication(
+              [
+                'resume-commit',
+                '--allow-startup',
+                ...recoveryArguments.skip(1),
+                '--inspection-dir',
+                resumeInspection.path,
+              ],
+              host: recoveryHost,
+              observer: references(),
+              inventory: (_) async => DriverInventorySnapshot(
+                processes: [],
+                unresolvedProcessIds: [],
+              ),
+            );
+            expect(recovered['committed'], true);
+            expect(recovered['startup_allowed'], true);
+            expect(recovered['service_actions_performed'], false);
+            expect(recovered['ordinary_ready'], false);
+            expect(recovered['action'], 'resume-commit');
+            expect(await record.exists(), false);
+            await MaintenanceStateFence.requireUnfenced(recoveryState);
+            await state.verify(current, nativeMetadata: true);
+            await pair.verify(original, nativeMetadata: true);
+            work = await OwnedImageDirectory.open(recoveryWork);
+            await restoreSuccessfulTestCommit(work);
+          } catch (_) {
+            retain = true;
+            rethrow;
+          } finally {
+            recoveryHost.onStatus = null;
+            work?.close();
+            pair.close();
+            state.close();
+            activeRetirementChecks--;
+            active--;
+          }
+        },
+        timeout: const Timeout(Duration(minutes: 8)),
+      );
       test(
         'reopens a sealed result after actual legacy migration without changing either state generation',
         () async {

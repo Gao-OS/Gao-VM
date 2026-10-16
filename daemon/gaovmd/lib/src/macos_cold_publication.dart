@@ -22,6 +22,7 @@ export 'macos_cold_command.dart' show ColdPublicationFailure;
 part 'macos_cold_uninstall.dart';
 part 'macos_cold_validation_recovery.dart';
 part 'macos_candidate_validation_launch.dart';
+part 'macos_cold_commit.dart';
 
 /// The source/operator executable interface, not a daemon API or driver proxy.
 /// Injection is confined to native observations, never command-line bypasses.
@@ -33,6 +34,15 @@ Future<Map<String, Object?>> runMacOsColdPublication(
   Future<DriverInventorySnapshot> Function(String)? inventory,
   CandidateValidationLauncher? candidateLauncher,
 }) async {
+  if (arguments.isNotEmpty &&
+      {'commit-upgrade', 'resume-commit'}.contains(arguments.first)) {
+    return runMacOsColdCommit(
+      arguments,
+      host: host,
+      observer: observer,
+      inventory: inventory,
+    );
+  }
   if (arguments.isNotEmpty && arguments.first == 'validate-upgrade') {
     return runMacOsColdValidationLaunch(
       arguments,

@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:gaovmd/gaovmd.dart';
 import 'package:gaovmd/src/cold_state_lease.dart';
 import 'package:gaovmd/src/image_filesystem.dart';
@@ -16,6 +18,7 @@ void main() {
   late ColdStateLease lease;
   late _Host initialHost;
   MaintenanceStateFence? fence;
+  var retainInputs = false;
   final children = <OwnedTestProcess>[];
   Future<ProcessResult> command(String executable, List<String> args) async {
     final child = OwnedTestProcess(await Process.start(executable, args));
@@ -44,6 +47,7 @@ void main() {
       host: initialHost,
     );
     fence = null;
+    retainInputs = false;
     children.clear();
   });
   tearDown(() async {
@@ -55,11 +59,264 @@ void main() {
       fence?.close();
       lease.close();
     } finally {
-      if (exitsConfirmed) await temporary.delete(recursive: true);
+      if (exitsConfirmed && !retainInputs)
+        await temporary.delete(recursive: true);
     }
-    if (!exitsConfirmed)
-      fail('unconfirmed fixture exit; retained ${temporary.path}');
+    if (!exitsConfirmed || retainInputs)
+      fail('retaining cold fence fixture: ${temporary.path}');
   });
+
+  test(
+    'cold commit retires the exact fence while retaining real state ownership',
+    () async {
+      final destinationDirectory = await Directory(
+        '${temporary.path}/commit',
+      ).create();
+      imageFileMode(destinationDirectory.path, 0x1c0);
+      final destination = await OwnedImageDirectory.open(destinationDirectory);
+      final stateTree = await MaintenanceTree.open(state);
+      try {
+        fence = await MaintenanceStateFence.begin(lease);
+        final marker = fence!.path;
+        final original = await OwnedImageDirectory.open(Directory(marker));
+        late Map<String, Object?> identity;
+        try {
+          identity = await original.maintenanceIdentity();
+        } finally {
+          original.close();
+        }
+        final intent = await File('$marker/intent.json').readAsBytes();
+        final before = await stateTree.capture(nativeMetadata: true);
+        var checked = false;
+        await lease.commitStartupFence(
+          fence!,
+          destination,
+          verifyPreparedInputs: () async {
+            checked = true;
+            await stateTree.verify(before, nativeMetadata: true);
+          },
+        );
+        expect(checked, true);
+        expect(fence!.path, marker);
+        expect(await Directory(marker).exists(), false);
+        final retired = destination.directory('retired-fence');
+        final root = await OwnedImageDirectory.open(state);
+        DaemonOwnership? contender;
+        try {
+          expect(await retired.maintenanceIdentity(), identity);
+          expect(
+            await File('${retired.path}/intent.json').readAsBytes(),
+            intent,
+          );
+          await fence!.verifyFor(root);
+          await MaintenanceStateFence.requireUnfenced(state);
+          contender = await DaemonOwnership.tryAcquire(root);
+          expect(contender, isNull);
+          await stateTree.verify(before, nativeMetadata: true);
+        } finally {
+          contender?.close();
+          root.close();
+          retired.close();
+        }
+      } catch (_) {
+        retainInputs = true;
+        rethrow;
+      } finally {
+        stateTree.close();
+        destination.close();
+      }
+    },
+    skip: !Platform.isMacOS,
+  );
+
+  test(
+    'cold commit recovery reacquires the retained fence and original state lock',
+    () async {
+      final directory = await Directory('${temporary.path}/commit').create();
+      imageFileMode(directory.path, 0x1c0);
+      final checkpoint = await OwnedImageDirectory.open(directory);
+      try {
+        fence = await MaintenanceStateFence.begin(lease);
+        final marker = fence!.path;
+        final root = await OwnedImageDirectory.open(Directory(marker));
+        late Map<String, Object?> identity;
+        try {
+          identity = await root.maintenanceIdentity();
+        } finally {
+          root.close();
+        }
+        final digest =
+            'sha256:${sha256.convert(await File('$marker/intent.json').readAsBytes())}';
+        await lease.commitStartupFence(
+          fence!,
+          checkpoint,
+          verifyPreparedInputs: () async {},
+        );
+        fence!.close();
+        lease.close();
+        fence = await MaintenanceStateFence.openRetiredForCommit(
+          state,
+          checkpoint,
+          expectedIdentity: identity,
+          expectedIntentDigest: digest,
+        );
+        lease = await ColdStateLease.acquire(
+          state,
+          bundleIdentifier: 'org.gaovm.tests.Fence',
+          host: initialHost,
+          maintenanceFence: fence,
+        );
+        expect(fence!.path, marker);
+        expect(fence!.retainedPath, '${checkpoint.path}/retired-fence');
+        expect(fence!.retiredForCommit, true);
+        await lease.verify();
+        await MaintenanceStateFence.requireUnfenced(state);
+      } catch (_) {
+        retainInputs = true;
+        rethrow;
+      } finally {
+        checkpoint.close();
+      }
+    },
+    skip: !Platform.isMacOS,
+  );
+
+  for (final change in ['identity', 'digest', 'active-marker']) {
+    test(
+      'cold commit recovery refuses a changed $change without repairing output',
+      () async {
+        final directory = await Directory('${temporary.path}/commit').create();
+        imageFileMode(directory.path, 0x1c0);
+        final checkpoint = await OwnedImageDirectory.open(directory);
+        MaintenanceTree? retained;
+        try {
+          fence = await MaintenanceStateFence.begin(lease);
+          final marker = fence!.path;
+          final root = await OwnedImageDirectory.open(Directory(marker));
+          late Map<String, Object?> identity;
+          try {
+            identity = await root.maintenanceIdentity();
+          } finally {
+            root.close();
+          }
+          var digest =
+              'sha256:${sha256.convert(await File('$marker/intent.json').readAsBytes())}';
+          await lease.commitStartupFence(
+            fence!,
+            checkpoint,
+            verifyPreparedInputs: () async {},
+          );
+          fence!.close();
+          lease.close();
+          if (change == 'identity') {
+            identity = {...identity, 'inode': (identity['inode'] as int) + 1};
+          } else if (change == 'digest') {
+            digest = 'sha256:${'00' * 32}';
+          } else {
+            await File(marker).writeAsString('foreign marker\n');
+            imageFileMode(marker, 0x180);
+          }
+          retained = await MaintenanceTree.open(temporary);
+          final before = await retained.capture(nativeMetadata: true);
+          await expectLater(
+            MaintenanceStateFence.openRetiredForCommit(
+              state,
+              checkpoint,
+              expectedIdentity: identity,
+              expectedIntentDigest: digest,
+            ),
+            throwsFormatException,
+          );
+          await retained.verify(before, nativeMetadata: true);
+          expect(
+            await Directory('${checkpoint.path}/retired-fence').exists(),
+            true,
+          );
+          expect(await File('$marker.lock').exists(), true);
+        } catch (_) {
+          retainInputs = true;
+          rethrow;
+        } finally {
+          retained?.close();
+          checkpoint.close();
+        }
+      },
+      skip: !Platform.isMacOS,
+    );
+  }
+
+  test(
+    'cold commit keeps its owner during a pending verification and preserves a refused fence',
+    () async {
+      final directory = await Directory('${temporary.path}/commit').create();
+      imageFileMode(directory.path, 0x1c0);
+      final checkpoint = await OwnedImageDirectory.open(directory);
+      final entered = Completer<void>(), release = Completer<void>();
+      Future<void>? pending;
+      Object? failure;
+      var settled = false;
+      try {
+        fence = await MaintenanceStateFence.begin(lease);
+        pending = lease
+            .commitStartupFence(
+              fence!,
+              checkpoint,
+              verifyPreparedInputs: () async {
+                entered.complete();
+                await release.future;
+                throw const FormatException(
+                  'injected final verification refusal',
+                );
+              },
+            )
+            .then<void>(
+              (_) => fail('refused verification cannot commit'),
+              onError: (Object error) {
+                failure = error;
+              },
+            )
+            .whenComplete(() {
+              settled = true;
+            });
+        await entered.future;
+        expect(lease.close, throwsStateError);
+        expect(settled, false);
+        final root = await OwnedImageDirectory.open(state);
+        OwnedImageLock? contender;
+        try {
+          contender = await root.tryAcquireMaintenanceLock(
+            '.gaovmd.lock',
+            create: false,
+          );
+          expect(contender, isNull);
+        } finally {
+          contender?.close();
+          root.close();
+        }
+        await expectLater(
+          MaintenanceStateFence.requireUnfenced(state),
+          throwsA(isA<MaintenanceFenceActive>()),
+        );
+        release.complete();
+        await pending;
+        expect(failure, isA<FormatException>());
+        expect(
+          await Directory('${checkpoint.path}/retired-fence').exists(),
+          false,
+        );
+        await fence!.verify();
+        await lease.verify();
+      } catch (_) {
+        retainInputs = true;
+        rethrow;
+      } finally {
+        if (!release.isCompleted) release.complete();
+        await pending;
+        checkpoint.close();
+      }
+    },
+    skip: !Platform.isMacOS,
+  );
 
   test(
     'ordinary cold ownership and a fence cannot grant candidate state borrowing',

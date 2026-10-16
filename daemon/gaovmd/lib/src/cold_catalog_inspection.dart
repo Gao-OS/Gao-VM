@@ -29,6 +29,7 @@ part 'cold_state_snapshot.dart';
 part 'cold_upgrade_snapshot.dart';
 part 'cold_upgrade_preparation.dart';
 part 'cold_validation_checkpoint.dart';
+part 'cold_commit_checkpoint.dart';
 part 'cold_uninstall_preparation.dart';
 
 /// Facts from a private catalog copy, not a full cold/upgrade certificate.

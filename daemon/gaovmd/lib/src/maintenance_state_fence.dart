@@ -31,12 +31,16 @@ final class MaintenanceStateFence {
 
   final OwnedImageDirectory _parent;
   final OwnedImageLock _lock;
-  final OwnedImageDirectory _marker;
+  OwnedImageDirectory _marker;
   final String sourceStatePath;
   final List<int> _encoded;
   final Map<String, Object?> _intent;
   bool _closed = false;
-  String get path => _marker.path;
+
+  /// Stable logical admission path, including after explicit cold commit.
+  String get path => '${_parent.path}/${_name(sourceStatePath)}';
+  String get retainedPath => _marker.path;
+  bool get retiredForCommit => retainedPath != path;
 
   /// Ordinary daemon admission only observes existence. Malformed/foreign
   /// entries block too; startup must never repair or remove a maintenance fence.
@@ -147,7 +151,29 @@ final class MaintenanceStateFence {
 
   /// Reopen only this canonical target's fixed sibling marker. JSON paths do
   /// not choose filesystem targets, and recovery never recreates a missing lock.
-  static Future<MaintenanceStateFence> open(Directory state) async {
+  static Future<MaintenanceStateFence> open(Directory state) => _open(state);
+
+  /// Fixed retained placement only, bound to the sealed commit's expected
+  /// native identity and bytes. This reacquires the original sibling lock;
+  /// callers still need fresh real state ownership and complete cold checks.
+  static Future<MaintenanceStateFence> openRetiredForCommit(
+    Directory state,
+    OwnedImageDirectory checkpoint, {
+    required Map<String, Object?> expectedIdentity,
+    required String expectedIntentDigest,
+  }) => _open(
+    state,
+    checkpoint: checkpoint,
+    expectedIdentity: expectedIdentity,
+    expectedIntentDigest: expectedIntentDigest,
+  );
+
+  static Future<MaintenanceStateFence> _open(
+    Directory state, {
+    OwnedImageDirectory? checkpoint,
+    Map<String, Object?>? expectedIdentity,
+    String? expectedIntentDigest,
+  }) async {
     final target = await _canonicalStatePath(state);
     if (target != state.path) {
       throw const FormatException(
@@ -165,8 +191,28 @@ final class MaintenanceStateFence {
         create: false,
       );
       if (lock == null) throw StateError('maintenance already has an owner');
-      marker = parent.directory(name);
+      if (checkpoint != null) {
+        await checkpoint.verifyPathBinding();
+        if (checkpoint.mode & 0xfff != 0x1c0 ||
+            (await checkpoint.maintenanceMetadata())['has_acl'] != false ||
+            maintenancePathEntryExists('${parent.path}/$name') ||
+            !_validIdentity(expectedIdentity) ||
+            !RegExp(
+              r'^sha256:[0-9a-f]{64}$',
+            ).hasMatch(expectedIntentDigest ?? '')) {
+          throw const FormatException('invalid retained commit fence boundary');
+        }
+      }
+      marker = checkpoint == null
+          ? parent.directory(name)
+          : checkpoint.directory('retired-fence');
       final encoded = await _readIntent(marker);
+      if (checkpoint != null &&
+          (jsonEncode(await marker.maintenanceIdentity()) !=
+                  jsonEncode(expectedIdentity) ||
+              'sha256:${sha256.convert(encoded)}' != expectedIntentDigest)) {
+        throw const FormatException('retained commit fence binding changed');
+      }
       final intent = jsonDecode(utf8.decode(encoded));
       if (intent is! Map<String, Object?> ||
           intent.length != 5 ||
@@ -223,6 +269,13 @@ final class MaintenanceStateFence {
   Future<void> verify() async {
     if (_closed) throw StateError('maintenance state fence is closed');
     await _verifyParent(_parent, Directory(sourceStatePath).parent.path);
+    if (retiredForCommit &&
+        (!retainedPath.endsWith('/retired-fence') ||
+            maintenancePathEntryExists(path))) {
+      throw const FormatException(
+        'retired maintenance fence placement changed',
+      );
+    }
     _lock.verifyPathBinding();
     final lockFile = _parent.file('${_name(sourceStatePath)}.lock');
     try {
@@ -244,6 +297,32 @@ final class MaintenanceStateFence {
     }
     _lock.verifyPathBinding();
     await _parent.verifyPathBinding();
+  }
+
+  /// Fixed no-replace marker move only. The cold-commit coordinator must hold
+  /// the real state lease and seal/recheck its complete intent before calling.
+  /// A failure can follow the rename; no reverse move or cleanup is attempted.
+  Future<void> retireToCommit(
+    OwnedImageDirectory source,
+    OwnedImageDirectory checkpoint,
+  ) async {
+    if (_closed || retiredForCommit) {
+      throw StateError('active maintenance fence required for cold commit');
+    }
+    await verifyFor(source);
+    await checkpoint.verifyPathBinding();
+    if (checkpoint.mode & 0xfff != 0x1c0 ||
+        (await checkpoint.maintenanceMetadata())['has_acl'] != false) {
+      throw const FormatException('private commit checkpoint required');
+    }
+    final moved = await _marker.moveForMaintenanceTo(
+      _parent,
+      checkpoint,
+      'retired-fence',
+    );
+    _marker.close();
+    _marker = moved;
+    await verifyFor(source);
   }
 
   static Future<List<int>> _readIntent(OwnedImageDirectory marker) async {

@@ -1,7 +1,7 @@
 ---
 title: macOS cold upgrade and whole-state rollback
 status: accepted
-updated: 2026-10-15
+updated: 2026-10-16
 ---
 
 # macOS cold upgrade and whole-state rollback
@@ -41,7 +41,7 @@ data and ownership guarantees and still pass native lifecycle acceptance.
 
 | Choice | Who establishes shutdown/activation | What the new tool must do |
 | --- | --- | --- |
-| Explicit cold operator workflow | Operator stops VMs/clients and unregisters the owning service; operator later approves startup/commit or requests rollback | Independently verify the cold boundary, snapshot, publish the candidate, retain old app/data, and perform explicit whole-state rollback only after a fresh cold check |
+| Explicit cold operator workflow | Operator stops VMs/clients and unregisters the owning service; operator later acknowledges cold commit then manually starts, or requests rollback | Independently verify the cold boundary, snapshot, publish the candidate, retain old app/data, and perform explicit whole-state rollback only after a fresh cold check |
 | Automatically orchestrated workflow | Tool previews required downtime and performs public VM actions and owning-helper service actions after explicit operator confirmation | All cold-workflow guarantees plus terminal Operation waits, authenticated readiness/compatibility probes, consent handling and failed-activation rollback |
 
 Only the first choice is in the accepted implementation scope. The second is
@@ -64,12 +64,18 @@ a running maintenance/helper executable.
 | Establish cold boundary | Service cannot restart; actual daemon/driver exits, drained workers, exclusive bound state ownership, no active mutating Operations or external writers | Retain original paths and runtime evidence; an acknowledgement or timeout is not quiescence |
 | Snapshot | Complete private state plus separately accounted external files; matching old signed app; verified durable snapshot/receipts at unused destinations | Retain partial output and original state; no force-overwrite or cleanup-based retry |
 | Publish candidate | Verified staged signed candidate, retained old app/state, durable transaction checkpoint and startup/writer fencing through the publication window | Preserve both generations; incomplete publication must fail closed and expose a recovery action |
-| Validate/commit | Expected versions, schema migration, installed public API/doctor, catalog identities and downloadable evidence; no intervening client writes before commit | Remain uncommitted; never convert service authorization or a green static signature into product readiness |
+| Validate/commit | Expected versions, schema migration, installed public API/doctor, catalog identities and downloadable evidence; no intervening client writes before commit | Before fence retirement remain uncommitted; after an uncertain move retain all evidence for explicit recovery. Never equate a commit or static signature with product readiness |
 | Roll back | Fresh proven cold boundary, verified old app and complete pre-upgrade state, same canonical path/UID, explicit acceptance of history/data rewind | Preserve post-upgrade state separately; restore the matching pair, not an old binary over a newer catalog |
 
-Activation is distinct from publication. For the cold interface, the operator
-selects activation and then commit/rollback; a prepared transaction is not a
-successful upgrade. For automatic activation, required user consent is a
+Activation is distinct from publication. On 2026-10-16 the user selected the
+cold-interface sequence: explicit `commit-upgrade` with complete cold revalidation
+and `--allow-startup` acknowledgement, atomic retirement (not deletion) of the
+startup fence, then manual operator registration/start. The tool does not start
+the service or declare installed/Guest readiness. A prepared transaction is not
+a commit; an interrupted commit requires explicit fixed-checkpoint recovery,
+not blind retry or manually clearing a marker. This sequence does not authorize
+this agent to operate an installed service or app/state tree.
+For automatic activation, required user consent is a
 distinct waiting/action-needed outcome, not failed readiness or permission to
 retry registration. If quiescence cannot be re-established after failed
 activation, retain all generations and stop before restoring over live writers.
@@ -146,8 +152,9 @@ explicitly authorized operation, outside this proposal.
    protocol checks, failed-upgrade rollback and uninstall on an authorized native
    host. Then verify controlled VZ/Guest recovery and complete release gates.
 
-At this proposal checkpoint **none of those new work packages is claimed
-implemented or passing**. Existing assembly/service/backup component results
+The initial 2026-10-15 proposal checkpoint **did not claim any of those new work
+packages implemented or passing**. Subsequent component evidence is recorded in
+the [acceptance ledger](../MVP_ACCEPTANCE.md). Existing assembly/service/backup component results
 are prerequisites, not lifecycle transaction acceptance. Apple Silicon execution
 remains assigned to the user; no machine switch, live service action or release
 publication is part of this design turn.

@@ -22,6 +22,14 @@ const _usage = '''Usage:
     --work-dir PATH --inspection-dir PATH --bundle-id ID
     --old-version X.Y.Z --new-version X.Y.Z --team-id TEAMID
     --catalog-schema N
+  maintain_macos.dart commit-upgrade --allow-startup --app PATH --state-dir PATH
+    --work-dir PATH --inspection-dir PATH --bundle-id ID
+    --old-version X.Y.Z --new-version X.Y.Z --team-id TEAMID
+    --catalog-schema N
+  maintain_macos.dart resume-commit --allow-startup --app PATH --state-dir PATH
+    --work-dir PATH --inspection-dir PATH --bundle-id ID
+    --old-version X.Y.Z --new-version X.Y.Z --team-id TEAMID
+    --catalog-schema N
   maintain_macos.dart uninstall-app --app PATH --state-dir PATH
     --work-dir PATH --inspection-dir PATH --bundle-id ID
     --version X.Y.Z --team-id TEAMID
@@ -30,17 +38,19 @@ const _usage = '''Usage:
     --version X.Y.Z --team-id TEAMID
     --from preparation|retirement --catalog-schema N
 
-Explicit cold-operator publication, controlled validation, sealed recovery or
-data-preserving uninstall; does not activate, register, stop, commit, roll back,
+Explicit cold-operator publication, controlled validation, commit, sealed recovery or
+data-preserving uninstall; does not activate, register, stop, roll back,
 or remove retained files. Only validate-upgrade can apply controlled catalog and
 legacy migration; it awaits its owned candidate exit and rechecks sealed evidence.
+Only explicit commit-upgrade/resume-commit with --allow-startup may retire the startup fence;
+registration/start remains manual and committed does not mean installed readiness.
 Quiesce clients, services
 and VMs first. All paths are explicit canonical absolute paths. State, work and
 inspection are private; work and inspection are disjoint from all app inputs.
 Fresh publication requires empty work and inspection directories. Every resume
 requires a new empty inspection directory. Catalog schema on resume is an
 expected compatibility input, independently checked against the cold catalog.
-For resume-validation it is the original source schema, not the migrated schema.
+For validation recovery and commit it is the original source schema, not the migrated schema.
 Only a complete sealed validation checkpoint can be recovered; the state and
 original rollback pair must be unchanged. Recovery does not rerun the public API.
 The command executable and source must remain outside all protected trees.
@@ -58,6 +68,9 @@ Future<void> main(List<String> arguments) async {
       arguments.isNotEmpty && arguments.first == 'resume-validation';
   final validationLaunch =
       arguments.isNotEmpty && arguments.first == 'validate-upgrade';
+  final coldCommit =
+      arguments.isNotEmpty &&
+      {'commit-upgrade', 'resume-commit'}.contains(arguments.first);
   try {
     stdout.writeln(
       jsonEncode(
@@ -75,7 +88,9 @@ Future<void> main(List<String> arguments) async {
         cause is ReleaseInspectionFailure && cause.status == 'incompatible';
     stdout.writeln(
       jsonEncode({
-        'format': uninstall
+        'format': coldCommit
+            ? 'gaovm.cold-upgrade-commit-command.v1'
+            : uninstall
             ? 'gaovm.cold-uninstall-command.v1'
             : validationRecovery
             ? 'gaovm.cold-validation-recovery-command.v1'
@@ -98,7 +113,10 @@ Future<void> main(List<String> arguments) async {
         'retain_inputs_and_outputs': true,
         'activation_authorized': false,
         'rollback_authorized': false,
-        'committed': false,
+        // A failed move/fsync/recheck can follow physical fence retirement.
+        // Do not turn an unverified placement into a false non-commit claim.
+        'committed': coldCommit ? null : false,
+        if (coldCommit) 'startup_allowed': null,
       }),
     );
     exitCode = incompatible ? 2 : 3;

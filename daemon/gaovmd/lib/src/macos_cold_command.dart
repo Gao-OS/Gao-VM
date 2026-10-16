@@ -50,7 +50,15 @@ Future<void> verifyColdWork(
   String? phase, {
   bool uninstall = false,
   bool candidateValidation = false,
+  String? commitCheckpoint,
 }) async {
+  if (commitCheckpoint != null &&
+      (uninstall ||
+          !candidateValidation ||
+          phase != coldPublicationName ||
+          !{'commit', '.commit.partial'}.contains(commitCheckpoint))) {
+    throw const FormatException('invalid cold commit namespace');
+  }
   await root.verifyPathBinding();
   if (root.mode & 0xfff != 0x1c0 ||
       (await root.maintenanceMetadata())['has_acl'] != false) {
@@ -80,6 +88,10 @@ Future<void> verifyColdWork(
   await verifyColdEntries(root, {
     ...coldWorkEntries(phase, uninstall: uninstall),
     if (candidateValidation) 'validation',
+    if (commitCheckpoint != null) ...{
+      '.gaovm-cold-commit.lock',
+      commitCheckpoint,
+    },
   });
   lock.verifyPathBinding();
 }

@@ -21,6 +21,7 @@ final class ColdValidationCheckpoint {
   ColdUpgradePreparation? _prepared;
   final _external = <String, _HeldReference>{};
   bool _closed = false;
+  bool _recovered = false;
 
   /// Read only the operator's fixed children, before any native helper runs.
   /// Unknown/partial snapshots and older intents without inode binding refuse.
@@ -219,6 +220,7 @@ final class ColdValidationCheckpoint {
       await _root.sync();
       await _verify(current, observer);
     }
+    _recovered = true;
     return {
       ...jsonDecode(jsonEncode(_record)) as Map<String, Object?>,
       'format': 'gaovm.cold-validation-recovery-command.v1',

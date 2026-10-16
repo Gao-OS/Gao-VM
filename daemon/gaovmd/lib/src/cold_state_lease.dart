@@ -359,6 +359,33 @@ final class ColdStateLease {
     }
   }
 
+  /// Explicit final cold-commit boundary, not service registration/activation.
+  /// The callback closes the complete prepared read set after native observers.
+  /// Closing this lease is refused until the original action has settled.
+  Future<void> commitStartupFence(
+    MaintenanceStateFence fence,
+    OwnedImageDirectory checkpoint, {
+    required Future<void> Function() verifyPreparedInputs,
+  }) async {
+    if (_closed || _retiring) throw StateError('cold lease is unavailable');
+    _retiring = true;
+    try {
+      await verify();
+      await fence.verifyFor(
+        _root,
+        bundleIdentifier: _bundleIdentifier,
+        appPath: installationPath,
+      );
+      _maintenanceFence = fence;
+      await verifyPreparedInputs();
+      await _ownership.verify();
+      await fence.retireToCommit(_root, checkpoint);
+      await _ownership.verify();
+    } finally {
+      _retiring = false;
+    }
+  }
+
   void close() {
     if (_closed) return;
     if (_retiring)

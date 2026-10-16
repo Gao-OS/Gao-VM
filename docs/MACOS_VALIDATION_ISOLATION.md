@@ -148,6 +148,14 @@ entry separately re-establishes a zero-process cold boundary. It can reverify a
 complete record or atomically publish only its complete sealed completion
 checkpoint; it never reruns migration/API validation or clears the fence.
 
+The separate [explicit cold commit](MACOS_COLD_MAINTENANCE.md#explicit-cold-commit-and-manual-startup)
+freshly recovers this generation under real cold ownership and seals preparation
+while keeping the startup fence and false preparation flags. Only after complete
+reverification and `--allow-startup` acknowledgement does it atomically retire
+the exact fence and publish a terminal commit record. It preserves both state
+generations and performs no service action or readiness claim. Fixed-checkpoint
+recovery is explicit `resume-commit`, not a blind repeat or migration replay.
+
 ## Evidence and remaining composition
 
 The real Artifact application service can list/download retained evidence using
@@ -182,9 +190,11 @@ inspection output, with both persistent state and work manifests unchanged.
 This is one migration-error checkpoint, not the complete crash/recovery matrix.
 
 This candidate-only composition is not a production-ready upgrade transaction.
-An independently verified outside-app launcher, cold commit, arbitrary
-interrupted-validation recovery, activation and paired whole-state/app rollback
-remain unfinished.
+The independently verified outside-app launcher is implemented; see the
+[operator boundary](MACOS_COLD_MAINTENANCE.md#candidate-only-validation).
+Explicit cold commit and fixed-checkpoint recovery are implemented separately;
+the operator registers/starts manually afterward. Arbitrary interrupted-validation
+recovery and paired whole-state/app rollback remain unfinished.
 Historical nonzero-schema migration through the new composition and the complete
 failure/crash/low-disk matrix still need dedicated integration evidence. A green
 diagnostic report is not product readiness or VZ/Guest execution. First install
