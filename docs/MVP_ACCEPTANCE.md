@@ -2430,3 +2430,115 @@ crash/power-loss/low-disk coverage and manual installed/Apple Silicon/VZ/GaoOS
 acceptance remain open. No push, PR, release, real installed app/state/service/VM
 operation, machine switch or Chrome integration occurred. M8/MVP and the full
 M0–M8 goal remain open.
+
+## 2026-10-16 paired rollback canonical old-app restoration
+
+Local `main` implementation commit
+`eeedd42a6b274a6ac5ed9f452478bff23ff51660` extends the held forward rollback state
+composition with explicit `ColdRollbackStateRestoration.restoreOldApp`. This is
+progress toward development-plan M8.2/M8.3 and PRD release gates, not completion of
+the rollback operator workflow or the full M0–M8 goal. It was committed locally,
+not pushed.
+
+The frozen installation slot may be vacant or contain only the exact known
+current/failed app. In the latter case, a no-replace move retains that app at
+`restored-old-app/retained.app` before installing the independently prepared old
+app. The whole old state is already at its canonical path. Both actual state
+owners and both persistent fences remain held, and the original matching
+snapshots and state-component completion record remain unchanged.
+
+A separate typed app-placement intent/checkpoint binds the exact state
+restoration, parents, app inodes/native contents and unchanged retirement/
+publication provenance. Old native hosts are not silently rebased. Fresh
+signature/component/service observers use the actual restored/retained apps;
+process inventories retain original publication paths, including a now-vacant
+candidate staging path, without waiving unresolved PIDs. Snapshot/external-file
+references are checked after the final native app observations, followed by the
+complete filesystem closure before completion. Changed placements are checked
+before native helpers as well as afterward.
+
+Only the composed matching-pair result reports `phase: old_pair_restored` and
+`installed_pair_restored: true`. `committed`, `startup_allowed` and
+`service_actions_performed` remain false. Pending work cannot close, reenter or
+report completion. Failure retains both state owners, markers, checkpoints and
+any app moves until the original future settles and explicit close; it never
+undoes, overwrites, deletes or retries the cutover automatically. Closing releases
+kernel locks, not startup markers. Neither actual state is used for a startup
+probe or migration during app restoration.
+
+Evidence is retained under
+`/private/tmp/gaovm-rollback-app-restoration.4BE0p6/`:
+
+| Report | Observed outcome |
+| --- | --- |
+| `state-regression-final.jsonl` | 195 checks passed; original runner exit 0 |
+| `native-retirement-regression-final.jsonl` | 47 checks passed; original runner exit 0 |
+| `paired-regression-final.jsonl` | 87 passed, one fixture-permission failure; original runner exit 1 |
+| `placement-journal-fixed.jsonl` | Corrected fixture passed in a new directory; original runner exit 0 |
+| `app-final-regression.jsonl` | All 8 affected checks passed on final code/fixtures; original runner exit 0 |
+
+The final eight include all seven new app-cutover checks and the extended native
+retired-app case for a vacant installation slot. They prove known published-app
+retention/exact inode installation, late snapshot-writer refusal, foreign-target
+refusal before helpers/moves, changed app journal and retained-app refusal,
+original-publication-path unresolved-process refusal, and owner retention through
+pending cutover and subsequent verification callbacks. The successful path also
+verifies the immutable state-component record, unknown old app resource, retained
+failed-state data, owner/namespace release on close and both still-active markers.
+Deduplicating named checks across the reports and applying the final affected
+rerun yields 331 verified checks in nine source files, zero unresolved failures
+and zero skips. This does not relabel either earlier failed runner as passing.
+
+The placement-journal negative fixture initially tried writing a correctly sealed
+`0400` intent and received `PathAccessException` before injecting the intended
+mutation. Only that fixture now explicitly changes its own file mode before
+writing hostile bytes; production sealing and refusal rules are unchanged. Both
+the older broad run and an already-started affected run retained that failure.
+The corrected isolated check and fresh final eight-check run pass. The missing
+interface, late reference-observation order, premature helper calls and dropped
+publication-path coverage were separately reproduced before their fixes.
+
+All original runners reached observed terminal exit status; no pending native
+future was abandoned or completed by guessing from a timeout. The following
+assertion-failure fixtures were rechecked to exist and retained without in-place
+repair, cleanup or retry:
+
+- `/private/var/folders/s0/hl1d3jkx5jx3gs69033nc6d80000gp/T/gvm-release-inspection-FFWImQ`
+- `/private/var/folders/s0/hl1d3jkx5jx3gs69033nc6d80000gp/T/gvm-release-inspection-7KexSF`
+- `/private/var/folders/s0/hl1d3jkx5jx3gs69033nc6d80000gp/T/gvm-release-inspection-QpNitt`
+- `/private/var/folders/s0/hl1d3jkx5jx3gs69033nc6d80000gp/T/gvm-release-inspection-a3XpUV`
+- `/private/var/folders/s0/hl1d3jkx5jx3gs69033nc6d80000gp/T/gvm-release-inspection-w11jtF`
+
+Their generic tearDown retention message says “unconfirmed native child” after
+retained assertion failures too; that message is not evidence of a live native
+child. Files, native metadata, moves and locks are real; positive signing,
+component, service and process observations remain fixtures, not signed ARM64
+product acceptance.
+
+Final daemon format checks cover 326 Dart files with zero changes (exit 0).
+Daemon analysis exits 0 with no issues; root analysis exits 0 with the same nine
+existing UI informational notices. The additional whole-repository read-only
+format check exits 1: four HEAD-identical, untouched UI files need formatting
+under pinned Dart 3.9.0 (`main.dart`, `operation_history.dart`, `test_runs.dart` and
+`test_run_download_cases.dart`). They were not rewritten or hidden; the unrelated
+UI lockfile remains byte-identical and excluded. Separate daemon/outside-app
+maintenance AOT builds exit 0 and produce local Mach-O x86_64 executables. All
+five empty-environment read-only entry checks return expected codes 0/0/0/2/2:
+both help entries, daemon identity/schema 21/no service actions, and two explicit
+commit-input refusals with no activation, commit or startup claim. This is not
+an AOT rollback-command execution, signed release or installed-service test.
+
+There is still no operator rollback command or composed fixed-checkpoint reopen
+for app-restored/interrupted-pair layouts. Do not use ordinary preparation,
+preservation or state-only recovery for them, and do not clear a marker to bypass
+refusal. Paired interruption recovery and final rollback commit/fence retirement
+remain unfinished; the accepted upgrade cold-commit/manual-start choice does not
+decide rollback retirement.
+
+The full/default-concurrency suite and remote CI were not run. The two earlier
+source-Dart startup failures remain unfixed and unrerun. First install,
+historical-schema command integration, arbitrary migration/validation interruption,
+crash/power-loss/low-disk coverage and manual installed/Apple Silicon/VZ/GaoOS
+acceptance remain open. No push, PR, release, real installed app/state/service/VM
+operation, machine switch or Chrome integration occurred. M8/MVP and the full
+M0–M8 goal remain open.
