@@ -416,12 +416,37 @@ retained and refused. Preservation includes `run/`: entries not representable by
 the full native manifest, such as links or special files, are refused rather than
 silently omitted. This is not a general interrupted-rollback recovery protocol.
 
-These internal results keep `canonical_state_restored`, `committed`,
-`startup_allowed` and `service_actions_performed` false. They do not install the
-old app/state at canonical paths, retire either fence, register or start a service,
-or authorize manual fence removal. Final paired replacement and rollback commit
-remain separate unfinished work; the cold-commit/manual-start sequence above is
-not a claim that rollback is complete.
+Preservation results keep `canonical_state_restored`, `committed`,
+`startup_allowed` and `service_actions_performed` false. Preservation does not
+install the old app/state at canonical paths or authorize manual fence removal.
+
+The next internal primitive, `ColdStateLease.restoreForRollback`, can move an
+independently held old whole-state directory into the original canonical state
+slot while retaining the current generation, both real kernel owners and both
+unchanged persistent markers. Its filesystem-only preparation callback must
+prove the matching old pair and external inputs. The no-replace move preserves
+the old directory inode and complete native contents, including `run/` rather
+than silently omitting entries. A separate sealed restoration checkpoint binds
+the old inode, preservation/fence evidence, both parents and all app placements.
+Only that held typed context admits the replacement inode for owner rebind;
+ordinary startup and the original fence's `verifyFor` remain strict.
+
+`ColdStateRestoration` reports `phase: old_state_restored` and
+`canonical_state_restored: true`, but `installed_pair_restored`, `committed`,
+`startup_allowed` and `service_actions_performed` remain false. It does not move
+an app, retire either fence, register or start a service. Pending restoration or
+typed verification cannot release either owner. Late changed bytes, an occupied
+target or changed provenance refuse success without automatic undo or repair;
+a failure does not prove that the state move did not happen. Preserve every
+input and checkpoint, await the original future and only then close handles.
+
+This is not yet composed into `ColdRollbackPreparation` or an operator command.
+There is no fixed reopen for this restored-state phase; the ordinary preservation
+reopen still refuses an occupied original slot. Do not reuse that route or alter
+markers to bypass the refusal. Old-app/whole-state paired installation,
+interrupted replacement recovery and rollback commit remain unfinished. The
+cold-commit/manual-start upgrade sequence above does not settle rollback fence
+retirement or imply that rollback is complete.
 
 ## Data-preserving cold uninstall
 

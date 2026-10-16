@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'cold_state_lease.dart' show ColdStateRestoration;
 import 'image_filesystem.dart';
 import 'maintenance_state_fence.dart';
 
@@ -68,23 +69,33 @@ final class DaemonOwnership {
   Future<void> rebindAfterMaintenanceMove(
     OwnedImageDirectory moved, {
     MaintenanceStateFence? maintenanceFence,
-  }) async {
+  }) => _rebind(moved, () async {
+    if (maintenanceFence == null) {
+      await MaintenanceStateFence.requireUnfenced(Directory(moved.path));
+    } else {
+      if (maintenanceFence.retiredForCommit) {
+        throw const FormatException('active relocation fence required');
+      }
+      await maintenanceFence.verifyFor(moved);
+    }
+  });
+
+  /// Only the sealed restoration context can admit its exact replacement inode
+  /// while the original ordinary-startup marker remains continuously present.
+  Future<void> rebindAfterRestorationMove(
+    OwnedImageDirectory moved,
+    ColdStateRestoration restoration,
+  ) => _rebind(moved, () => restoration.verifyFor(moved));
+
+  Future<void> _rebind(
+    OwnedImageDirectory moved,
+    Future<void> Function() admission,
+  ) async {
     if (_closed || _rebinding) {
       throw StateError('daemon ownership is unavailable');
     }
     _rebinding = true;
     try {
-      Future<void> admission() async {
-        if (maintenanceFence == null) {
-          await MaintenanceStateFence.requireUnfenced(Directory(moved.path));
-        } else {
-          if (maintenanceFence.retiredForCommit) {
-            throw const FormatException('active relocation fence required');
-          }
-          await maintenanceFence.verifyFor(moved);
-        }
-      }
-
       if (moved.mode & 0x3f != 0) {
         throw const FormatException('daemon state directory must be private');
       }

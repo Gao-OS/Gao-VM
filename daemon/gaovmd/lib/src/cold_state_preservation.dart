@@ -404,46 +404,53 @@ final class PreservedColdState {
     }
     _busy = true;
     try {
-      await _source._ownership.verify();
-      final host = _source._host;
-      if (host is MacOsColdStateHost && host.isRetired) {
-        await host.verifyRetirementFor(
-          _state!,
-          _destination,
-          bundleIdentifier: _source.bundleIdentifier,
-          installationPath: _source.installationPath,
-          preservedOriginal: _original,
-        );
-      }
-      await _source._verifyService();
-      for (final driver in [false, true]) {
-        final inventory = await host.inventory(driver: driver);
-        if (inventory.unresolvedProcessIds.isNotEmpty ||
-            inventory.processes.isNotEmpty) {
-          throw const ColdStateFailure(
-            'preserved_processes',
-            'live or unresolved processes remain',
-          );
-        }
-      }
-      if ((await host.stateReferences(
-        Directory(path),
-      )).any((other) => other != pid)) {
-        throw const ColdStateFailure(
-          'preserved_references',
-          'other processes remain',
-        );
-      }
-      await _source._verifyService();
-      await _source._ownership.verify();
-      // Complete filesystem-only read-set closure after the last native callback.
-      await _verifyFiles(moved: true);
+      await _verifyHeld();
     } finally {
       _busy = false;
     }
   }
 
-  Future<void> _verifyFiles({required bool moved}) async {
+  Future<void> _verifyHeld({ColdStateRestoration? restoration}) async {
+    await _source._ownership.verify();
+    final host = _source._host;
+    if (host is MacOsColdStateHost && host.isRetired) {
+      await host.verifyRetirementFor(
+        _state!,
+        _destination,
+        bundleIdentifier: _source.bundleIdentifier,
+        installationPath: _source.installationPath,
+        preservedOriginal: _original,
+      );
+    }
+    await _source._verifyService();
+    for (final driver in [false, true]) {
+      final inventory = await host.inventory(driver: driver);
+      if (inventory.unresolvedProcessIds.isNotEmpty ||
+          inventory.processes.isNotEmpty) {
+        throw const ColdStateFailure(
+          'preserved_processes',
+          'live or unresolved processes remain',
+        );
+      }
+    }
+    if ((await host.stateReferences(
+      Directory(path),
+    )).any((other) => other != pid)) {
+      throw const ColdStateFailure(
+        'preserved_references',
+        'other processes remain',
+      );
+    }
+    await _source._verifyService();
+    await _source._ownership.verify();
+    // Complete filesystem-only read-set closure after the last native callback.
+    await _verifyFiles(moved: true, restoration: restoration);
+  }
+
+  Future<void> _verifyFiles({
+    required bool moved,
+    ColdStateRestoration? restoration,
+  }) async {
     await _private(_storage);
     _lock.verifyPathBinding();
     await _lockFile(_storage, _lockName);
@@ -486,9 +493,12 @@ final class PreservedColdState {
         appPath: _source.installationPath,
       );
       if (maintenancePathEntryExists(_intent['source_state'] as String)) {
-        throw const FormatException(
-          'vacated original state slot became occupied',
-        );
+        if (restoration == null || !identical(restoration._current, this)) {
+          throw const FormatException(
+            'vacated original state slot became occupied',
+          );
+        }
+        await restoration._verifyInstalledBinding();
       }
     } else {
       await _original.verifyFor(
@@ -709,6 +719,10 @@ final class PreservedColdState {
   void _closeUntransferred() {
     if (_closed) return;
     _closed = true;
+    _closeResources();
+  }
+
+  void _closeResources() {
     _state?.close();
     _destination.close();
     _root.close();

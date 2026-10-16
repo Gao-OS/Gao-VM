@@ -11,6 +11,7 @@ import 'maintenance_state_fence.dart';
 import 'maintenance_tree.dart';
 
 part 'cold_state_preservation.dart';
+part 'cold_state_restoration.dart';
 
 /// External observations only. The native implementation binds these to the
 /// previously inspected owning app; fixtures never register or stop services.
@@ -51,6 +52,7 @@ final class ColdStateLease {
   bool _retiring = false;
   bool _closed = false;
   PreservedColdState? _pendingPreservation;
+  ColdStateRestoration? _pendingRestoration;
   String get path => _root.path;
   String get appPath => _host.appPath;
 
@@ -422,6 +424,50 @@ final class ColdStateLease {
     }
   }
 
+  /// Install this independently verified old state at the preserved generation's
+  /// original slot, keeping both owners and fences. The caller proves the old
+  /// app/state pair and external inputs in the filesystem-only callback and
+  /// keeps borrowed native hosts alive. This does not restore an app or commit.
+  Future<ColdStateRestoration> restoreForRollback(
+    PreservedColdState current,
+    OwnedImageDirectory storage,
+    String name, {
+    required Future<void> Function() verifyPreparedInputs,
+  }) async {
+    if (_closed ||
+        _retiring ||
+        _pendingPreservation != null ||
+        _pendingRestoration != null ||
+        _maintenanceFence != null ||
+        current._closed ||
+        current._busy ||
+        !current._ownsState ||
+        identical(this, current._source) ||
+        bundleIdentifier != current._source.bundleIdentifier ||
+        (_host is MacOsColdStateHost &&
+            (_host as MacOsColdStateHost).isValidatingCandidate)) {
+      throw StateError('available old state and preserved generation required');
+    }
+    _retiring = true;
+    try {
+      await current.verify();
+      current._busy = true;
+      try {
+        return await ColdStateRestoration._create(
+          this,
+          current,
+          storage,
+          name,
+          verifyPreparedInputs,
+        );
+      } finally {
+        current._busy = false;
+      }
+    } finally {
+      _retiring = false;
+    }
+  }
+
   void close() {
     if (_closed) return;
     if (_retiring)
@@ -433,6 +479,7 @@ final class ColdStateLease {
       _root.close();
       _ownedRetiredHost?.close();
       _pendingPreservation?._closeUntransferred();
+      _pendingRestoration?._closeUntransferred();
     }
   }
 }

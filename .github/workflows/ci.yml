@@ -151,6 +151,7 @@ jobs:
           test/cold_runtime_inspection_test.dart
           test/cold_state_snapshot_test.dart
           test/cold_state_lease_test.dart
+          test/cold_state_restoration_test.dart
           test/cold_state_backup_test.dart
           test/daemon_ownership_move_test.dart
           test/maintenance_tree_test.dart

@@ -781,6 +781,132 @@ void main() {
       );
     }
 
+    for (final published in [false, true]) {
+      test(
+        'native ${published ? 'published' : 'retired'} app provenance remains valid while the old whole state is restored behind both fences',
+        () => check(() async {
+          ColdStateLease? oldLease;
+          MacOsColdStateHost? oldHost;
+          PreservedColdState? preserved;
+          ColdStateRestoration? restored;
+          MaintenanceTree? oldTree, restoredTree, retainedTree;
+          final parent = await OwnedImageDirectory.open(temporary);
+          final work = parent.createDirectory('state-restoration');
+          try {
+            await retire();
+            if (published) await publish();
+            final oldApp = Directory('${temporary.path}/OldRestore.app');
+            await _fixture(oldApp);
+            final oldState = parent.createDirectory('old-state');
+            try {
+              final data = oldState.createFile('old-generation');
+              try {
+                final writer = await data.openWrite();
+                try {
+                  await writer.writeFrom([1, 0, 255]);
+                  await writer.flush();
+                } finally {
+                  await writer.close();
+                }
+              } finally {
+                data.close();
+              }
+            } finally {
+              oldState.close();
+            }
+            oldHost = await MacOsColdStateHost.open(
+              oldApp,
+              bundleIdentifier: 'org.gaovm.tests.Release',
+              version: '0.1.0',
+              teamIdentifier: 'ABCDEFGHIJ',
+              catalogSchema: 0,
+              host: host,
+              observer: observer(),
+              inventory: inventory,
+            );
+            oldLease = await ColdStateLease.acquire(
+              Directory('${temporary.path}/old-state'),
+              bundleIdentifier: 'org.gaovm.tests.Release',
+              host: oldHost,
+            );
+            oldTree = await MaintenanceTree.open(
+              Directory('${temporary.path}/old-state'),
+            );
+            final oldBefore = await oldTree.capture(nativeMetadata: true);
+            preserved = await lease.preserveForRollback(
+              fence,
+              work,
+              'retained-current',
+              verifyPreparedInputs: () async {},
+            );
+            retainedTree = await MaintenanceTree.open(
+              Directory(preserved.path),
+            );
+            final retainedBefore = await retainedTree.capture(
+              nativeMetadata: true,
+            );
+            final admissions = host.admissions;
+            restored = await oldLease.restoreForRollback(
+              preserved,
+              work,
+              'restore-old-state',
+              verifyPreparedInputs: () async {
+                await oldTree!.verify(oldBefore, nativeMetadata: true);
+                await retainedTree!.verify(
+                  retainedBefore,
+                  nativeMetadata: true,
+                );
+              },
+            );
+            oldLease.close();
+            preserved.close();
+            await restored.verify();
+            restoredTree = await MaintenanceTree.open(state);
+            await restoredTree.verify(oldBefore, nativeMetadata: true);
+            await retainedTree.verify(retainedBefore, nativeMetadata: true);
+            expect(host.admissions, admissions);
+            expect(await app.exists(), published);
+            expect(restored.toJson()['installed_pair_restored'], false);
+            expect(restored.toJson()['startup_allowed'], false);
+            for (final path in [state.path, preserved.path]) {
+              final actual = await OwnedImageDirectory.open(Directory(path));
+              try {
+                final contender = await actual.tryAcquireMaintenanceLock(
+                  '.gaovmd.lock',
+                  create: false,
+                );
+                try {
+                  expect(contender, isNull);
+                } finally {
+                  contender?.close();
+                }
+              } finally {
+                actual.close();
+              }
+              await expectLater(
+                MaintenanceStateFence.requireUnfenced(Directory(path)),
+                throwsA(isA<MaintenanceFenceActive>()),
+              );
+            }
+          } catch (_) {
+            retainInputs = true;
+            rethrow;
+          } finally {
+            restored?.close();
+            preserved?.close();
+            oldLease?.close();
+            oldHost?.close();
+            retainedTree?.close();
+            restoredTree?.close();
+            oldTree?.close();
+            work.close();
+            parent.close();
+          }
+        }),
+        timeout: const Timeout(Duration(minutes: 3)),
+      );
+    }
+
     test(
       'candidate publication requires explicit old-app retirement first',
       () => check(() async {
