@@ -75,6 +75,17 @@ the service or declare installed/Guest readiness. A prepared transaction is not
 a commit; an interrupted commit requires explicit fixed-checkpoint recovery,
 not blind retry or manually clearing a marker. This sequence does not authorize
 this agent to operate an installed service or app/state tree.
+
+On 2026-10-16 the user also selected a single explicit cold rollback commit:
+`rollback-upgrade --accept-history-rewind --allow-startup` independently
+revalidates the cold boundary, preserves the failed/post-upgrade generation and
+restores the matching old app and complete old state before atomically retiring
+the canonical startup fence. The retained failed generation remains fenced.
+The operator subsequently registers/starts manually; the tool never starts a
+service or declares installed/Guest readiness. This selects the implementation
+policy, not permission for this agent to perform an installed rollback. Its
+transaction implementation and interruption acceptance remain unfinished.
+
 For automatic activation, required user consent is a
 distinct waiting/action-needed outcome, not failed readiness or permission to
 retry registration. If quiescence cannot be re-established after failed

@@ -214,6 +214,53 @@ final class MacOsColdStateHost implements ColdStateHost {
     }
   }
 
+  /// Fresh non-executing observers for fixed paired recovery, never ordinary
+  /// retired/publication admission. Every non-vacant frozen source is required;
+  /// the typed proof determines its only permitted current path.
+  static Future<List<MacOsColdStateHost>> openRollbackObservers(
+    ColdAppRestoration restoration, {
+    required Map<String, Map<String, Object?>> releases,
+    required Set<String> publicationPaths,
+    ReleaseInspectionHost host = const MacOsReleaseInspectionHost(),
+    MacOsOpenReferences? observer,
+    Future<DriverInventorySnapshot> Function(String)? inventory,
+  }) async {
+    final opened = <MacOsColdStateHost>[];
+    try {
+      for (final entry in releases.entries) {
+        final path = await restoration.relocatedPathFor(entry.key);
+        final expected = entry.value;
+        final fresh = await open(
+          Directory(path),
+          bundleIdentifier: expected['bundle_identifier'] as String,
+          version: expected['version'] as String,
+          teamIdentifier: expected['team_identifier'] as String,
+          catalogSchema: expected['required_catalog_schema'] as int,
+          host: host,
+          observer: observer,
+          inventory: inventory,
+        );
+        opened.add(fresh);
+        if (!_AppRetirement._sameRelease(fresh._release, expected) ||
+            await restoration.relocatedPathFor(entry.key) != path) {
+          throw const FormatException('recovered paired release changed');
+        }
+        fresh._rollbackInventoryPaths.addAll({
+          ...restoration.sourceAppPaths,
+          ...publicationPaths,
+        });
+        fresh._rollbackReferencePaths.addAll({
+          path,
+          ...restoration.provenancePaths,
+        });
+      }
+      return opened;
+    } catch (_) {
+      for (final fresh in opened) fresh.close();
+      rethrow;
+    }
+  }
+
   /// Explicit read-only recovery of the old-app retirement gap. No paths from
   /// the journal select targets; the caller supplies the original slot, state,
   /// fence, storage/name and expected release. Still needs the real state lock.

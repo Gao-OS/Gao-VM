@@ -6887,6 +6887,12 @@ void main() {
     restoredNativeRollback({
       MacOsOpenReferences? references,
       Future<DriverInventorySnapshot> Function(String)? processInventory,
+      void Function(
+        MaintenanceStateFence,
+        MacOsColdStateHost,
+        OwnedImageDirectory,
+      )?
+      onPrepared,
     }) async {
       lease.close();
       MacOsOpenReferences observer() => MacOsOpenReferences(
@@ -6968,8 +6974,621 @@ void main() {
       addTearDown(() {
         if (activeRetirementChecks == 0) restored.close();
       });
+      onPrepared?.call(fence, currentHost, retirement);
       return (rollback, restored);
     }
+
+    Future<
+      ({
+        MaintenanceStateFence fence,
+        OwnedImageDirectory native,
+        Map<String, Object?> facts,
+      })
+    >
+    pairedCheckpoint() async {
+      late MaintenanceStateFence original;
+      late MacOsColdStateHost native;
+      late OwnedImageDirectory storage;
+      final (_, restored) = await restoredNativeRollback(
+        onPrepared: (fence, host, parent) {
+          original = fence;
+          native = host;
+          storage = parent;
+        },
+      );
+      try {
+        await restored.restoreOldApp();
+        final facts = restored.toJson();
+        restored.close();
+        native.close();
+        original.close();
+        lease.close();
+        final recovered = await MaintenanceStateFence.open(state);
+        addTearDown(() {
+          if (activeRetirementChecks == 0) recovered.close();
+        });
+        return (fence: recovered, native: storage, facts: facts);
+      } finally {
+        restored.close();
+      }
+    }
+
+    Future<ColdRollbackStateRestoration> reopenPair(
+      MaintenanceStateFence fence,
+      OwnedImageDirectory native, {
+      bool acceptHistoryRewind = true,
+      MacOsOpenReferences? references,
+      Future<DriverInventorySnapshot> Function(String)? inventory,
+    }) => ColdRollbackStateRestoration.open(
+      backups,
+      'upgrade',
+      fence,
+      installationApp: app,
+      retirement: (storage: native, name: 'old'),
+      publication: (storage: native, name: 'candidate'),
+      bundleIdentifier: 'org.gaovm.tests.Release',
+      acceptHistoryRewind: acceptHistoryRewind,
+      oldVersion: '0.1.0',
+      newVersion: '0.1.0',
+      teamIdentifier: 'ABCDEFGHIJ',
+      sourceCatalogSchema: 21,
+      host: host,
+      observer:
+          references ??
+          MacOsOpenReferences(
+            command: (_, _) async => ProcessResult(pid, 1, '', ''),
+          ),
+      inventory:
+          inventory ??
+          (_) async =>
+              DriverInventorySnapshot(processes: [], unresolvedProcessIds: []),
+    );
+
+    for (final fault in [
+      'original pair bytes',
+      'retained app bytes',
+      'foreign installed app',
+      'unknown staged app',
+      'incomplete completion',
+      'missing state lock',
+      'changed native lock',
+    ]) {
+      test(
+        'paired recovery refuses $fault before native helpers without repair',
+        () async {
+          activeRetirementChecks++;
+          MaintenanceTree? tree;
+          try {
+            final inputs = await pairedCheckpoint();
+            final checkpoint = '${backups.path}/restored-old-app';
+            switch (fault) {
+              case 'original pair bytes':
+                final file = File(
+                  '${backups.path}/upgrade/original-state/payload/unknown-data',
+                );
+                imageFileMode(file.path, 0x180);
+                await file.writeAsString(
+                  'retain changed original bytes',
+                  flush: true,
+                );
+              case 'retained app bytes':
+                final file = File(
+                  '${inputs.facts['retained_app']}/Contents/Resources/retain-evidence',
+                );
+                await file.writeAsString(
+                  'retain changed failed app',
+                  flush: true,
+                );
+                imageFileMode(file.path, 0x180);
+              case 'foreign installed app':
+                await app.rename('${temporary.path}/retained-old.app');
+                await app.create();
+                imageFileMode(app.path, 0x1c0);
+                await File(
+                  '${app.path}/foreign',
+                ).writeAsString('retain foreign installation');
+                imageFileMode('${app.path}/foreign', 0x180);
+              case 'unknown staged app':
+                final directory = await Directory(
+                  '${backups.path}/rollback/app/payload.app',
+                ).create();
+                imageFileMode(directory.path, 0x1c0);
+              case 'incomplete completion':
+                await Directory(
+                  '$checkpoint/completed',
+                ).rename('${temporary.path}/retained-completion');
+                final directory = await Directory(
+                  '$checkpoint/.completed.partial',
+                ).create();
+                imageFileMode(directory.path, 0x1c0);
+                await File('${directory.path}/record.json').writeAsString('{');
+                imageFileMode('${directory.path}/record.json', 0x180);
+              case 'missing state lock':
+                await File(
+                  '${state.path}/.gaovmd.lock',
+                ).rename('${temporary.path}/retained-owner-lock');
+              case 'changed native lock':
+                await File(
+                  '${inputs.native.path}/.gaovm-app-retirement.lock',
+                ).writeAsString('retain changed namespace lock', flush: true);
+            }
+            tree = await MaintenanceTree.open(temporary);
+            final before = await tree.capture(nativeMetadata: true);
+            final roles = host.executedRoles.length;
+            final status = host.statusCalls;
+            final admissions = host.admissions;
+            await expectLater(
+              reopenPair(inputs.fence, inputs.native),
+              throwsFormatException,
+            );
+            expect(host.executedRoles.length, roles);
+            expect(host.statusCalls, status);
+            expect(host.admissions, admissions);
+            await tree.verify(before, nativeMetadata: true);
+            for (final target in [
+              state,
+              Directory(inputs.facts['retained_state'] as String),
+            ]) {
+              await expectLater(
+                MaintenanceStateFence.requireUnfenced(target),
+                throwsA(isA<MaintenanceFenceActive>()),
+              );
+              if (fault != 'missing state lock' || target.path != state.path) {
+                final root = await OwnedImageDirectory.open(target);
+                try {
+                  final released = await root.tryAcquireMaintenanceLock(
+                    '.gaovmd.lock',
+                    create: false,
+                  );
+                  expect(released, isNotNull);
+                  released?.close();
+                } finally {
+                  root.close();
+                }
+              }
+            }
+            if (fault == 'missing state lock')
+              expect(await File('${state.path}/.gaovmd.lock').exists(), false);
+          } catch (_) {
+            retainInputs = true;
+            rethrow;
+          } finally {
+            tree?.close();
+            activeRetirementChecks--;
+          }
+        },
+        timeout: const Timeout(Duration(minutes: 4)),
+      );
+    }
+
+    for (final observation in ['snapshot writer', 'unresolved staged driver']) {
+      test(
+        'paired recovery keeps a missing completion after a fresh $observation refusal',
+        () async {
+          activeRetirementChecks++;
+          MaintenanceTree? tree;
+          try {
+            final inputs = await pairedCheckpoint();
+            final checkpoint = '${backups.path}/restored-old-app';
+            await Directory(
+              '$checkpoint/completed',
+            ).rename('${temporary.path}/retained-completion');
+            tree = await MaintenanceTree.open(temporary);
+            final before = await tree.capture(nativeMetadata: true);
+            var observed = false;
+            final status = host.statusCalls, admissions = host.admissions;
+            final references = MacOsOpenReferences(
+              command: (_, arguments) async {
+                if (observation == 'snapshot writer' &&
+                    arguments.last ==
+                        '${backups.path}/upgrade/original-state/payload') {
+                  observed = true;
+                  return ProcessResult(pid, 0, 'p${pid + 7}\x00f7\x00\n', '');
+                }
+                return ProcessResult(pid, 1, '', '');
+              },
+            );
+            final stagedDriver =
+                '${inputs.native.path}/candidate/candidate/payload.app/Contents/Helpers/gaovm-driver-vz';
+            await expectLater(
+              reopenPair(
+                inputs.fence,
+                inputs.native,
+                references: references,
+                inventory: (path) async {
+                  if (observation == 'unresolved staged driver' &&
+                      path == stagedDriver) {
+                    observed = true;
+                    return DriverInventorySnapshot(
+                      processes: [],
+                      unresolvedProcessIds: [pid + 7],
+                    );
+                  }
+                  return DriverInventorySnapshot(
+                    processes: [],
+                    unresolvedProcessIds: [],
+                  );
+                },
+              ),
+              throwsA(
+                isA<ColdStateFailure>().having(
+                  (error) => error.stage,
+                  'fresh refusal',
+                  observation == 'snapshot writer'
+                      ? 'rollback_snapshot_references'
+                      : 'restored_processes',
+                ),
+              ),
+            );
+            expect(observed, true);
+            expect(host.statusCalls, greaterThan(status));
+            expect(host.admissions, admissions);
+            expect(await Directory('$checkpoint/completed').exists(), false);
+            expect(
+              await Directory('$checkpoint/.completed.partial').exists(),
+              false,
+            );
+            await tree.verify(before, nativeMetadata: true);
+            for (final target in [
+              state,
+              Directory(inputs.facts['retained_state'] as String),
+            ]) {
+              await expectLater(
+                MaintenanceStateFence.requireUnfenced(target),
+                throwsA(isA<MaintenanceFenceActive>()),
+              );
+              final root = await OwnedImageDirectory.open(target);
+              try {
+                final released = await root.tryAcquireMaintenanceLock(
+                  '.gaovmd.lock',
+                  create: false,
+                );
+                expect(released, isNotNull);
+                released?.close();
+              } finally {
+                root.close();
+              }
+            }
+          } catch (_) {
+            retainInputs = true;
+            rethrow;
+          } finally {
+            tree?.close();
+            activeRetirementChecks--;
+          }
+        },
+        timeout: const Timeout(Duration(minutes: 4)),
+      );
+    }
+
+    for (final checkpoint in ['missing', 'sealed partial']) {
+      test(
+        'paired recovery completes only the $checkpoint final app checkpoint',
+        () async {
+          activeRetirementChecks++;
+          ColdRollbackStateRestoration? recovered;
+          final trees = <(MaintenanceTree, Map<String, Object?>)>[];
+          try {
+            final inputs = await pairedCheckpoint();
+            final path = '${backups.path}/restored-old-app';
+            final bytes = await File(
+              '$path/completed/record.json',
+            ).readAsBytes();
+            final completed = await OwnedImageDirectory.open(
+              Directory('$path/completed'),
+            );
+            final identity = await completed.maintenanceIdentity();
+            completed.close();
+            await Directory('$path/completed').rename(
+              checkpoint == 'missing'
+                  ? '${temporary.path}/retained-completion'
+                  : '$path/.completed.partial',
+            );
+            for (final target in {
+              state.path,
+              app.path,
+              inputs.facts['retained_state'] as String,
+              inputs.facts['retained_app'] as String,
+              '${backups.path}/upgrade/original-app',
+              '${backups.path}/upgrade/original-state',
+              '${backups.path}/restored-old-state',
+              '${inputs.native.path}/old',
+              '${inputs.native.path}/candidate',
+            }) {
+              final tree = await MaintenanceTree.open(Directory(target));
+              trees.add((tree, await tree.capture(nativeMetadata: true)));
+            }
+            final admissions = host.admissions;
+            recovered = await reopenPair(inputs.fence, inputs.native);
+            expect(recovered.toJson(), inputs.facts);
+            expect(host.admissions, admissions);
+            expect(
+              await File('$path/completed/record.json').readAsBytes(),
+              bytes,
+            );
+            expect(await Directory('$path/.completed.partial').exists(), false);
+            if (checkpoint == 'sealed partial') {
+              final promoted = await OwnedImageDirectory.open(
+                Directory('$path/completed'),
+              );
+              try {
+                expect(await promoted.maintenanceIdentity(), identity);
+              } finally {
+                promoted.close();
+              }
+            } else {
+              expect(
+                await File(
+                  '${temporary.path}/retained-completion/record.json',
+                ).readAsBytes(),
+                bytes,
+              );
+            }
+            for (final (tree, manifest) in trees) {
+              await tree.verify(manifest, nativeMetadata: true);
+            }
+          } catch (_) {
+            retainInputs = true;
+            rethrow;
+          } finally {
+            recovered?.close();
+            for (final (tree, _) in trees) tree.close();
+            activeRetirementChecks--;
+          }
+        },
+        timeout: const Timeout(Duration(minutes: 4)),
+      );
+    }
+
+    for (final lateClosure in [false, true]) {
+      test(
+        'paired recovery cannot report completion while its ${lateClosure ? "input closure" : "native factory"} is pending',
+        () async {
+          activeRetirementChecks++;
+          ColdStateRestoration? recovered;
+          try {
+            final inputs = await pairedCheckpoint();
+            Future<Map<String, Object?>> record(String path) async =>
+                jsonDecode(await File(path).readAsString())
+                    as Map<String, Object?>;
+            final upgrade = await record(
+              '${backups.path}/upgrade/prepared/record.json',
+            );
+            final retirement = await record(
+              '${inputs.native.path}/old/intent.json',
+            );
+            final publication = await record(
+              '${inputs.native.path}/candidate/prepared/record.json',
+            );
+            final entered = Completer<void>(), release = Completer<void>();
+            late ColdStateRestoration borrowed;
+            late ColdAppRestoration borrowedApp;
+            var closures = 0;
+            final pending = ColdStateRestoration.openPair(
+              backups,
+              'restored-old-state',
+              stagedOldState: Directory(
+                '${backups.path}/rollback/state/payload',
+              ),
+              oldApp: Directory('${backups.path}/rollback/app/payload.app'),
+              retainedApp: Directory('${inputs.native.path}/old/GaoVM.app'),
+              installationApp: app,
+              original: inputs.fence,
+              preservation: (storage: backups, name: 'retained-current'),
+              appRestoration: (storage: backups, name: 'restored-old-app'),
+              provenancePaths: {
+                '${inputs.native.path}/old',
+                '${inputs.native.path}/candidate',
+              },
+              bundleIdentifier: 'org.gaovm.tests.Release',
+              observePreparedInputs: () async {},
+              verifyPreparedInputs: (state, app) async {
+                borrowed = state;
+                borrowedApp = app;
+                if (lateClosure && ++closures == 2) {
+                  entered.complete();
+                  await release.future;
+                }
+              },
+              openAppHosts: (proof) async {
+                borrowedApp = proof;
+                if (!lateClosure) {
+                  entered.complete();
+                  await release.future;
+                }
+                return MacOsColdStateHost.openRollbackObservers(
+                  proof,
+                  releases: {
+                    '${backups.path}/rollback/app/payload.app':
+                        upgrade['original_release'] as Map<String, Object?>,
+                    '${inputs.native.path}/old/GaoVM.app':
+                        retirement['release'] as Map<String, Object?>,
+                    app.path: publication['release'] as Map<String, Object?>,
+                  },
+                  publicationPaths: {
+                    '${inputs.native.path}/candidate/candidate/payload.app',
+                    app.path,
+                  },
+                  host: host,
+                  observer: MacOsOpenReferences(
+                    command: (_, _) async => ProcessResult(pid, 1, '', ''),
+                  ),
+                  inventory: (_) async => DriverInventorySnapshot(
+                    processes: [],
+                    unresolvedProcessIds: [],
+                  ),
+                );
+              },
+            );
+            unawaited(
+              pending.then<void>(
+                (_) {
+                  if (!entered.isCompleted)
+                    entered.completeError(StateError('missing paired factory'));
+                },
+                onError: (Object error, StackTrace stack) {
+                  if (!entered.isCompleted) entered.completeError(error, stack);
+                },
+              ),
+            );
+            try {
+              await entered.future;
+              expect(borrowed.close, throwsStateError);
+              expect(borrowed.toJson, throwsStateError);
+              expect(borrowedApp.toJson, throwsStateError);
+              await expectLater(borrowed.verify(), throwsStateError);
+              await expectLater(
+                reopenPair(inputs.fence, inputs.native),
+                throwsStateError,
+              );
+              for (final target in [
+                state,
+                Directory(inputs.facts['retained_state'] as String),
+              ]) {
+                final root = await OwnedImageDirectory.open(target);
+                try {
+                  expect(
+                    await root.tryAcquireMaintenanceLock(
+                      '.gaovmd.lock',
+                      create: false,
+                    ),
+                    isNull,
+                  );
+                } finally {
+                  root.close();
+                }
+              }
+            } finally {
+              release.complete();
+              recovered = await pending;
+            }
+            expect(recovered.restoredApp.toJson(), inputs.facts);
+            await recovered.verify();
+          } catch (_) {
+            retainInputs = true;
+            rethrow;
+          } finally {
+            recovered?.close();
+            activeRetirementChecks--;
+          }
+        },
+        timeout: const Timeout(Duration(minutes: 4)),
+      );
+    }
+
+    test(
+      'paired rollback recovery reopens the installed old pair under both real owners without startup',
+      () async {
+        activeRetirementChecks++;
+        ColdRollbackPreparation? rollback;
+        ColdRollbackStateRestoration? restored, recovered;
+        MaintenanceStateFence? fence, recoveredFence;
+        MacOsColdStateHost? currentHost;
+        OwnedImageDirectory? nativeStorage;
+        try {
+          (rollback, restored) = await restoredNativeRollback(
+            onPrepared: (original, native, storage) {
+              fence = original;
+              currentHost = native;
+              nativeStorage = storage;
+            },
+          );
+          await restored.restoreOldApp();
+          final before = restored.toJson();
+          final componentRecord = File(
+            '${backups.path}/restored-old-state/completed/record.json',
+          );
+          final componentBytes = await componentRecord.readAsBytes();
+          restored.close();
+          currentHost!.close();
+          fence!.close();
+          lease.close();
+          recoveredFence = await MaintenanceStateFence.open(state);
+          final admissions = host.admissions;
+          recovered = await ColdRollbackStateRestoration.open(
+            backups,
+            'upgrade',
+            recoveredFence,
+            installationApp: app,
+            retirement: (storage: nativeStorage!, name: 'old'),
+            publication: (storage: nativeStorage!, name: 'candidate'),
+            bundleIdentifier: 'org.gaovm.tests.Release',
+            acceptHistoryRewind: true,
+            oldVersion: '0.1.0',
+            newVersion: '0.1.0',
+            teamIdentifier: 'ABCDEFGHIJ',
+            sourceCatalogSchema: 21,
+            host: host,
+            observer: MacOsOpenReferences(
+              command: (_, _) async => ProcessResult(pid, 1, '', ''),
+            ),
+            inventory: (_) async => DriverInventorySnapshot(
+              processes: [],
+              unresolvedProcessIds: [],
+            ),
+          );
+          expect(recovered.toJson(), before);
+          await recovered.verify();
+          expect(await componentRecord.readAsBytes(), componentBytes);
+          expect(host.admissions, admissions);
+          for (final target in [
+            state,
+            Directory(recovered.retainedStatePath),
+          ]) {
+            final directory = await OwnedImageDirectory.open(target);
+            try {
+              expect(
+                await directory.tryAcquireMaintenanceLock(
+                  '.gaovmd.lock',
+                  create: false,
+                ),
+                isNull,
+              );
+            } finally {
+              directory.close();
+            }
+            await expectLater(
+              MaintenanceStateFence.requireUnfenced(target),
+              throwsA(isA<MaintenanceFenceActive>()),
+            );
+          }
+          expect(
+            await File(
+              '${recovered.retainedStatePath}/failed-generation',
+            ).readAsString(),
+            'retain the failed generation',
+          );
+          recovered.close();
+          for (final target in [
+            state,
+            Directory(recovered.retainedStatePath),
+          ]) {
+            final directory = await OwnedImageDirectory.open(target);
+            try {
+              final released = await directory.tryAcquireMaintenanceLock(
+                '.gaovmd.lock',
+                create: false,
+              );
+              expect(released, isNotNull);
+              released?.close();
+            } finally {
+              directory.close();
+            }
+          }
+        } catch (_) {
+          retainInputs = true;
+          rethrow;
+        } finally {
+          recovered?.close();
+          recoveredFence?.close();
+          restored?.close();
+          rollback?.close();
+          currentHost?.close();
+          activeRetirementChecks--;
+        }
+      },
+      timeout: const Timeout(Duration(minutes: 4)),
+    );
 
     test(
       'rollback app cutover restores the matching installed pair and retains the published failed app',

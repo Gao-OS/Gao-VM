@@ -19,11 +19,19 @@ final class ColdRollbackPreparation {
     this._currentTree,
     this._oldApp,
     this._oldState,
-    this._observer,
-  );
+    this._observer, {
+    ({String state, String app, String bundle})? recoveredSource,
+  }) : _source =
+           recoveredSource ??
+           (
+             state: _current!.path,
+             app: _current.installationPath,
+             bundle: _current.bundleIdentifier,
+           );
 
   static const _lockName = '.gaovm-cold-rollback.lock';
-  final ColdStateLease _current;
+  final ColdStateLease? _current;
+  final ({String state, String app, String bundle}) _source;
   final MaintenanceStateFence _fence;
   final OwnedImageDirectory _work, _upgrade, _root;
   final OwnedImageLock _upgradeLock, _lock;
@@ -41,6 +49,7 @@ final class ColdRollbackPreparation {
   bool _cuttingOver = false, _consumed = false;
   PreservedColdState? _ownedPreservation;
   ColdStateRestoration? _ownedRestoration;
+  _RollbackRecoveryNative? _recoveryNative;
 
   String get path => _root.path;
   String get appPath => '$path/app/payload.app';
@@ -558,7 +567,7 @@ final class ColdRollbackPreparation {
           );
         }
         final path = value['path'] as String;
-        if (path.startsWith('${_current.path}/')) continue;
+        if (path.startsWith('${_source.state}/')) continue;
         final file = File(path);
         final evidence = value['evidence'] as Map<String, Object?>;
         if (!file.isAbsolute ||
@@ -599,9 +608,9 @@ final class ColdRollbackPreparation {
   }
 
   Future<void> _verifySources() async {
-    await _current.verify();
+    await _current!.verify();
     await _verifySnapshotReferences();
-    await _current.verify();
+    await _current!.verify();
     await _verifySourceFiles();
   }
 
@@ -683,7 +692,7 @@ final class ColdRollbackPreparation {
       }
     }
     final currentRoot = await OwnedImageDirectory.open(
-      Directory(retainedState ?? _current.path),
+      Directory(retainedState ?? _source.state),
     );
     try {
       if (_fence.retiredForCommit)
@@ -691,8 +700,8 @@ final class ColdRollbackPreparation {
       if (retainedState == null) {
         await _fence.verifyFor(
           currentRoot,
-          bundleIdentifier: _current.bundleIdentifier,
-          appPath: _current.installationPath,
+          bundleIdentifier: _source.bundle,
+          appPath: _source.app,
         );
       } else {
         if (retainedState != '${_work.path}/retained-current/state') {
@@ -726,7 +735,7 @@ final class ColdRollbackPreparation {
     try {
       current = await (retainedTree ?? _currentTree).captureStateData(
         verifyBoundary: () async => {
-          'source_state': retainedState ?? _current.path,
+          'source_state': retainedState ?? _source.state,
         },
       );
     } finally {
@@ -745,6 +754,7 @@ final class ColdRollbackPreparation {
       throw const FormatException('rollback workspace inode changed');
     }
     await ColdUpgradePreparation._checkRecord(_root, 'intent.json', _intent);
+    await _recoveryNative?.verify();
   }
 
   Future<void> _verifyLock(String name, OwnedImageLock lock) async {
@@ -789,7 +799,7 @@ final class ColdRollbackPreparation {
       await ColdUpgradePreparation._noReferences(_observer, appPath);
       await _catalog?.verify();
       await _stagedLease!.verify();
-      await _current.verify();
+      await _current!.verify();
       // No native process/service observers after this full read-set closure.
       await _verifySourceFiles();
       await _catalog?._verifySourceFiles();
@@ -808,7 +818,7 @@ final class ColdRollbackPreparation {
     await verify();
     _busy = true;
     try {
-      return await _current.preserveForRollback(
+      return await _current!.preserveForRollback(
         _fence,
         _work,
         'retained-current',
@@ -834,7 +844,7 @@ final class ColdRollbackPreparation {
     _busy = true;
     _cuttingOver = true;
     try {
-      _ownedPreservation = await _current.preserveForRollback(
+      _ownedPreservation = await _current!.preserveForRollback(
         _fence,
         _work,
         'retained-current',
@@ -974,14 +984,12 @@ final class ColdRollbackPreparation {
             tree.close();
           }
         } else if (entry.key == 'state' && restored != null) {
-          final facts = restored.toJson();
-          if (facts['source_state'] != statePath ||
-              facts['target_state'] != _current.path ||
-              facts['retained_state'] !=
-                  '${_work.path}/retained-current/state' ||
-              !_same(facts['state_identity'], _record!['state_identity'])) {
-            throw const FormatException('restored state is not this old pair');
-          }
+          await restored.verifySnapshotCopy(
+            sourceState: statePath,
+            targetState: _source.state,
+            retainedState: '${_work.path}/retained-current/state',
+            stateIdentity: _record!['state_identity'] as Map<String, Object?>,
+          );
           await ColdUpgradePreparation._entries(wrapper, {'receipt.json'});
           await ColdUpgradePreparation._checkRecord(
             wrapper,
@@ -1048,6 +1056,7 @@ final class ColdRollbackPreparation {
     if (_closed) return;
     _closed = true;
     _ownedRestoration?.close();
+    _recoveryNative?.close();
     _stagedLease?.close();
     _ownedPreservation?.close();
     _stagedHost?.close();

@@ -36,6 +36,7 @@ final class ColdAppRestoration {
     if (_closed ||
         _reading ||
         _state._closed ||
+        _state._recovering ||
         _state._busy ||
         _completionName != 'completed') {
       throw StateError('complete available app restoration required');
@@ -69,6 +70,157 @@ final class ColdAppRestoration {
       return original;
     } finally {
       _reading = false;
+    }
+  }
+
+  // Read only the explicitly selected final placement. The caller has not yet
+  // acquired either real state owner or executed any native observer.
+  static Future<ColdAppRestoration> _read(
+    ColdStateRestoration state,
+    OwnedImageDirectory storage,
+    String name, {
+    required String source,
+    required String target,
+    required Set<String> provenancePaths,
+  }) async {
+    if (!RegExp(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$').hasMatch(name) ||
+        name.endsWith('.partial') ||
+        source == target ||
+        !source.endsWith('.app') ||
+        !target.endsWith('.app') ||
+        maintenancePathEntryExists(source)) {
+      throw const FormatException(
+        'fixed installed old-app checkpoint required',
+      );
+    }
+    final output = '${storage.path}/$name';
+    final executable = await File(
+      Platform.resolvedExecutable,
+    ).resolveSymbolicLinks();
+    final script = Platform.script.scheme == 'file'
+        ? await File.fromUri(Platform.script).resolveSymbolicLinks()
+        : null;
+    for (final input in {
+      ...state._apps.keys,
+      state.path,
+      state._current.path,
+      state._root.path,
+      state._current._root.path,
+      state._current._original.path,
+      state._current._destination.path,
+      ...provenancePaths,
+    }) {
+      if (!input.startsWith('/') ||
+          storage.path == input ||
+          storage.path.startsWith('$input/') ||
+          PreservedColdState._overlap(output, input) ||
+          PreservedColdState._inside(executable, input) ||
+          script != null && PreservedColdState._inside(script, input)) {
+        throw const FormatException(
+          'paired recovery overlaps protected inputs',
+        );
+      }
+    }
+    if (PreservedColdState._inside(executable, output) ||
+        script != null && PreservedColdState._inside(script, output)) {
+      throw const FormatException(
+        'paired recovery executable must remain outside',
+      );
+    }
+    await PreservedColdState._private(storage);
+    final ownedStorage = await OwnedImageDirectory.open(
+      Directory(storage.path),
+    );
+    OwnedImageDirectory? root, sourceParent, targetParent;
+    OwnedImageLock? lock;
+    ColdAppRestoration? result;
+    try {
+      lock = await ownedStorage.tryAcquireMaintenanceLock(
+        _lockName,
+        create: false,
+      );
+      if (lock == null)
+        throw StateError('app restoration namespace already owned');
+      await PreservedColdState._lockFile(ownedStorage, _lockName);
+      root = ownedStorage.directory(name);
+      await PreservedColdState._private(root);
+      final intent = await PreservedColdState._read(root, 'intent.json');
+      final provenance = intent['provenance'];
+      final apps = state._intent['apps'] as Map;
+      if (intent.length != 9 ||
+          intent['format'] != 'gaovm.cold-app-restoration-intent.v1' ||
+          intent['source_app'] != source ||
+          intent['target_app'] != target ||
+          !apps.containsKey(target) ||
+          apps[source] == null ||
+          intent['retained_app'] !=
+              (apps[target] == null ? null : '${root.path}/retained.app') ||
+          provenance is! Map<String, Object?> ||
+          provenance.length != provenancePaths.length ||
+          !provenance.keys.toSet().containsAll(provenancePaths)) {
+        throw const FormatException(
+          'paired app checkpoint or explicit selectors changed',
+        );
+      }
+      sourceParent = await OwnedImageDirectory.open(Directory(source).parent);
+      targetParent = await OwnedImageDirectory.open(Directory(target).parent);
+      if (sourceParent.path != Directory(source).parent.path ||
+          targetParent.path != Directory(target).parent.path) {
+        throw const FormatException('canonical paired app parents required');
+      }
+      result = ColdAppRestoration._(
+        state,
+        ownedStorage,
+        root,
+        lock,
+        sourceParent,
+        targetParent,
+        intent,
+      );
+      for (final path in provenancePaths) {
+        final evidence = provenance[path];
+        if (evidence is! Map<String, Object?> ||
+            evidence.length != 2 ||
+            evidence['identity'] is! Map<String, Object?> ||
+            evidence['manifest'] is! Map<String, Object?>) {
+          throw const FormatException(
+            'complete explicit app provenance required',
+          );
+        }
+        result._provenance[path] = await MaintenanceTree.open(Directory(path));
+      }
+      final complete = maintenancePathEntryExists('${root.path}/completed');
+      final partial = maintenancePathEntryExists(
+        '${root.path}/.completed.partial',
+      );
+      if (complete && partial)
+        throw const FormatException('ambiguous paired completion');
+      result._completionName = complete
+          ? 'completed'
+          : partial
+          ? '.completed.partial'
+          : null;
+      state._appRestoration = result;
+      await result._verifyBindings();
+      if (result._oldPath != target) {
+        throw const FormatException(
+          'installed old app required for paired recovery',
+        );
+      }
+      return result;
+    } catch (_) {
+      if (result != null) {
+        if (identical(state._appRestoration, result))
+          state._appRestoration = null;
+        result._closeResources();
+      } else {
+        sourceParent?.close();
+        targetParent?.close();
+        root?.close();
+        lock?.close();
+        ownedStorage.close();
+      }
+      rethrow;
     }
   }
 

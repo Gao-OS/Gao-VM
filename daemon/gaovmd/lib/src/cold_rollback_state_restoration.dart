@@ -22,6 +22,43 @@ final class ColdRollbackStateRestoration {
 
   String get path => _state.path;
 
+  /// Reopen only the fixed final old-app/old-state layout, never move an app,
+  /// start a service or retire a fence. The operator repeats history-rewind
+  /// acceptance and supplies the original native journal selectors explicitly.
+  static Future<ColdRollbackStateRestoration> open(
+    OwnedImageDirectory work,
+    String preparationName,
+    MaintenanceStateFence original, {
+    required Directory installationApp,
+    required ({OwnedImageDirectory storage, String name}) retirement,
+    ({OwnedImageDirectory storage, String name})? publication,
+    required String bundleIdentifier,
+    required bool acceptHistoryRewind,
+    required String oldVersion,
+    required String newVersion,
+    required String teamIdentifier,
+    required int? sourceCatalogSchema,
+    ReleaseInspectionHost host = const MacOsReleaseInspectionHost(),
+    MacOsOpenReferences? observer,
+    Future<DriverInventorySnapshot> Function(String)? inventory,
+  }) => _openRollbackPair(
+    work,
+    preparationName,
+    original,
+    installationApp: installationApp,
+    retirement: retirement,
+    publication: publication,
+    bundleIdentifier: bundleIdentifier,
+    acceptHistoryRewind: acceptHistoryRewind,
+    oldVersion: oldVersion,
+    newVersion: newVersion,
+    teamIdentifier: teamIdentifier,
+    sourceCatalogSchema: sourceCatalogSchema,
+    host: host,
+    observer: observer,
+    inventory: inventory,
+  );
+
   Map<String, Object?> toJson() {
     if (_closed || _busy || _appCuttingOver || !_preparation._consumed) {
       throw StateError(

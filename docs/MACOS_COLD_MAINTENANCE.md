@@ -517,13 +517,38 @@ There is no automatic reversal, cleanup-based retry or startup probe against
 either actual state generation. After close, kernel locks are released but both
 startup markers remain active.
 
-There is still no operator rollback command. Fixed restored-state reopen is not
-yet composed with preparation recovery, and the new app placement does not have
-a composed fixed-checkpoint/interrupted-pair reopen route. Do not feed an
-app-restored layout to ordinary preparation, preservation or state-only recovery.
-Interrupted paired replacement and final rollback commit remain unfinished. The
-cold-commit/manual-start upgrade sequence above does not settle rollback fence
-retirement or imply that the rollback transaction is complete.
+`ColdRollbackStateRestoration.open` is the separate composed recovery route for
+the fixed **post-move** old-app/old-state layout. The caller supplies the work,
+original preparation name, original active fence, canonical installation slot,
+explicit native retirement/publication storage/name selectors and expected
+bundle/team/versions/catalog schema, and repeats history-rewind acceptance.
+Recorded paths never select replacement targets. The original master pair,
+independent copy receipts, retained failed state, both exact fences, both app
+placements, unchanged native provenance and external-file seals close before
+either existing-only state ownership or any native factory. Missing ownership or
+namespace files are refused, not recreated. The context holds the original-pair,
+external and native-provenance readers/locks until explicit close.
+
+The state component must already have its complete immutable checkpoint. The
+app may have a complete checkpoint, a missing completion or a complete sealed
+`.completed.partial`. Complete reopening is read-only; the latter two cases can
+finish only after fresh native observations, actual ownership of both state
+inodes, late snapshot/external-reference checks and the complete filesystem
+closure. Native inventories retain the original publication staging path too,
+even though it is vacant. No actual-state startup probe or catalog migration is
+performed. Recovery does not rewrite component records, rerun either app/state
+move, undo a failure, retire markers or register/start a service.
+
+Do not feed an app-restored layout to ordinary preparation, preservation or
+state-only recovery. App moves still in progress, incomplete/ambiguous records,
+foreign placements and changed inputs are retained and refused. There is still
+no operator rollback command or general interrupted-pair replacement protocol.
+The user has also accepted a single explicit cold rollback commit followed by
+manual startup: `rollback-upgrade --accept-history-rewind --allow-startup`.
+Its final commit implementation remains unfinished. That policy will retire only
+the canonical startup fence after complete paired revalidation, keep the retained
+failed generation fenced, and never register/start the service. The policy is not
+permission to operate an installed app/state tree or a completed transaction.
 
 ## Data-preserving cold uninstall
 
