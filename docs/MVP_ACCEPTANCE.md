@@ -1976,3 +1976,101 @@ that gap. The other M8/release gaps and two prior source-Dart startup failures
 remain open. No push, PR, release, installed app/state/service/VM operation,
 machine switch or Apple Silicon/VZ/GaoOS execution occurred. M8/MVP and the full
 goal remain open.
+
+## 2026-10-16 whole-pair rollback preparation and checkpoint reopen
+
+Local commit `0640a06` adds `ColdRollbackPreparation.prepare/open`. With explicit
+history-rewind acceptance, an active original startup fence and real current-state
+ownership, it prepares independent copies of the matching old app and complete old
+state in fixed private rollback storage. The original app/state snapshots and
+current state are not replaced. The current complete persistent-state/native
+manifest is bound into the intent without opening the current catalog, so damaged
+or partially migrated current SQLite bytes do not prevent inspecting a valid old
+pair. The old catalog is opened only through a separately owned inspection copy
+of the staged old state. Pre-catalog state remains pre-catalog: no database is
+initialized to make the check pass.
+
+The original current-state lease and an independent staged-state kernel owner
+remain held through verification. Reentrant verification or close during a pending
+verification refuses until the original future settles. Both old snapshot trees
+are checked for other same-user references; original external VM files require
+unchanged full evidence and no other references. External files are not copied or
+rewound. Persisted external seals are compared structurally, not by JSON map key
+order; byte digests, native metadata and exact checkpoint/receipt bytes remain
+mandatory checks. Complete source/current and independent destination manifests,
+inode bindings, namespace locks and sealed records are checked again after native
+callbacks. A copied ownership file is never treated as a held kernel lock.
+
+Explicit reopen accepts only a fixed complete checkpoint or complete sealed
+`.prepared.partial`, with fresh real ownership, native cold/release revalidation
+and a new empty disjoint inspection directory. It neither recopies the old pair
+nor replaces the retained intent with a new snapshot of intervening state. A
+sealed partial is promoted by an atomic no-replace move only after full
+revalidation. Unknown entries, incomplete records, a native-identical substituted
+state inode, changed current state or forged commit flags refuse without repair
+or restoration release-component execution. All preparation reports retain
+`installed_pair_restored`,
+`committed`, `startup_allowed` and `service_actions_performed` as false.
+
+The 21 new component checks cover damaged current catalogs, pre-catalog/external
+file boundaries, acknowledgement before output, pending ownership lifetime,
+independent-child exclusion, complete and sealed-partial reopen, refusal without
+repair, changed namespace locks, old-state references and post-checkpoint
+source/target/record changes. Partial placement is modeled explicitly; it is not a
+process-kill or power-loss recovery test.
+
+The final original runners returned exit 0 with **309 unique Dart checks across
+12 files**, zero failures or skips. Reports are under
+`/private/tmp/gaovm-rollback-prepare.yu4Ffu/`:
+
+| Report | Checks | Seconds |
+| --- | ---: | ---: |
+| `paired-regression-final.jsonl` | 71 (21 new, 50 existing) | 180.415 |
+| `supporting-regression-final.jsonl` | 238 across 11 files | 69.781 |
+
+The supporting checks cover cold catalog/legacy/lease/state snapshot/backup,
+maintenance fence/tree/snapshot, daemon ownership/rebind and no-replace directory
+moves. Separate final Intel AOT compilation of the outside-app maintenance tool
+and daemon succeeded. Five empty-environment AOT checks in
+`aot-entrypoints-final.jsonl` passed: both help entries, daemon component evidence,
+and fail-closed commit/recovery entries without explicit acknowledgement/inputs.
+These are unsigned local executable checks, not installed/signed native product
+acceptance. Final daemon analysis has no issues; root analysis exits 0 with the
+same nine UI informational notices. The three changed Dart files pass pinned
+formatting and the scoped diff passes whitespace checks. The unrelated UI
+lockfile remains byte-identical and excluded.
+
+Test-first runs reproduced missing preparation/reopen behavior, unchecked
+namespace locks, missing sealed-partial recovery, valid external-file map-order
+refusal and missed old-state references. Another failed run used a normal startup
+admission assertion where a retained fence correctly refused; its assertion now
+checks the actual kernel lock instead, without changing product fence rules.
+The original failed runners have exited; these inputs were rechecked to exist and
+were not repaired, retried in place or deleted:
+
+- `/private/var/folders/s0/hl1d3jkx5jx3gs69033nc6d80000gp/T/gvm-release-inspection-ssQAAZ`
+- `/private/var/folders/s0/hl1d3jkx5jx3gs69033nc6d80000gp/T/gvm-release-inspection-rUg9fm`
+- `/private/var/folders/s0/hl1d3jkx5jx3gs69033nc6d80000gp/T/gvm-release-inspection-RtNtnu`
+- `/private/var/folders/s0/hl1d3jkx5jx3gs69033nc6d80000gp/T/gvm-release-inspection-748oqf`
+- `/private/var/folders/s0/hl1d3jkx5jx3gs69033nc6d80000gp/T/gvm-release-inspection-X0Q0IT`
+- `/private/var/folders/s0/hl1d3jkx5jx3gs69033nc6d80000gp/T/gvm-release-inspection-4WYHrq`
+- `/private/var/folders/s0/hl1d3jkx5jx3gs69033nc6d80000gp/T/gvm-release-inspection-0ZmoBN`
+- `/private/var/folders/s0/hl1d3jkx5jx3gs69033nc6d80000gp/T/gvm-release-inspection-njtIav`
+- `/private/var/folders/s0/hl1d3jkx5jx3gs69033nc6d80000gp/T/gvm-release-inspection-uMVrpL`
+
+Filesystem bytes/native metadata, SQLite, kernel locks and independent-child
+exclusion are real. Positive signature/component/service/process observations and
+injected reference observations are explicit fixtures. The full/default-concurrency
+suite and remote CI were not run. The two prior source-Dart daemon-startup failures
+remain unfixed and unrerun, not passing.
+
+This is an internal preparation/reopen API, not a rollback command or a committed
+rollback. Preserving the post-upgrade generation separately, admitting a different
+state inode under continuous fencing, replacing the canonical app/whole-state pair
+and recovering interrupted replacement remain unfinished. Preparation leaves the
+current generation in place; its manifest is not a separate post-upgrade backup.
+No fence was retired, no canonical app/state was replaced and no service was
+started. The remaining M8/first-install/historical-schema/crash/low-disk gaps and
+manual native lifecycle/Apple Silicon/VZ/GaoOS acceptance remain open. No push, PR,
+release, real installed app/state/service/VM operation or machine switch occurred.
+M8/MVP and the full goal remain open.
