@@ -121,7 +121,6 @@ final class GuestBridgeOpeningTests: XCTestCase {
   }
 
   func testOpeningDeadlineIsNotRestartedAfterAFragmentedLengthPrefix() throws {
-    let deadline = DispatchTime.now() + .milliseconds(300)
     let (server, client) = try socketPair(deadline: .now() + 2)
     defer {
       server.close()
@@ -129,12 +128,25 @@ final class GuestBridgeOpeningTests: XCTestCase {
     }
     let frame = fixtureFrame(openHeader)
     try client.writeAll(frame.prefix(2))
+    let ready = expectation(description: "prefix sender ready")
     let sent = expectation(description: "remaining prefix sent")
-    DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(200)) {
+    let sendPrefix = DispatchSemaphore(value: 0)
+    DispatchQueue(label: "gaovm.test.fragmented-opening").async {
       defer { sent.fulfill() }
-      do { try client.writeAll(frame[2..<4]) } catch { XCTFail("fixture prefix send failed") }
+      ready.fulfill()
+      guard sendPrefix.wait(timeout: .now() + 2) == .success else {
+        return XCTFail("fixture prefix sender was not released")
+      }
+      Thread.sleep(forTimeInterval: 0.2)
+      do {
+        try client.writeAll(frame[2..<4])
+      } catch { XCTFail("fixture prefix send failed: \(error)") }
     }
+    // Socket setup and worker scheduling must not consume the opening budget.
+    wait(for: [ready], timeout: 2)
     let started = DispatchTime.now().uptimeNanoseconds
+    let deadline = DispatchTime(uptimeNanoseconds: started) + .milliseconds(300)
+    sendPrefix.signal()
     XCTAssertThrowsError(try GuestBridgeFrameIO.readOpening(from: server, deadline: deadline)) {
       XCTAssertEqual($0 as? GuestBridgeProtocolError, .deadlineExpired)
     }
