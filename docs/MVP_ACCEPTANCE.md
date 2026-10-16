@@ -1809,3 +1809,111 @@ remain unfinished. Historical nonzero-schema migration still lacks dedicated
 command evidence. No push, PR, release, real installed app/state/service/VM
 operation, machine switch or Apple Silicon/VZ/GaoOS execution occurred. M8/MVP
 and the full goal remain open.
+
+## 2026-10-16 explicit cold commit before manual startup
+
+Local commit `3f19e5c` implements the user-selected sequence: cold
+`commit-upgrade --allow-startup`, then separate manual operator registration/
+startup. The outside-app tool independently recovers completed validation under
+fresh native cold checks and actual state kernel ownership. It never registers,
+starts, stops or signals a service/VM, reruns migration/API validation, or reports
+ordinary installed readiness. The [operator interface](MACOS_COLD_MAINTENANCE.md#explicit-cold-commit-and-manual-startup)
+and [accepted sequence](proposals/MACOS_UPGRADE_ROLLBACK.md#common-upgrade-state-machine)
+describe that boundary, not authority to operate an actual installation.
+
+`ColdCommitCheckpoint` binds the actual work/checkpoint/state/fence identities,
+release inputs, preparation/publication evidence, sealed validation digests and
+the closed-state digest. Its preparation record keeps false commit/activation
+flags and the original startup fence. Before a physical commit it seals a
+terminal **candidate** in `.completed.partial`; that JSON alone is not authority.
+Complete evidence is reread after native observers. The exact original fence
+inode then moves atomically without replacement to `commit/retired-fence`, with
+both parents synced. This is the commit point. The real state owner stays held
+through final rechecks and terminal `completed` publication. Both retained state
+generations, original app/state pair, external files and failed TestRuns remain
+unchanged; the fence and all evidence are retained, not deleted.
+
+Explicit `resume-commit --allow-startup` reacquires existing namespace locks and
+fresh state ownership. It recognizes only complete fixed preparation and terminal
+placements before/after that fence move, including a sealed terminal candidate
+with the original fence still active. Unknown/incomplete output, substituted
+identity, forged flags and impossible placements refuse without repair. A blind
+repeat refuses. A fully committed result is reverified without rewriting it.
+Errors can follow the commit point, so command failures report `committed: null`
+and `startup_allowed: null`, not an invented non-commit. No automatic reverse
+move, cleanup, re-fencing or service action is attempted.
+
+Final reports under `/private/tmp/gaovm-cold-commit.YT2Upa/` cover **170 unique
+checks across eight files**, zero failures or skips, not the full suite:
+
+| Report (`.jsonl`) | Checks | Seconds |
+| --- | ---: | ---: |
+| `commit-checkpoints-current` | 10 | 731.335 |
+| `final-boundaries-fixed` | 3 | 453.400 |
+| `existing-recovery-current` | 10 | 418.594 |
+| `fence-final-typed` | 66 | 12.302 |
+| `sqlite-owned-current` | 34 | 9.473 |
+| `operator-cli-current` | 47 | 242.312 |
+
+The eight files are release inspection, state fence, cold state lease, SQLite
+database, native read-only validation, maintenance command, cold operator and
+candidate entrypoint tests. Every final original runner returned exit 0; teardown
+also completed. Repeated red/green stages and the entrypoint checks already in
+the operator cohort are not double-counted. The 13 new release-inspection checks
+cover preparation, complete fixed partials, closed/real ownership, late record
+tampering, unknown/incomplete output, explicit startup acknowledgement, actual
+cold commit, blind retry, unresolved-process refusal and fresh explicit recovery.
+
+These checks use actual private SQLite legacy migration from no source catalog
+to schema 21, real filesystem bytes/native metadata, Darwin no-replace moves,
+fsync and kernel locks. The owned-exit check holds its original real `/bin/cat`
+child and namespace ownership until that same child's confirmed exit; existing
+owned-exit handling already passed its initial check and was not rewritten.
+Signature/component/service/ARM64/process observations remain explicit fixtures.
+The pre-retirement failure is injected at a native observation callback; the
+post-retirement terminal partial is a modeled sealed directory placement, not
+process-kill/power-loss E2E. Neither test authorizes adopting an arbitrary partial.
+
+Test-first missing preparation/recovery/commit/action and post-retirement-layout
+checkpoints failed before their matching implementation. Compiler-only failures
+created no fixture. A later three-check runner returned exit 1 after **454.192
+seconds** because its final test used a wrongly typed `Future.then` error handler,
+not because product recovery had been exercised and failed. The standard exception
+assertion replaced it; the final fresh three-check runner above passes. Its failed
+fixture still contains the terminal candidate and original active fence, with no
+retired fence or published terminal directory. No deadline was increased and no
+failed fixture was deleted, repaired, promoted or retried in place.
+
+All nine current-slice failed inputs were rechecked to exist:
+
+- `/private/tmp/gvm-recover-validation-uHVygo`
+- `/private/tmp/gvm-recover-validation-sfwYqs`
+- `/private/tmp/gvm-recover-validation-2mnwey`
+- `/private/tmp/gvm-mf-xskuth`
+- `/private/tmp/gvm-mf-DkrrAd`
+- `/private/tmp/gvm-recover-validation-dAkNI7`
+- `/private/tmp/gvm-recover-validation-8IPzgK`
+- `/private/tmp/gvm-recover-validation-B2XKDE`
+- `/private/tmp/gvm-recover-validation-62CiOF`
+
+Final daemon analysis has no issues. Root analysis exits 0 with the same nine
+pre-existing UI informational notices. Pinned non-UI formatting checks **397
+files**, zero changes. Schema/OpenAPI validation, staged `git diff --check` and
+all 99 scoped Markdown file-target checks pass; anchors were not checked. Both final
+Intel AOT executables compile and are confirmed Mach-O `x86_64`. Empty-environment/
+no-HOME operator help, commit/resume input refusals with unknown commit/startup
+flags, daemon component-info and redacted private-grant refusal pass with original
+child exits confirmed. Those are entry checks, not ARM64 product execution.
+The existing macOS CI jobs already select the affected test files and maintenance
+compile entry; remote CI and the full/default-concurrency suite were not run.
+The unrelated UI lockfile is byte-identical and excluded from the code commit.
+
+Cold commit and its bounded fixed-checkpoint recovery are now implemented.
+Arbitrary interrupted migration/validation recovery, paired whole-state/app
+rollback, first install, historical nonzero-schema command integration and the
+complete failure/crash/low-disk matrix remain unfinished. The two earlier positive
+source-Dart local daemon-startup failures remain unfixed and unrerun, not passing.
+Manual installed activation/readiness and native lifecycle/Apple Silicon/VZ/GaoOS
+acceptance remain outstanding and assigned to the user. No push, PR, release,
+actual installed app/state/service/VM operation or machine switch occurred.
+M8/MVP and the full goal remain open.
