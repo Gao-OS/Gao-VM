@@ -32,6 +32,8 @@ final class MacOsColdStateHost implements ColdStateHost {
   final MacOsOpenReferences _observer;
   final Future<DriverInventorySnapshot> Function(String) _inventory;
   final _AppRetirement? _retirement;
+  final _rollbackInventoryPaths = <String>{};
+  final _rollbackReferencePaths = <String>{};
   String? _validationExecutable;
   DriverProcessIdentity? _validationProcess;
   @override
@@ -129,6 +131,85 @@ final class MacOsColdStateHost implements ColdStateHost {
       );
     } catch (_) {
       tree.close();
+      rethrow;
+    }
+  }
+
+  /// Filesystem evidence for unchanged retirement/publication journals. It is
+  /// captured before a rollback app move and sealed by the typed placement
+  /// proof, not reinterpreted as ordinary retired/publication admission.
+  Future<Map<String, Object?>> rollbackProvenance() async {
+    await _verifyApp();
+    await _retirement?._publication?.verify();
+    final evidence = <String, Object?>{};
+    for (final path in {
+      if (_retirement != null) _retirement._root.path,
+      if (_retirement?._publication case final publication?)
+        publication._root.path,
+    }) {
+      final directory = await OwnedImageDirectory.open(Directory(path));
+      MaintenanceTree? tree;
+      try {
+        tree = await MaintenanceTree.open(Directory(path));
+        evidence[path] = {
+          'identity': await directory.maintenanceIdentity(),
+          'manifest': await tree.capture(nativeMetadata: true),
+        };
+        await directory.verifyPathBinding();
+      } finally {
+        tree?.close();
+        directory.close();
+      }
+    }
+    return evidence;
+  }
+
+  /// Fresh native inspection at ONLY this proof's exact relocated app inodes.
+  /// The original host and its immutable provenance are never silently rebased.
+  /// Read-only role/signature probes are not daemon activation or fence probes.
+  Future<List<MacOsColdStateHost>> reopenForRollback(
+    ColdAppRestoration restoration,
+  ) async {
+    final opened = <MacOsColdStateHost>[];
+    try {
+      for (final (source, expected) in [
+        (appPath, _release),
+        if (_retirement?._publication case final publication?)
+          (
+            publication.candidatePath,
+            publication._record['release'] as Map<String, Object?>,
+          ),
+      ]) {
+        final path = await restoration.relocatedPathFor(source);
+        final fresh = await MacOsColdStateHost.open(
+          Directory(path),
+          bundleIdentifier: expected['bundle_identifier'] as String,
+          version: expected['version'] as String,
+          teamIdentifier: expected['team_identifier'] as String,
+          catalogSchema: expected['required_catalog_schema'] as int,
+          host: _host,
+          observer: _observer,
+          inventory: _inventory,
+        );
+        opened.add(fresh);
+        if (!_AppRetirement._sameRelease(fresh._release, expected) ||
+            await restoration.relocatedPathFor(source) != path) {
+          throw const FormatException(
+            'restored release differs from original observer',
+          );
+        }
+        fresh._rollbackInventoryPaths.addAll({
+          ...restoration.sourceAppPaths,
+          ...?_retirement?._publication?.candidatePaths,
+        });
+        fresh._rollbackReferencePaths.addAll({
+          path,
+          ...restoration.provenancePaths,
+        });
+      }
+      return opened;
+    } catch (_) {
+      for (final host in opened) host.close();
       rethrow;
     }
   }
@@ -293,6 +374,7 @@ final class MacOsColdStateHost implements ColdStateHost {
       installationPath,
       appPath,
       ...?_retirement?._publication?.candidatePaths,
+      ..._rollbackInventoryPaths,
     }) {
       final result = await _inventory(
         driver
@@ -325,6 +407,9 @@ final class MacOsColdStateHost implements ColdStateHost {
   @override
   Future<Set<int>> stateReferences(Directory state) async {
     final references = await _observer.directory(state);
+    for (final path in _rollbackReferencePaths) {
+      await _AppRetirement._noReferences(_observer, path);
+    }
     if (isRetired) await _AppRetirement._noReferences(_observer, appPath);
     final publication = _retirement?._publication;
     if (publication != null) {

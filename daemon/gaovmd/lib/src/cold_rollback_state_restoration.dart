@@ -1,8 +1,8 @@
 part of 'cold_catalog_inspection.dart';
 
 /// Held composition of an independently proved old pair and restored whole
-/// state. The old app is still staged, both generations remain fenced, and no
-/// commit or ordinary startup is authorized. Owns its consumed preparation,
+/// state, then optional explicit old-app installation. Both generations remain
+/// fenced; neither phase authorizes commit or ordinary startup. Owns its preparation,
 /// including its staged native host, external readers and both actual state
 /// owners. Caller-owned current native hosts, original fence and work remain
 /// borrowed and must stay open until this context closes.
@@ -17,25 +17,57 @@ final class ColdRollbackStateRestoration {
   final ColdStateRestoration _state;
   final String retainedStatePath;
   bool _closed = false, _busy = false;
+  bool _appCuttingOver = false;
+  ColdAppRestoration? _app;
 
   String get path => _state.path;
 
   Map<String, Object?> toJson() {
-    if (_closed || _busy || !_preparation._consumed) {
+    if (_closed || _busy || _appCuttingOver || !_preparation._consumed) {
       throw StateError(
         'complete available rollback state restoration required',
       );
     }
-    return _state.toJson();
+    return _app?.toJson() ?? _state.toJson();
   }
 
   Future<void> verify() async {
-    if (_closed || _busy) {
+    if (_closed || _busy || _appCuttingOver) {
       throw StateError('available rollback state restoration required');
     }
     _busy = true;
     try {
-      await _preparation._verifyRestoredState(_state, retainedStatePath);
+      await _preparation._verifyRestoredState(
+        _state,
+        retainedStatePath,
+        app: _app,
+      );
+    } finally {
+      _busy = false;
+    }
+  }
+
+  /// Explicit next phase, still cold/uncommitted. The frozen installation slot
+  /// may contain only the known failed app (which is retained), or be vacant.
+  /// Failure retains both state owners and all app placements; no blind retry.
+  Future<void> restoreOldApp() async {
+    if (_app != null || _appCuttingOver)
+      throw StateError('app restoration already attempted');
+    await verify();
+    _busy = true;
+    _appCuttingOver = true;
+    try {
+      _app = await _state.restoreAppForRollback(
+        _preparation._work,
+        'restored-old-app',
+        observePreparedInputs: _preparation._verifySnapshotReferences,
+        verifyPreparedInputs: (app) => _preparation._verifyRestoredFiles(
+          _state,
+          retainedStatePath,
+          app: app,
+        ),
+      );
+      _appCuttingOver = false;
     } finally {
       _busy = false;
     }

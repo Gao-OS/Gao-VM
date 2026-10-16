@@ -879,18 +879,31 @@ final class ColdRollbackPreparation {
 
   Future<void> _verifyRestoredState(
     ColdStateRestoration restored,
-    String retained,
-  ) async {
+    String retained, {
+    ColdAppRestoration? app,
+  }) async {
     if (_closed || !identical(restored, _ownedRestoration)) {
       throw StateError('held rollback state restoration required');
     }
     await restored.verify();
     await _verifySnapshotReferences();
     await restored.verify();
+    await _verifySnapshotReferences();
     // Filesystem-only closure after the last service/process/file observer.
+    await _verifyRestoredFiles(restored, retained, app: app);
+  }
+
+  Future<void> _verifyRestoredFiles(
+    ColdStateRestoration restored,
+    String retained, {
+    ColdAppRestoration? app,
+  }) async {
     await _verifySourceFiles(retainedState: retained);
     await ColdUpgradePreparation._verifyPrivate(_inspection!);
-    await _verifyOutputFiles(restored: restored);
+    await _verifyOutputFiles(restored: restored, app: app);
+    // App transition callbacks run inside the state's guarded original future;
+    // its complete typed FS proof is closed immediately after this callback.
+    if (app != null) return;
     final root = await OwnedImageDirectory.open(Directory(restored.path));
     try {
       await restored.verifyFor(root);
@@ -899,7 +912,13 @@ final class ColdRollbackPreparation {
     }
   }
 
-  Future<void> _verifyOutputFiles({ColdStateRestoration? restored}) async {
+  Future<void> _verifyOutputFiles({
+    ColdStateRestoration? restored,
+    ColdAppRestoration? app,
+  }) async {
+    final actualApp = app == null
+        ? appPath
+        : await app.relocatedPathFor(appPath);
     await ColdUpgradePreparation._entries(_root, {
       'intent.json',
       'app',
@@ -938,7 +957,23 @@ final class ColdRollbackPreparation {
             'restoration copy differs from complete old pair',
           );
         }
-        if (entry.key == 'state' && restored != null) {
+        if (entry.key == 'app' && actualApp != appPath) {
+          await ColdUpgradePreparation._entries(wrapper, {'receipt.json'});
+          await ColdUpgradePreparation._checkRecord(
+            wrapper,
+            'receipt.json',
+            receipt,
+          );
+          final tree = await MaintenanceTree.open(Directory(actualApp));
+          try {
+            await tree.verify(
+              receipt['manifest'] as Map<String, Object?>,
+              nativeMetadata: true,
+            );
+          } finally {
+            tree.close();
+          }
+        } else if (entry.key == 'state' && restored != null) {
           final facts = restored.toJson();
           if (facts['source_state'] != statePath ||
               facts['target_state'] != _current.path ||
@@ -976,7 +1011,7 @@ final class ColdRollbackPreparation {
       originalInspection.close();
     }
     if (!_same(
-          await ColdUpgradePreparation._identity(appPath),
+          await ColdUpgradePreparation._identity(actualApp),
           _record!['app_identity'],
         ) ||
         !_same(

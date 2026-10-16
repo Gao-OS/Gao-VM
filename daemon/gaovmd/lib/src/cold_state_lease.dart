@@ -12,6 +12,7 @@ import 'maintenance_tree.dart';
 
 part 'cold_state_preservation.dart';
 part 'cold_state_restoration.dart';
+part 'cold_app_restoration.dart';
 
 /// External observations only. The native implementation binds these to the
 /// previously inspected owning app; fixtures never register or stop services.
@@ -347,8 +348,8 @@ final class ColdStateLease {
     }
   }
 
-  Future<void> _verifyService() async {
-    final result = await _host.serviceStatus();
+  Future<void> _verifyService({ColdStateHost? observer}) async {
+    final result = await (observer ?? _host).serviceStatus();
     final value = jsonDecode(result.stdout as String);
     final expected = {
       'action': 'status',

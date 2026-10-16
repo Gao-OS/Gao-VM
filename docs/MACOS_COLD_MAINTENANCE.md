@@ -433,8 +433,8 @@ ordinary startup and the original fence's `verifyFor` remain strict.
 
 `ColdStateRestoration` reports `phase: old_state_restored` and
 `canonical_state_restored: true`, but `installed_pair_restored`, `committed`,
-`startup_allowed` and `service_actions_performed` remain false. It does not move
-an app, retire either fence, register or start a service. Pending restoration or
+`startup_allowed` and `service_actions_performed` remain false. This component
+receipt does not move an app, retire either fence, register or start a service. Pending restoration or
 typed verification cannot release either owner. Late changed bytes, an occupied
 target or changed provenance refuse success without automatic undo or repair;
 a failure does not prove that the state move did not happen. Preserve every
@@ -489,11 +489,41 @@ files after fresh native observations. It does not pass the occupied canonical
 slot through normal admission or weaken snapshot verification for unmoved data.
 The preparation's sealed record remains immutable, not rewritten as a commit.
 
+The explicit next internal phase,
+`ColdRollbackStateRestoration.restoreOldApp`, installs the independently staged
+matching old app at the frozen canonical installation slot. A vacant slot is
+accepted; an occupied slot must still be the exact known current/failed app. That
+app is first moved without replacement into `restored-old-app/retained.app`.
+Unknown targets are refused before native helpers or app moves. No existing app
+is overwritten or deleted, and the original matching snapshots remain untouched.
+
+A separate `ColdAppRestoration` intent and sealed checkpoints bind this transition
+to the held whole-state restoration, exact app inodes/native contents, both
+parents and unchanged retirement/publication provenance. Normal app placement
+checks are not relaxed: only that attached typed context admits the two known
+moves. The old state-component record stays immutable. Fresh read-only native
+observers inspect the actual installed/retained apps again; their inventories
+also cover the original executable paths, without waiving unresolved PIDs. Both
+real state owners and persistent fences stay held. Snapshot/external-file
+references are observed after the final native app checks, then the complete
+filesystem read set is closed before writing completion.
+
+Only this composed old-pair proof reports `phase: old_pair_restored` and
+`installed_pair_restored: true`. `committed`, `startup_allowed` and
+`service_actions_performed` remain false. Pending app restoration or verification
+refuses close/reentry/completion; failure retains moved apps, both state owners,
+markers and checkpoints until the original future settles and explicit close.
+There is no automatic reversal, cleanup-based retry or startup probe against
+either actual state generation. After close, kernel locks are released but both
+startup markers remain active.
+
 There is still no operator rollback command. Fixed restored-state reopen is not
-yet composed with preparation recovery; old-app/whole-state paired installation,
-interrupted paired replacement and rollback commit remain unfinished. The
+yet composed with preparation recovery, and the new app placement does not have
+a composed fixed-checkpoint/interrupted-pair reopen route. Do not feed an
+app-restored layout to ordinary preparation, preservation or state-only recovery.
+Interrupted paired replacement and final rollback commit remain unfinished. The
 cold-commit/manual-start upgrade sequence above does not settle rollback fence
-retirement or imply that rollback is complete.
+retirement or imply that the rollback transaction is complete.
 
 ## Data-preserving cold uninstall
 

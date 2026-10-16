@@ -29,8 +29,38 @@ final class ColdStateRestoration {
   String? _completionName;
   bool _busy = false, _closed = false, _ownsStates = false;
   bool _recovering = false;
+  ColdAppRestoration? _appRestoration;
 
   String get path => _intent['target_state'] as String;
+
+  /// Install the independently staged old app under this exact two-state proof.
+  /// The caller closes the matching snapshot/external-file read set with FS
+  /// checks only. Reference observations run after the final native app checks,
+  /// before that FS closure. Retains any partial app move until explicit close.
+  Future<ColdAppRestoration> restoreAppForRollback(
+    OwnedImageDirectory storage,
+    String name, {
+    required Future<void> Function() observePreparedInputs,
+    required Future<void> Function(ColdAppRestoration) verifyPreparedInputs,
+  }) async {
+    if (_appRestoration != null) {
+      throw StateError('app restoration already attempted');
+    }
+    await verify();
+    _busy = true;
+    try {
+      return await ColdAppRestoration._create(
+        this,
+        storage,
+        name,
+        observePreparedInputs,
+        verifyPreparedInputs,
+      );
+    } finally {
+      _busy = false;
+    }
+  }
+
   Map<String, Object?> toJson() {
     if (_closed ||
         _recovering ||
@@ -668,27 +698,31 @@ final class ColdStateRestoration {
     } finally {
       tree.close();
     }
-    for (final app in _apps.entries) {
-      final evidence = (_intent['apps'] as Map)[app.key];
-      if (app.value == null) {
-        if (evidence != null || maintenancePathEntryExists(app.key)) {
-          throw const FormatException('original app slot became occupied');
-        }
-      } else {
-        final directory = await OwnedImageDirectory.open(Directory(app.key));
-        try {
-          if (!PreservedColdState._same(
-            await directory.maintenanceIdentity(),
-            (evidence as Map)['identity'],
-          )) {
-            throw const FormatException('restoration app inode changed');
+    if (_appRestoration case final restored?) {
+      await restored._verifyBindings();
+    } else {
+      for (final app in _apps.entries) {
+        final evidence = (_intent['apps'] as Map)[app.key];
+        if (app.value == null) {
+          if (evidence != null || maintenancePathEntryExists(app.key)) {
+            throw const FormatException('original app slot became occupied');
           }
-          await app.value!.verify(
-            evidence['manifest'] as Map<String, Object?>,
-            nativeMetadata: true,
-          );
-        } finally {
-          directory.close();
+        } else {
+          final directory = await OwnedImageDirectory.open(Directory(app.key));
+          try {
+            if (!PreservedColdState._same(
+              await directory.maintenanceIdentity(),
+              (evidence as Map)['identity'],
+            )) {
+              throw const FormatException('restoration app inode changed');
+            }
+            await app.value!.verify(
+              evidence['manifest'] as Map<String, Object?>,
+              nativeMetadata: true,
+            );
+          } finally {
+            directory.close();
+          }
         }
       }
     }
@@ -711,6 +745,14 @@ final class ColdStateRestoration {
     }
     _busy = true;
     try {
+      // Reject changed placements/journals before executing any native helper,
+      // not only at the read-set closure after the final native observation.
+      await _verifyFiles(moved: true);
+      if (_appRestoration case final restored?) {
+        await restored._verifyNative();
+        await _verifyFiles(moved: true);
+        return;
+      }
       await _old._ownership.verify();
       await _old._verifyService();
       for (final driver in [false, true]) {
@@ -757,6 +799,7 @@ final class ColdStateRestoration {
   void _closeUntransferred() {
     if (_closed) return;
     _closed = true;
+    _appRestoration?._closeResources();
     for (final host in _recoveredHosts) host.close();
     _state?.close();
     for (final app in _apps.values) {
@@ -770,7 +813,9 @@ final class ColdStateRestoration {
   }
 
   void close() {
-    if (_busy) throw StateError('state restoration verification is pending');
+    if (_busy || _appRestoration?._reading == true) {
+      throw StateError('state restoration verification is pending');
+    }
     if (_closed) return;
     if (!_ownsStates)
       throw StateError('restoration belongs to the original leases');

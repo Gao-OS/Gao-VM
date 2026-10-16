@@ -6883,6 +6883,540 @@ void main() {
       timeout: const Timeout(Duration(minutes: 3)),
     );
 
+    Future<(ColdRollbackPreparation, ColdRollbackStateRestoration)>
+    restoredNativeRollback({
+      MacOsOpenReferences? references,
+      Future<DriverInventorySnapshot> Function(String)? processInventory,
+    }) async {
+      lease.close();
+      MacOsOpenReferences observer() => MacOsOpenReferences(
+        command: (_, _) async => ProcessResult(pid, 1, '', ''),
+      );
+      Future<DriverInventorySnapshot> inventory(String path) async =>
+          processInventory == null
+          ? DriverInventorySnapshot(processes: [], unresolvedProcessIds: [])
+          : await processInventory(path);
+      final native = await MacOsColdStateHost.open(
+        app,
+        bundleIdentifier: 'org.gaovm.tests.Release',
+        version: '0.1.0',
+        teamIdentifier: 'ABCDEFGHIJ',
+        catalogSchema: 21,
+        host: host,
+        observer: observer(),
+        inventory: inventory,
+      );
+      addTearDown(() {
+        if (activeRetirementChecks == 0) native.close();
+      });
+      lease = await ColdStateLease.acquire(
+        state,
+        bundleIdentifier: 'org.gaovm.tests.Release',
+        host: native,
+      );
+      final (snapshot, fence, upgrade) = await fencedPreparation();
+      final parent = await OwnedImageDirectory.open(temporary);
+      late OwnedImageDirectory retirement;
+      try {
+        retirement = parent.createDirectory('paired-apps');
+      } finally {
+        parent.close();
+      }
+      addTearDown(() {
+        if (activeRetirementChecks == 0) retirement.close();
+      });
+      await upgrade.retireOriginalApp(retirement, 'old');
+      await upgrade.publishCandidate(retirement, 'candidate');
+      upgrade.close();
+      snapshot.close();
+      lease.close();
+      final currentHost = await MacOsColdStateHost.openPublished(
+        app,
+        state,
+        fence,
+        retirement,
+        'old',
+        retirement,
+        'candidate',
+        bundleIdentifier: 'org.gaovm.tests.Release',
+        oldVersion: '0.1.0',
+        newVersion: '0.1.0',
+        teamIdentifier: 'ABCDEFGHIJ',
+        retiredCatalogSchema: 21,
+        catalogSchema: 21,
+        host: host,
+        observer: observer(),
+        inventory: inventory,
+      );
+      addTearDown(() {
+        if (activeRetirementChecks == 0) currentHost.close();
+      });
+      lease = await ColdStateLease.acquire(
+        state,
+        bundleIdentifier: 'org.gaovm.tests.Release',
+        host: currentHost,
+        maintenanceFence: fence,
+      );
+      await File(
+        '${state.path}/failed-generation',
+      ).writeAsString('retain the failed generation', flush: true);
+      final rollback = await prepareRollback(fence, observer: references);
+      addTearDown(() {
+        if (activeRetirementChecks == 0) rollback.close();
+      });
+      final restored = await rollback.restoreOldState();
+      addTearDown(() {
+        if (activeRetirementChecks == 0) restored.close();
+      });
+      return (rollback, restored);
+    }
+
+    test(
+      'rollback app cutover restores the matching installed pair and retains the published failed app',
+      () async {
+        activeRetirementChecks++;
+        ColdRollbackPreparation? rollback;
+        ColdRollbackStateRestoration? restored;
+        try {
+          (rollback, restored) = await restoredNativeRollback();
+          final staged = await OwnedImageDirectory.open(
+            Directory(rollback.appPath),
+          );
+          late Map<String, Object?> oldIdentity;
+          try {
+            oldIdentity = await staged.maintenanceIdentity();
+          } finally {
+            staged.close();
+          }
+          final candidate = await OwnedImageDirectory.open(app);
+          late Map<String, Object?> candidateIdentity;
+          try {
+            candidateIdentity = await candidate.maintenanceIdentity();
+          } finally {
+            candidate.close();
+          }
+          final stateRecord = File(
+            '${backups.path}/restored-old-state/completed/record.json',
+          );
+          final stateRecordBefore = await stateRecord.readAsBytes();
+          final probes = host.admissions;
+          await restored.restoreOldApp();
+          await restored.verify();
+          final facts = restored.toJson();
+          expect(facts['phase'], 'old_pair_restored');
+          expect(facts['app_path'], app.path);
+          expect(facts['canonical_state_restored'], true);
+          expect(facts['installed_pair_restored'], true);
+          for (final flag in [
+            'committed',
+            'startup_allowed',
+            'service_actions_performed',
+          ]) {
+            expect(facts[flag], false);
+          }
+          expect(host.admissions, probes);
+          expect(await stateRecord.readAsBytes(), stateRecordBefore);
+          expect(
+            await File(
+              '${app.path}/Contents/Resources/pair-only',
+            ).readAsString(),
+            'preserve unknown app resource',
+          );
+          expect(await Directory(rollback.appPath).exists(), false);
+          for (final (path, identity) in [
+            (app.path, oldIdentity),
+            (facts['retained_app'] as String, candidateIdentity),
+          ]) {
+            final directory = await OwnedImageDirectory.open(Directory(path));
+            try {
+              expect(await directory.maintenanceIdentity(), identity);
+            } finally {
+              directory.close();
+            }
+          }
+          expect(
+            await File(
+              '${restored.retainedStatePath}/failed-generation',
+            ).readAsString(),
+            'retain the failed generation',
+          );
+          expect(await File('${state.path}/failed-generation').exists(), false);
+          rollback.close();
+          lease.close();
+          await restored.verify();
+          for (final target in [state, Directory(restored.retainedStatePath)]) {
+            final directory = await OwnedImageDirectory.open(target);
+            try {
+              expect(
+                await directory.tryAcquireMaintenanceLock(
+                  '.gaovmd.lock',
+                  create: false,
+                ),
+                isNull,
+              );
+            } finally {
+              directory.close();
+            }
+            await expectLater(
+              MaintenanceStateFence.requireUnfenced(target),
+              throwsA(isA<MaintenanceFenceActive>()),
+            );
+          }
+          await expectLater(restored.restoreOldApp(), throwsStateError);
+          restored.close();
+          for (final target in [state, Directory(restored.retainedStatePath)]) {
+            final directory = await OwnedImageDirectory.open(target);
+            try {
+              final released = await directory.tryAcquireMaintenanceLock(
+                '.gaovmd.lock',
+                create: false,
+              );
+              expect(released, isNotNull);
+              released?.close();
+            } finally {
+              directory.close();
+            }
+            await expectLater(
+              MaintenanceStateFence.requireUnfenced(target),
+              throwsA(isA<MaintenanceFenceActive>()),
+            );
+          }
+          final released = await backups.tryAcquireMaintenanceLock(
+            '.gaovm-app-restoration.lock',
+            create: false,
+          );
+          expect(released, isNotNull);
+          released?.close();
+        } catch (_) {
+          retainInputs = true;
+          rethrow;
+        } finally {
+          restored?.close();
+          rollback?.close();
+          lease.close();
+          activeRetirementChecks--;
+        }
+      },
+      timeout: const Timeout(Duration(minutes: 4)),
+    );
+
+    test(
+      'rollback app cutover rejects a late snapshot writer before completing the installed pair',
+      () async {
+        activeRetirementChecks++;
+        ColdRollbackStateRestoration? restored;
+        var late = false;
+        try {
+          final (rollback, result) = await restoredNativeRollback(
+            references: MacOsOpenReferences(
+              command: (_, arguments) async =>
+                  late &&
+                      arguments.last ==
+                          '${backups.path}/upgrade/original-app/payload.app'
+                  ? ProcessResult(pid, 0, 'p${pid + 1}\x00f3\x00\n', '')
+                  : ProcessResult(pid, 1, '', ''),
+            ),
+          );
+          restored = result;
+          host.onStatus = () async {
+            if (!await Directory(rollback.appPath).exists()) late = true;
+          };
+          await expectLater(
+            restored.restoreOldApp(),
+            throwsA(isA<ColdStateFailure>()),
+          );
+          expect(late, true);
+          expect(restored.toJson, throwsStateError);
+          await expectLater(restored.restoreOldApp(), throwsStateError);
+          expect(
+            await Directory(
+              '${backups.path}/restored-old-app/completed',
+            ).exists(),
+            false,
+          );
+          expect(await app.exists(), true);
+          expect(await Directory(rollback.appPath).exists(), false);
+          expect(
+            await Directory(
+              '${backups.path}/restored-old-app/retained.app',
+            ).exists(),
+            true,
+          );
+          for (final target in [state, Directory(restored.retainedStatePath)]) {
+            final root = await OwnedImageDirectory.open(target);
+            try {
+              expect(
+                await root.tryAcquireMaintenanceLock(
+                  '.gaovmd.lock',
+                  create: false,
+                ),
+                isNull,
+              );
+            } finally {
+              root.close();
+            }
+            await expectLater(
+              MaintenanceStateFence.requireUnfenced(target),
+              throwsA(isA<MaintenanceFenceActive>()),
+            );
+          }
+        } catch (_) {
+          retainInputs = true;
+          rethrow;
+        } finally {
+          host.onStatus = null;
+          restored?.close();
+          activeRetirementChecks--;
+        }
+      },
+      timeout: const Timeout(Duration(minutes: 4)),
+    );
+
+    test(
+      'rollback app cutover refuses a foreign installation target before native helpers or app moves',
+      () async {
+        activeRetirementChecks++;
+        ColdRollbackStateRestoration? restored;
+        try {
+          final (rollback, result) = await restoredNativeRollback();
+          restored = result;
+          final candidate = '${temporary.path}/kept-candidate.app';
+          await app.rename(candidate);
+          await app.create();
+          await File(
+            '${app.path}/foreign',
+          ).writeAsString('keep foreign app', flush: true);
+          final calls = host.statusCalls;
+          await expectLater(restored.restoreOldApp(), throwsFormatException);
+          expect(
+            host.statusCalls,
+            calls,
+            reason: 'complete placement checks precede native observers',
+          );
+          expect(
+            await File('${app.path}/foreign').readAsString(),
+            'keep foreign app',
+          );
+          expect(await Directory(candidate).exists(), true);
+          expect(await Directory(rollback.appPath).exists(), true);
+          expect(
+            await Directory('${backups.path}/restored-old-app').exists(),
+            false,
+          );
+          for (final target in [state, Directory(restored.retainedStatePath)]) {
+            await expectLater(
+              MaintenanceStateFence.requireUnfenced(target),
+              throwsA(isA<MaintenanceFenceActive>()),
+            );
+          }
+        } catch (_) {
+          retainInputs = true;
+          rethrow;
+        } finally {
+          restored?.close();
+          activeRetirementChecks--;
+        }
+      },
+      timeout: const Timeout(Duration(minutes: 4)),
+    );
+
+    for (final mutation in ['placement journal', 'retained app']) {
+      test(
+        'rollback app cutover refuses late changed $mutation without undo or completion',
+        () async {
+          activeRetirementChecks++;
+          ColdRollbackStateRestoration? restored;
+          var changed = false;
+          try {
+            final (rollback, result) = await restoredNativeRollback();
+            restored = result;
+            final path = mutation == 'placement journal'
+                ? '${backups.path}/restored-old-app/intent.json'
+                : '${backups.path}/restored-old-app/retained.app/Contents/Info.plist';
+            final file = File(path);
+            host.onStatus = () async {
+              if (!changed && !await Directory(rollback.appPath).exists()) {
+                changed = true;
+                if (mutation == 'placement journal') {
+                  imageFileMode(file.path, 0x180);
+                }
+                await file.writeAsString(
+                  'retain late $mutation bytes',
+                  flush: true,
+                );
+              }
+            };
+            await expectLater(restored.restoreOldApp(), throwsFormatException);
+            expect(changed, true);
+            expect(await file.readAsString(), 'retain late $mutation bytes');
+            expect(await app.exists(), true);
+            expect(await Directory(rollback.appPath).exists(), false);
+            expect(
+              await Directory(
+                '${backups.path}/restored-old-app/completed',
+              ).exists(),
+              false,
+            );
+            expect(restored.toJson, throwsStateError);
+            await expectLater(restored.verify(), throwsStateError);
+            await expectLater(restored.restoreOldApp(), throwsStateError);
+            for (final target in [
+              state,
+              Directory(restored.retainedStatePath),
+            ]) {
+              await expectLater(
+                MaintenanceStateFence.requireUnfenced(target),
+                throwsA(isA<MaintenanceFenceActive>()),
+              );
+            }
+          } catch (_) {
+            retainInputs = true;
+            rethrow;
+          } finally {
+            host.onStatus = null;
+            restored?.close();
+            activeRetirementChecks--;
+          }
+        },
+        timeout: const Timeout(Duration(minutes: 4)),
+      );
+    }
+
+    test(
+      'rollback app cutover retains original publication paths in post-move unresolved-process checks',
+      () async {
+        activeRetirementChecks++;
+        ColdRollbackStateRestoration? restored;
+        var moved = false, observed = false;
+        final stagedExecutable =
+            '${temporary.path}/paired-apps/candidate/candidate/payload.app/Contents/MacOS/gaovmd';
+        try {
+          final (rollback, result) = await restoredNativeRollback(
+            processInventory: (path) async {
+              if (moved && path == stagedExecutable) {
+                observed = true;
+                return DriverInventorySnapshot(
+                  processes: [],
+                  unresolvedProcessIds: [pid + 1],
+                );
+              }
+              return DriverInventorySnapshot(
+                processes: [],
+                unresolvedProcessIds: [],
+              );
+            },
+          );
+          restored = result;
+          host.onStatus = () async {
+            if (!await Directory(rollback.appPath).exists()) moved = true;
+          };
+          await expectLater(
+            restored.restoreOldApp(),
+            throwsA(isA<ColdStateFailure>()),
+          );
+          expect(moved, true);
+          expect(observed, true);
+          expect(restored.toJson, throwsStateError);
+          expect(
+            await Directory(
+              '${backups.path}/restored-old-app/completed',
+            ).exists(),
+            false,
+          );
+          expect(await app.exists(), true);
+          expect(
+            await Directory(
+              '${backups.path}/restored-old-app/retained.app',
+            ).exists(),
+            true,
+          );
+          for (final target in [state, Directory(restored.retainedStatePath)]) {
+            await expectLater(
+              MaintenanceStateFence.requireUnfenced(target),
+              throwsA(isA<MaintenanceFenceActive>()),
+            );
+          }
+        } catch (_) {
+          retainInputs = true;
+          rethrow;
+        } finally {
+          host.onStatus = null;
+          restored?.close();
+          activeRetirementChecks--;
+        }
+      },
+      timeout: const Timeout(Duration(minutes: 4)),
+    );
+
+    test(
+      'rollback app cutover and later verification retain owners through pending native callbacks',
+      () async {
+        activeRetirementChecks++;
+        ColdRollbackStateRestoration? restored;
+        try {
+          final (rollback, result) = await restoredNativeRollback();
+          restored = result;
+          for (final verification in [false, true]) {
+            final entered = Completer<void>();
+            final release = Completer<void>();
+            host.onStatus = () async {
+              if (!entered.isCompleted &&
+                  !await Directory(rollback.appPath).exists()) {
+                entered.complete();
+                await release.future;
+              }
+            };
+            var settled = false;
+            final pending =
+                (verification ? restored.verify() : restored.restoreOldApp())
+                    .whenComplete(() => settled = true);
+            try {
+              await entered.future;
+              expect(settled, false);
+              expect(restored.close, throwsStateError);
+              expect(restored.toJson, throwsStateError);
+              await expectLater(restored.verify(), throwsStateError);
+              await expectLater(restored.restoreOldApp(), throwsStateError);
+              rollback.close();
+              for (final target in [
+                state,
+                Directory(restored.retainedStatePath),
+              ]) {
+                final root = await OwnedImageDirectory.open(target);
+                try {
+                  expect(
+                    await root.tryAcquireMaintenanceLock(
+                      '.gaovmd.lock',
+                      create: false,
+                    ),
+                    isNull,
+                  );
+                } finally {
+                  root.close();
+                }
+              }
+            } finally {
+              release.complete();
+              await pending;
+            }
+            expect(settled, true);
+            expect(restored.toJson()['installed_pair_restored'], true);
+            expect(restored.toJson()['startup_allowed'], false);
+          }
+          host.onStatus = null;
+          await restored.verify();
+        } catch (_) {
+          retainInputs = true;
+          rethrow;
+        } finally {
+          host.onStatus = null;
+          restored?.close();
+          activeRetirementChecks--;
+        }
+      },
+      timeout: const Timeout(Duration(minutes: 4)),
+    );
+
     for (final published in [false, true]) {
       test(
         'rollback state cutover composes native ${published ? 'published' : 'retired'} current-app provenance',
@@ -6973,6 +7507,15 @@ void main() {
               true,
             );
             expect(await app.exists(), published);
+            if (!published) {
+              await restored.restoreOldApp();
+              await restored.verify();
+              expect(restored.toJson()['installed_pair_restored'], true);
+              expect(restored.toJson()['retained_app'], isNull);
+              expect(restored.toJson()['startup_allowed'], false);
+              expect(await app.exists(), true);
+              expect(host.admissions, probes);
+            }
           } catch (_) {
             retainInputs = true;
             rethrow;
