@@ -2340,3 +2340,93 @@ crash/power-loss/low-disk coverage and manual installed/Apple Silicon/VZ/GaoOS
 acceptance remain open. No push, PR, release, real installed app/state/service/VM
 operation, machine switch or Chrome integration occurred. M8/MVP and the full
 M0–M8 goal remain open.
+
+## 2026-10-16 composed forward rollback state cutover
+
+Local commit `81ee626` adds `ColdRollbackPreparation.restoreOldState` and the
+held `ColdRollbackStateRestoration` result. This composes forward state cutover
+from a complete, independently verified rollback preparation: preserve the entire
+failed/current generation, then move its matching old whole-state copy into the
+original canonical state slot. The existing explicit history-rewind acceptance
+remains mandatory. Neither app is moved, neither persistent fence is retired,
+and no service is registered or started.
+
+Success consumes the preparation and transfers its staged native host,
+original-pair/external readers, work namespace locks and both actual state owners
+to the returned context. Closing the consumed preparation or original consumed
+lease cannot release the result's resources. Explicit result close releases the
+held resources, not markers or files. Caller-owned current native hosts, original
+fence and work remain borrowed. Pending cutover/verification refuses close,
+reentry and premature completion reports. Failure retains actual placement and
+held owners until the original future and explicit close; it cannot be retried as
+an untouched preparation. If preservation itself fails before lease transfer,
+the original current lease still belongs to its caller and must be closed
+separately after that future settles.
+
+Post-move verification independently closes the immutable original pair, external
+files, exact moved old inode/native manifest, remaining sealed snapshot receipt,
+rollback preparation and retained failed generation after fresh native
+observations. A moved payload is accepted only through the held typed restoration
+proof and matching preparation identity/receipt. Normal snapshot verification and
+ordinary state admission remain strict. The sealed preparation record is not
+rewritten into a commit. Results retain `phase: old_state_restored` and
+`canonical_state_restored: true`, while `installed_pair_restored`, `committed`,
+`startup_allowed` and `service_actions_performed` remain false.
+
+Final original runners returned exit 0 with **324 unique Dart checks across
+9 files**, zero failures or skips. Reports are under
+`/private/tmp/gaovm-rollback-state-composition.pmx7a2/`:
+
+| Report | Checks | Seconds |
+| --- | ---: | ---: |
+| `state-regression-final.jsonl` | 195 across 8 files | 122.940 |
+| `native-retirement-regression.jsonl` | 47 | 251.513 |
+| `paired-regression-final.jsonl` | 82 | 553.894 |
+
+The native/paired groups select distinct checks in the same file. The ten added
+composition checks cover matching whole-state installation and ownership
+transfer/release; three late original-snapshot/intent/receipt mutations; pending
+cutover and returned-context verification lifetime; native retired and published
+current-host composition; and pre-catalog external-file success, late external
+writer refusal and late external-byte refusal. Six explicit state/work lock
+contenders prove result close releases its locks while both startup markers stay
+active. A pre-catalog rollback does not initialize an old catalog, and retains
+the failed migration catalog separately. Late changes are retained, not undone.
+Native cutover does not add admission probes or rerun publication. Files, SQLite,
+metadata, moves and kernel locks are real; positive signing/component/service/
+process observations remain fixtures, not installed native product acceptance.
+
+Pinned formatting passes for 325 Dart files unchanged. Final daemon analysis has
+no issues; root analysis exits 0 with the same nine existing UI informational
+notices. Separate Intel x86_64 AOT compilation of the daemon and outside-app tool
+returns exit 0. All five empty-environment read-only entry checks return expected
+codes in `aot-entrypoints.jsonl`: both help entries, daemon component identity/
+schema 21/no service actions, and two explicit-input refusals with no commit or
+startup claim. Scoped diffs pass whitespace checks. The unrelated UI lockfile is
+byte-identical and excluded from the commits.
+
+Test-first verification failed for the missing composition interface before any
+runtime fixture was created. The first integration then reproduced a retained
+tree boundary callback still naming the vacated canonical path, before the
+old-state move. The fix binds the actual retained path without weakening its
+manifest. That original failed runner exited; its fixture was rechecked to exist
+and retained without repair, retry in place or deletion:
+
+- `/private/var/folders/s0/hl1d3jkx5jx3gs69033nc6d80000gp/T/gvm-release-inspection-i7ycLd`
+
+This is forward state-cutover composition, not a complete app/state rollback or
+an operator command. Fixed restored-state reopen is not yet composed with
+preparation recovery. Canonical old-app replacement, interrupted paired
+replacement and final rollback commit remain unfinished. Do not pass a
+withdrawn/restored layout to ordinary preparation recovery or clear a marker to
+bypass refusal. The accepted upgrade sequence remains acknowledged cold commit
+followed by manual registration/start; rollback fence retirement is a separate
+unresolved operator decision.
+
+The full/default-concurrency suite and remote CI were not run. The two prior
+source-Dart startup failures remain unfixed and unrerun. First install,
+historical-schema command integration, arbitrary migration/validation interruption,
+crash/power-loss/low-disk coverage and manual installed/Apple Silicon/VZ/GaoOS
+acceptance remain open. No push, PR, release, real installed app/state/service/VM
+operation, machine switch or Chrome integration occurred. M8/MVP and the full
+M0–M8 goal remain open.
