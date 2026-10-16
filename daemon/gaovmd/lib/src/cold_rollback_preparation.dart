@@ -1,8 +1,9 @@
 part of 'cold_catalog_inspection.dart';
 
 /// Prepare independent old-app/whole-state copies under the original fence.
-/// Does not open the current catalog, replace either installation slot, retire
-/// the fence or start a service. The caller retains its current lease/fence/work.
+/// Preparation alone does not open the current catalog or replace installation
+/// slots. Explicit state cutover consumes the preparation, never retires fences
+/// or starts services. The caller retains its borrowed native host/fence/work.
 final class ColdRollbackPreparation {
   ColdRollbackPreparation._(
     this._current,
@@ -37,13 +38,16 @@ final class ColdRollbackPreparation {
   ColdCatalogInspection? _catalog;
   OwnedImageDirectory? _inspection;
   bool _closed = false, _busy = false;
+  bool _cuttingOver = false, _consumed = false;
+  PreservedColdState? _ownedPreservation;
+  ColdStateRestoration? _ownedRestoration;
 
   String get path => _root.path;
   String get appPath => '$path/app/payload.app';
   String get statePath => '$path/state/payload';
 
   Map<String, Object?> toJson() {
-    if (_closed || _record == null) {
+    if (_closed || _cuttingOver || _consumed || _record == null) {
       throw StateError('complete rollback preparation required');
     }
     return JsonObjectValue.fromJson(_record!).toJson();
@@ -596,6 +600,12 @@ final class ColdRollbackPreparation {
 
   Future<void> _verifySources() async {
     await _current.verify();
+    await _verifySnapshotReferences();
+    await _current.verify();
+    await _verifySourceFiles();
+  }
+
+  Future<void> _verifySnapshotReferences() async {
     for (final tree in [_oldApp, _oldState]) {
       if ((await _observer.directory(
         Directory(tree.path),
@@ -616,12 +626,10 @@ final class ColdRollbackPreparation {
         );
       }
     }
-    await _current.verify();
-    await _verifySourceFiles();
   }
 
   // Filesystem-only closure, after the last native observation of a pass.
-  Future<void> _verifySourceFiles() async {
+  Future<void> _verifySourceFiles({String? retainedState}) async {
     if (_closed) throw StateError('rollback preparation is closed');
     await ColdUpgradePreparation._verifyPrivate(_work);
     await _verifyLock('.gaovm-upgrade.lock', _upgradeLock);
@@ -675,16 +683,25 @@ final class ColdRollbackPreparation {
       }
     }
     final currentRoot = await OwnedImageDirectory.open(
-      Directory(_current.path),
+      Directory(retainedState ?? _current.path),
     );
     try {
       if (_fence.retiredForCommit)
         throw const FormatException('active original fence required');
-      await _fence.verifyFor(
-        currentRoot,
-        bundleIdentifier: _current.bundleIdentifier,
-        appPath: _current.installationPath,
-      );
+      if (retainedState == null) {
+        await _fence.verifyFor(
+          currentRoot,
+          bundleIdentifier: _current.bundleIdentifier,
+          appPath: _current.installationPath,
+        );
+      } else {
+        if (retainedState != '${_work.path}/retained-current/state') {
+          throw const FormatException('fixed retained current state required');
+        }
+        // The held preservation/restoration proof checks both exact markers and
+        // relocation provenance. Never use original verifyFor on a moved root.
+        await _fence.verify();
+      }
       if (!_same(
         await currentRoot.maintenanceIdentity(),
         _intent['source_state_identity'],
@@ -702,9 +719,19 @@ final class ColdRollbackPreparation {
         );
       }
     }
-    final current = await _currentTree.captureStateData(
-      verifyBoundary: () async => {'source_state': _current.path},
-    );
+    final retainedTree = retainedState == null
+        ? null
+        : await MaintenanceTree.open(Directory(retainedState));
+    late Map<String, Object?> current;
+    try {
+      current = await (retainedTree ?? _currentTree).captureStateData(
+        verifyBoundary: () async => {
+          'source_state': retainedState ?? _current.path,
+        },
+      );
+    } finally {
+      retainedTree?.close();
+    }
     if (!_same(current, _intent['current_state_manifest'])) {
       throw const FormatException(
         'post-upgrade state changed during rollback preparation',
@@ -748,7 +775,12 @@ final class ColdRollbackPreparation {
   }
 
   Future<void> verify() async {
-    if (_closed || _busy || _record == null || _stagedLease == null) {
+    if (_closed ||
+        _busy ||
+        _cuttingOver ||
+        _consumed ||
+        _record == null ||
+        _stagedLease == null) {
       throw StateError('complete available rollback preparation required');
     }
     _busy = true;
@@ -794,7 +826,80 @@ final class ColdRollbackPreparation {
     }
   }
 
-  Future<void> _verifyOutputFiles() async {
+  /// Compose withdrawal and old-state restoration, NOT old-app installation or
+  /// rollback commit. Consumes this preparation only on success. Failed work
+  /// retains its newly held owners until the original future and explicit close.
+  Future<ColdRollbackStateRestoration> restoreOldState() async {
+    await verify();
+    _busy = true;
+    _cuttingOver = true;
+    try {
+      _ownedPreservation = await _current.preserveForRollback(
+        _fence,
+        _work,
+        'retained-current',
+        verifyPreparedInputs: () async {
+          await _stagedLease!.verify();
+          await _catalog?.verify();
+          await _verifySources();
+          await _verifyPreparedFiles();
+        },
+      );
+      await _stagedLease!.verify();
+      await _catalog?.verify();
+      await _verifySnapshotReferences();
+      await _ownedPreservation!.verify();
+      final retained = _ownedPreservation!.path;
+      _ownedRestoration = await _stagedLease!.restoreForRollback(
+        _ownedPreservation!,
+        _work,
+        'restored-old-state',
+        verifyPreparedInputs: () =>
+            _verifyPreparedFiles(retainedState: retained),
+      );
+      final result = ColdRollbackStateRestoration._(
+        this,
+        _ownedRestoration!,
+        retained,
+      );
+      await result.verify();
+      _consumed = true;
+      return result;
+    } finally {
+      _busy = false;
+    }
+  }
+
+  Future<void> _verifyPreparedFiles({String? retainedState}) async {
+    await _verifySourceFiles(retainedState: retainedState);
+    await _catalog?._verifySourceFiles();
+    await ColdUpgradePreparation._verifyPrivate(_inspection!);
+    await _verifyOutputFiles();
+  }
+
+  Future<void> _verifyRestoredState(
+    ColdStateRestoration restored,
+    String retained,
+  ) async {
+    if (_closed || !identical(restored, _ownedRestoration)) {
+      throw StateError('held rollback state restoration required');
+    }
+    await restored.verify();
+    await _verifySnapshotReferences();
+    await restored.verify();
+    // Filesystem-only closure after the last service/process/file observer.
+    await _verifySourceFiles(retainedState: retained);
+    await ColdUpgradePreparation._verifyPrivate(_inspection!);
+    await _verifyOutputFiles(restored: restored);
+    final root = await OwnedImageDirectory.open(Directory(restored.path));
+    try {
+      await restored.verifyFor(root);
+    } finally {
+      root.close();
+    }
+  }
+
+  Future<void> _verifyOutputFiles({ColdStateRestoration? restored}) async {
     await ColdUpgradePreparation._entries(_root, {
       'intent.json',
       'app',
@@ -833,7 +938,33 @@ final class ColdRollbackPreparation {
             'restoration copy differs from complete old pair',
           );
         }
-        await MaintenanceTree.verifySnapshotContents(wrapper, receipt);
+        if (entry.key == 'state' && restored != null) {
+          final facts = restored.toJson();
+          if (facts['source_state'] != statePath ||
+              facts['target_state'] != _current.path ||
+              facts['retained_state'] !=
+                  '${_work.path}/retained-current/state' ||
+              !_same(facts['state_identity'], _record!['state_identity'])) {
+            throw const FormatException('restored state is not this old pair');
+          }
+          await ColdUpgradePreparation._entries(wrapper, {'receipt.json'});
+          await ColdUpgradePreparation._checkRecord(
+            wrapper,
+            'receipt.json',
+            receipt,
+          );
+          final tree = await MaintenanceTree.open(Directory(restored.path));
+          try {
+            await tree.verify(
+              receipt['manifest'] as Map<String, Object?>,
+              nativeMetadata: true,
+            );
+          } finally {
+            tree.close();
+          }
+        } else {
+          await MaintenanceTree.verifySnapshotContents(wrapper, receipt);
+        }
       } finally {
         wrapper.close();
       }
@@ -849,7 +980,7 @@ final class ColdRollbackPreparation {
           _record!['app_identity'],
         ) ||
         !_same(
-          await ColdUpgradePreparation._identity(statePath),
+          await ColdUpgradePreparation._identity(restored?.path ?? statePath),
           _record!['state_identity'],
         )) {
       throw const FormatException('restoration copy inode changed');
@@ -869,13 +1000,21 @@ final class ColdRollbackPreparation {
     await _root.verifyPathBinding();
   }
 
-  /// Releases readers and the independent staged-state owner, never outputs or
-  /// the caller's current state ownership/fence. Pending verification must drain.
+  /// Releases readers/staged ownership and any owners held by a failed cutover,
+  /// never outputs or markers. A consumed preparation cannot close its result's
+  /// resources. Pending verification/cutover must drain before explicit close.
   void close() {
     if (_busy) throw StateError('rollback preparation verification is pending');
+    if (_consumed) return;
+    _closeResources();
+  }
+
+  void _closeResources() {
     if (_closed) return;
     _closed = true;
+    _ownedRestoration?.close();
     _stagedLease?.close();
+    _ownedPreservation?.close();
     _stagedHost?.close();
     _inspection?.close();
     for (final held in _external.values) {

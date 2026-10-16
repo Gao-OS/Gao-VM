@@ -468,10 +468,32 @@ host recovery repeats its existing isolated startup-refusal probe, never an
 ordinary startup against either actual state generation. Do not reuse another
 recovery route or alter markers to bypass a refusal.
 
-This is not yet composed into `ColdRollbackPreparation` or an operator command.
-Old-app/whole-state paired installation, interrupted paired replacement and
-rollback commit remain unfinished. The cold-commit/manual-start upgrade sequence
-above does not settle rollback fence retirement or imply that rollback is complete.
+`ColdRollbackPreparation.restoreOldState` composes the forward state cutover from
+a complete preparation: preserve the failed/current generation, restore its
+independently prepared matching old whole state, and transfer the held resources
+to `ColdRollbackStateRestoration`. Do not call it on a preparation whose separate
+`preserveCurrentState` phase has already consumed the current lease. The result
+keeps the staged old native host, original-pair/external readers, namespace locks
+and both actual state owners alive. The caller keeps its borrowed current native
+host, original fence and work open. A consumed preparation cannot release the
+result's resources. Pending cutover/verification cannot be closed or reported as
+complete. A failed cutover cannot be retried in place as an untouched preparation;
+await its original future and explicitly close held handles, retaining all files.
+If preservation itself fails before transferring the original current lease,
+that lease remains caller-owned: after the original future settles, close it as
+well as the preparation. Closing a preparation never releases a borrowed lease.
+
+Post-move verification checks the exact moved old inode and remaining sealed
+receipt, both retained/canonical generations, immutable original pair and external
+files after fresh native observations. It does not pass the occupied canonical
+slot through normal admission or weaken snapshot verification for unmoved data.
+The preparation's sealed record remains immutable, not rewritten as a commit.
+
+There is still no operator rollback command. Fixed restored-state reopen is not
+yet composed with preparation recovery; old-app/whole-state paired installation,
+interrupted paired replacement and rollback commit remain unfinished. The
+cold-commit/manual-start upgrade sequence above does not settle rollback fence
+retirement or imply that rollback is complete.
 
 ## Data-preserving cold uninstall
 

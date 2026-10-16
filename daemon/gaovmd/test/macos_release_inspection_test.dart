@@ -6565,6 +6565,561 @@ void main() {
       timeout: const Timeout(Duration(minutes: 3)),
     );
 
+    test(
+      'rollback state cutover restores its matching whole old state and transfers both owners without moving either app',
+      () async {
+        activeRetirementChecks++;
+        ColdRollbackPreparation? rollback;
+        ColdRollbackStateRestoration? restored;
+        MaintenanceTree? originalPair, staged, installedApp, retainedTree;
+        try {
+          final (snapshot, fence, upgrade) = await fencedPreparation();
+          upgrade.close();
+          snapshot.close();
+          await File('${state.path}/gaovm.db').writeAsString(
+            'retain the failed post-upgrade catalog',
+            flush: true,
+          );
+          rollback = await prepareRollback(fence);
+          originalPair = await MaintenanceTree.open(
+            Directory('${backups.path}/upgrade'),
+          );
+          final pairBefore = await originalPair.capture(nativeMetadata: true);
+          staged = await MaintenanceTree.open(Directory(rollback.statePath));
+          final oldBefore = await staged.capture(nativeMetadata: true);
+          staged.close();
+          staged = null;
+          installedApp = await MaintenanceTree.open(app);
+          final appBefore = await installedApp.capture(nativeMetadata: true);
+          restored = await rollback.restoreOldState();
+          expect(restored.path, state.path);
+          expect(restored.toJson()['phase'], 'old_state_restored');
+          expect(restored.toJson()['canonical_state_restored'], true);
+          for (final flag in [
+            'installed_pair_restored',
+            'committed',
+            'startup_allowed',
+            'service_actions_performed',
+          ]) {
+            expect(restored.toJson()[flag], false);
+          }
+          expect(await Directory(rollback.statePath).exists(), false);
+          final installed = await MaintenanceTree.open(state);
+          try {
+            await installed.verify(oldBefore, nativeMetadata: true);
+          } finally {
+            installed.close();
+          }
+          final retained = Directory(restored.retainedStatePath);
+          expect(
+            await File('${retained.path}/gaovm.db').readAsString(),
+            'retain the failed post-upgrade catalog',
+          );
+          retainedTree = await MaintenanceTree.open(retained);
+          final retainedBefore = await retainedTree.capture(
+            nativeMetadata: true,
+          );
+          await expectLater(rollback.verify(), throwsStateError);
+          expect(rollback.toJson, throwsStateError);
+          rollback.close();
+          lease.close();
+          await restored.verify();
+          await originalPair.verify(pairBefore, nativeMetadata: true);
+          await installedApp.verify(appBefore, nativeMetadata: true);
+          await retainedTree.verify(retainedBefore, nativeMetadata: true);
+          for (final target in [state, retained]) {
+            final root = await OwnedImageDirectory.open(target);
+            try {
+              final competing = await root.tryAcquireMaintenanceLock(
+                '.gaovmd.lock',
+                create: false,
+              );
+              expect(competing, isNull);
+              competing?.close();
+            } finally {
+              root.close();
+            }
+            await expectLater(
+              MaintenanceStateFence.requireUnfenced(target),
+              throwsA(isA<MaintenanceFenceActive>()),
+            );
+          }
+          restored.close();
+          await expectLater(restored.verify(), throwsStateError);
+          expect(restored.toJson, throwsStateError);
+          for (final (directory, name) in [
+            (state, '.gaovmd.lock'),
+            (retained, '.gaovmd.lock'),
+            (Directory(backups.path), '.gaovm-upgrade.lock'),
+            (Directory(backups.path), '.gaovm-cold-rollback.lock'),
+            (Directory(backups.path), '.gaovm-state-preservation.lock'),
+            (Directory(backups.path), '.gaovm-state-restoration.lock'),
+          ]) {
+            final root = await OwnedImageDirectory.open(directory);
+            try {
+              final released = await root.tryAcquireMaintenanceLock(
+                name,
+                create: false,
+              );
+              expect(released, isNotNull);
+              released?.close();
+            } finally {
+              root.close();
+            }
+          }
+          for (final target in [state, retained]) {
+            await expectLater(
+              MaintenanceStateFence.requireUnfenced(target),
+              throwsA(isA<MaintenanceFenceActive>()),
+            );
+          }
+        } catch (_) {
+          retainInputs = true;
+          rethrow;
+        } finally {
+          restored?.close();
+          rollback?.close();
+          retainedTree?.close();
+          installedApp?.close();
+          staged?.close();
+          originalPair?.close();
+          activeRetirementChecks--;
+        }
+      },
+      timeout: const Timeout(Duration(minutes: 3)),
+    );
+
+    for (final changed in [
+      'original snapshot',
+      'rollback intent',
+      'state receipt',
+    ]) {
+      test(
+        'rollback state cutover retains both generations after late $changed mutation',
+        () async {
+          activeRetirementChecks++;
+          ColdRollbackPreparation? rollback;
+          var changedOnce = false;
+          try {
+            final (snapshot, fence, upgrade) = await fencedPreparation();
+            upgrade.close();
+            snapshot.close();
+            rollback = await prepareRollback(fence);
+            final stagedPath = rollback.statePath;
+            final retained = Directory(
+              '${backups.path}/retained-current/state',
+            );
+            late File changedFile;
+            coldHost.onStatus = () async {
+              if (changedOnce ||
+                  !await state.exists() ||
+                  await Directory(stagedPath).exists() ||
+                  !await retained.exists())
+                return;
+              changedOnce = true;
+              changedFile = File(switch (changed) {
+                'original snapshot' =>
+                  '${backups.path}/upgrade/original-state/payload/unknown-data',
+                'rollback intent' => '${rollback!.path}/intent.json',
+                _ => '${rollback!.path}/state/receipt.json',
+              });
+              final bytes = await changedFile.readAsString();
+              imageFileMode(changedFile.path, 0x180);
+              await changedFile.writeAsString('$bytes ', flush: true);
+              imageFileMode(
+                changedFile.path,
+                changed == 'original snapshot' ? 0x180 : 0x100,
+              );
+            };
+            await expectLater(
+              rollback.restoreOldState(),
+              throwsFormatException,
+            );
+            expect(changedOnce, true);
+            coldHost.onStatus = null;
+            expect((await changedFile.readAsString()).endsWith(' '), true);
+            expect(await state.exists(), true);
+            expect(await Directory(stagedPath).exists(), false);
+            expect(await retained.exists(), true);
+            expect(rollback.toJson, throwsStateError);
+            await expectLater(rollback.restoreOldState(), throwsStateError);
+            for (final target in [state, retained]) {
+              final root = await OwnedImageDirectory.open(target);
+              try {
+                final competing = await root.tryAcquireMaintenanceLock(
+                  '.gaovmd.lock',
+                  create: false,
+                );
+                expect(competing, isNull);
+                competing?.close();
+              } finally {
+                root.close();
+              }
+              await expectLater(
+                MaintenanceStateFence.requireUnfenced(target),
+                throwsA(isA<MaintenanceFenceActive>()),
+              );
+            }
+          } catch (_) {
+            retainInputs = true;
+            rethrow;
+          } finally {
+            coldHost.onStatus = null;
+            rollback?.close();
+            activeRetirementChecks--;
+          }
+        },
+        timeout: const Timeout(Duration(minutes: 3)),
+      );
+    }
+
+    test(
+      'rollback state cutover keeps both owners while a post-move native observation is pending',
+      () async {
+        activeRetirementChecks++;
+        ColdRollbackPreparation? rollback;
+        ColdRollbackStateRestoration? restored;
+        final entered = Completer<void>(), release = Completer<void>();
+        try {
+          final (snapshot, fence, upgrade) = await fencedPreparation();
+          upgrade.close();
+          snapshot.close();
+          rollback = await prepareRollback(fence);
+          final stagedPath = rollback.statePath;
+          final retained = Directory('${backups.path}/retained-current/state');
+          coldHost.onStatus = () async {
+            if (!entered.isCompleted &&
+                await state.exists() &&
+                !await Directory(stagedPath).exists() &&
+                await retained.exists()) {
+              entered.complete();
+              await release.future;
+            }
+          };
+          final pending = rollback.restoreOldState();
+          unawaited(
+            pending.then<void>(
+              (_) {
+                if (!entered.isCompleted)
+                  entered.completeError(
+                    StateError('missing cutover observation'),
+                  );
+              },
+              onError: (Object error, StackTrace stack) {
+                if (!entered.isCompleted) entered.completeError(error, stack);
+              },
+            ),
+          );
+          try {
+            await entered.future;
+            expect(rollback.close, throwsStateError);
+            expect(rollback.toJson, throwsStateError);
+            await expectLater(rollback.verify(), throwsStateError);
+            await expectLater(rollback.restoreOldState(), throwsStateError);
+            for (final target in [state, retained]) {
+              final root = await OwnedImageDirectory.open(target);
+              try {
+                final competing = await root.tryAcquireMaintenanceLock(
+                  '.gaovmd.lock',
+                  create: false,
+                );
+                expect(competing, isNull);
+                competing?.close();
+              } finally {
+                root.close();
+              }
+            }
+          } finally {
+            if (!release.isCompleted) release.complete();
+            restored = await pending;
+          }
+          coldHost.onStatus = null;
+          rollback.close();
+          await restored.verify();
+          final verifying = Completer<void>(), finish = Completer<void>();
+          coldHost.onStatus = () async {
+            if (!verifying.isCompleted) {
+              verifying.complete();
+              await finish.future;
+            }
+          };
+          final pendingVerification = restored.verify();
+          unawaited(
+            pendingVerification.then<void>(
+              (_) {
+                if (!verifying.isCompleted)
+                  verifying.completeError(
+                    StateError('missing verification observation'),
+                  );
+              },
+              onError: (Object error, StackTrace stack) {
+                if (!verifying.isCompleted)
+                  verifying.completeError(error, stack);
+              },
+            ),
+          );
+          try {
+            await verifying.future;
+            expect(restored.close, throwsStateError);
+            expect(restored.toJson, throwsStateError);
+            await expectLater(restored.verify(), throwsStateError);
+            rollback.close(); // Consumed preparation cannot release the owners.
+          } finally {
+            finish.complete();
+            await pendingVerification;
+          }
+          coldHost.onStatus = null;
+          await restored.verify();
+        } catch (_) {
+          retainInputs = true;
+          rethrow;
+        } finally {
+          coldHost.onStatus = null;
+          restored?.close();
+          rollback?.close();
+          activeRetirementChecks--;
+        }
+      },
+      timeout: const Timeout(Duration(minutes: 3)),
+    );
+
+    for (final published in [false, true]) {
+      test(
+        'rollback state cutover composes native ${published ? 'published' : 'retired'} current-app provenance',
+        () async {
+          activeRetirementChecks++;
+          ColdRollbackPreparation? rollback;
+          ColdRollbackStateRestoration? restored;
+          MacOsColdStateHost? native, currentHost;
+          OwnedImageDirectory? retirement;
+          try {
+            lease.close();
+            MacOsOpenReferences observer() => MacOsOpenReferences(
+              command: (_, _) async => ProcessResult(pid, 1, '', ''),
+            );
+            Future<DriverInventorySnapshot> inventory(String _) async =>
+                DriverInventorySnapshot(
+                  processes: [],
+                  unresolvedProcessIds: [],
+                );
+            native = await MacOsColdStateHost.open(
+              app,
+              bundleIdentifier: 'org.gaovm.tests.Release',
+              version: '0.1.0',
+              teamIdentifier: 'ABCDEFGHIJ',
+              catalogSchema: 21,
+              host: host,
+              observer: observer(),
+              inventory: inventory,
+            );
+            lease = await ColdStateLease.acquire(
+              state,
+              bundleIdentifier: 'org.gaovm.tests.Release',
+              host: native,
+            );
+            final (snapshot, fence, upgrade) = await fencedPreparation();
+            final parent = await OwnedImageDirectory.open(temporary);
+            try {
+              retirement = parent.createDirectory('cutover-apps');
+            } finally {
+              parent.close();
+            }
+            await upgrade.retireOriginalApp(retirement, 'old');
+            if (published)
+              await upgrade.publishCandidate(retirement, 'candidate');
+            upgrade.close();
+            snapshot.close();
+            if (published) {
+              lease.close();
+              currentHost = await MacOsColdStateHost.openPublished(
+                app,
+                state,
+                fence,
+                retirement,
+                'old',
+                retirement,
+                'candidate',
+                bundleIdentifier: 'org.gaovm.tests.Release',
+                oldVersion: '0.1.0',
+                newVersion: '0.1.0',
+                teamIdentifier: 'ABCDEFGHIJ',
+                retiredCatalogSchema: 21,
+                catalogSchema: 21,
+                host: host,
+                observer: observer(),
+                inventory: inventory,
+              );
+              lease = await ColdStateLease.acquire(
+                state,
+                bundleIdentifier: 'org.gaovm.tests.Release',
+                host: currentHost,
+                maintenanceFence: fence,
+              );
+            }
+            rollback = await prepareRollback(fence);
+            final probes = host.admissions;
+            restored = await rollback.restoreOldState();
+            rollback.close();
+            await restored.verify();
+            expect(
+              host.admissions,
+              probes,
+              reason:
+                  'cutover never activates an actual state or reruns publication',
+            );
+            expect(restored.toJson()['startup_allowed'], false);
+            expect(
+              await Directory('${retirement.path}/old/GaoVM.app').exists(),
+              true,
+            );
+            expect(await app.exists(), published);
+          } catch (_) {
+            retainInputs = true;
+            rethrow;
+          } finally {
+            restored?.close();
+            rollback?.close();
+            lease.close();
+            currentHost?.close();
+            native?.close();
+            retirement?.close();
+            activeRetirementChecks--;
+          }
+        },
+        timeout: const Timeout(Duration(minutes: 4)),
+      );
+    }
+
+    for (final condition in [
+      'unchanged external files',
+      'late external writer',
+      'late external bytes',
+    ]) {
+      test(
+        'rollback state cutover checks pre-catalog $condition without initializing the old catalog',
+        () async {
+          activeRetirementChecks++;
+          ColdRollbackPreparation? rollback;
+          ColdRollbackStateRestoration? restored;
+          var late = false;
+          try {
+            lease.close();
+            await File(
+              '${state.path}/gaovm.db',
+            ).rename('${temporary.path}/retained-modern.db');
+            final kernel = await File(
+              '${temporary.path}/rollback-kernel',
+            ).writeAsString('original kernel', flush: true);
+            final disk = await File(
+              '${temporary.path}/rollback-disk',
+            ).writeAsString('original external disk', flush: true);
+            for (final file in [kernel, disk]) imageFileMode(file.path, 0x180);
+            await File('${state.path}/config.json').writeAsString(
+              jsonEncode({
+                'boot': {'loader': 'linux', 'kernelPath': kernel.path},
+                'disk': {'path': disk.path},
+              }),
+              flush: true,
+            );
+            imageFileMode('${state.path}/config.json', 0x180);
+            lease = await ColdStateLease.acquire(
+              state,
+              bundleIdentifier: 'org.gaovm.tests.Release',
+              host: coldHost,
+            );
+            final (snapshot, fence, upgrade) = await fencedPreparation();
+            upgrade.close();
+            snapshot.close();
+            await File(
+              '${state.path}/gaovm.db',
+            ).writeAsString('retain failed first migration', flush: true);
+            imageFileMode('${state.path}/gaovm.db', 0x180);
+            rollback = await prepareRollback(
+              fence,
+              sourceCatalogSchema: null,
+              observer: MacOsOpenReferences(
+                command: (_, arguments) async =>
+                    late &&
+                        condition == 'late external writer' &&
+                        arguments.last == disk.path
+                    ? ProcessResult(pid, 0, 'p${pid + 1}\x00f3\x00\n', '')
+                    : ProcessResult(pid, 1, '', ''),
+              ),
+            );
+            final stagedPath = rollback.statePath;
+            coldHost.onStatus = () async {
+              if (!late &&
+                  condition != 'unchanged external files' &&
+                  await state.exists() &&
+                  !await Directory(stagedPath).exists()) {
+                late = true;
+                if (condition == 'late external bytes')
+                  await disk.writeAsString(
+                    'retain late external disk mutation',
+                    flush: true,
+                  );
+              }
+            };
+            if (condition == 'unchanged external files') {
+              restored = await rollback.restoreOldState();
+              await restored.verify();
+              expect(restored.toJson()['startup_allowed'], false);
+            } else {
+              await expectLater(
+                rollback.restoreOldState(),
+                throwsA(anyOf(isA<FormatException>(), isA<ColdStateFailure>())),
+              );
+              expect(late, true);
+            }
+            expect(await File('${state.path}/gaovm.db').exists(), false);
+            expect(await Directory(stagedPath).exists(), false);
+            expect(
+              await File(
+                '${backups.path}/retained-current/state/gaovm.db',
+              ).readAsString(),
+              'retain failed first migration',
+            );
+            expect(await kernel.readAsString(), 'original kernel');
+            expect(
+              await disk.readAsString(),
+              condition == 'late external bytes'
+                  ? 'retain late external disk mutation'
+                  : 'original external disk',
+            );
+            for (final target in [
+              state,
+              Directory('${backups.path}/retained-current/state'),
+            ]) {
+              final root = await OwnedImageDirectory.open(target);
+              try {
+                final competing = await root.tryAcquireMaintenanceLock(
+                  '.gaovmd.lock',
+                  create: false,
+                );
+                expect(competing, isNull);
+                competing?.close();
+              } finally {
+                root.close();
+              }
+              await expectLater(
+                MaintenanceStateFence.requireUnfenced(target),
+                throwsA(isA<MaintenanceFenceActive>()),
+              );
+            }
+          } catch (_) {
+            retainInputs = true;
+            rethrow;
+          } finally {
+            coldHost.onStatus = null;
+            restored?.close();
+            rollback?.close();
+            activeRetirementChecks--;
+          }
+        },
+        timeout: const Timeout(Duration(minutes: 3)),
+      );
+    }
+
     for (final condition in [
       'unchanged external files',
       'changed external bytes',
