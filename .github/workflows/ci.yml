@@ -152,6 +152,7 @@ jobs:
           test/cold_state_snapshot_test.dart
           test/cold_state_lease_test.dart
           test/cold_state_backup_test.dart
+          test/daemon_ownership_move_test.dart
           test/maintenance_tree_test.dart
           test/maintenance_snapshot_test.dart
           test/maintenance_state_fence_test.dart --concurrency=1

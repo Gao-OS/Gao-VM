@@ -7,8 +7,9 @@ import 'maintenance_state_fence.dart';
 /// startup recovery and runtime shutdown; never unlink the persistent lock file.
 final class DaemonOwnership {
   DaemonOwnership._(this._root, this._lock);
-  final OwnedImageDirectory _root;
+  OwnedImageDirectory _root;
   final OwnedImageLock _lock;
+  bool _rebinding = false;
   bool _closed = false;
 
   String get stateDirectoryPath => _root.path;
@@ -58,7 +59,33 @@ final class DaemonOwnership {
     _lock.verifyPathBinding();
   }
 
+  /// Rebind only after this exact state inode was moved by its maintenance
+  /// coordinator. This does not move it or authorize a rollback. Both borrowed
+  /// readers must remain open until this future settles. An error retains the
+  /// original kernel lock; callers must not retry by closing/reopening it.
+  /// Fenced destinations are refused, just like ordinary admission.
+  Future<void> rebindAfterMaintenanceMove(OwnedImageDirectory moved) async {
+    if (_closed || _rebinding) {
+      throw StateError('daemon ownership is unavailable');
+    }
+    _rebinding = true;
+    try {
+      if (moved.mode & 0x3f != 0) {
+        throw const FormatException('daemon state directory must be private');
+      }
+      await MaintenanceStateFence.requireUnfenced(Directory(moved.path));
+      await moved.verifyPathBinding();
+      _lock.rebindAfterMaintenanceMove(_root, moved);
+      _root = moved;
+      await verify();
+      await MaintenanceStateFence.requireUnfenced(Directory(moved.path));
+    } finally {
+      _rebinding = false;
+    }
+  }
+
   void close() {
+    if (_rebinding) throw StateError('daemon ownership rebind is pending');
     if (_closed) return;
     _closed = true;
     _lock.close();

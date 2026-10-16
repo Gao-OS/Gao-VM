@@ -539,12 +539,41 @@ final class OwnedImageDirectory {
 final class OwnedImageLock {
   OwnedImageLock._(this._fd, this._path);
   final int _fd;
-  final String _path;
+  String _path;
   bool _closed = false;
 
   void verifyPathBinding() {
     if (_closed) throw StateError('owned lock is closed');
     _verifyDescriptorPath(_fd, _path, directory: false);
+  }
+
+  /// Keep this exact flock descriptor across an already completed directory
+  /// move. The caller supplies both held readers; neither is closed here.
+  /// This grants no move, state admission or filesystem replacement authority.
+  void rebindAfterMaintenanceMove(
+    OwnedImageDirectory original,
+    OwnedImageDirectory moved,
+  ) {
+    if (_closed) throw StateError('owned lock is closed');
+    if (!Platform.isMacOS) {
+      throw UnsupportedError('Darwin maintenance move required');
+    }
+    original._requireOpen();
+    moved._requireOpen();
+    final prefix = '${original.path}/';
+    final name = _path.startsWith(prefix) ? _path.substring(prefix.length) : '';
+    _validateChildName(name);
+    if (original.path == moved.path ||
+        !_sameMaintenanceDirectory(original._fd, moved._fd)) {
+      throw const FormatException('exact moved lock directory required');
+    }
+    _verifyDescriptorPath(moved._fd, moved.path, directory: true);
+    final destination = '${moved.path}/$name';
+    _verifyDescriptorPath(_fd, destination, directory: false);
+    // The old slot may now contain another generation. Never open, adopt or
+    // change it: both the moved directory and lock must match the held inodes.
+    // No unlock, close, reopen or path mutation occurs before all checks pass.
+    _path = destination;
   }
 
   void close() {
