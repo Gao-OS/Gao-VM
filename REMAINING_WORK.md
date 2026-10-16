@@ -71,7 +71,8 @@ done
 
 逐项确认退出码；某一项失败后不要继续把后续结果汇总为全绿。
 完整/default-concurrency Dart suite 和推送后的 CI 尚未确认全绿，需要在目标机器/对应 workflow 留存结果。
-UI 的既有格式提示和本机无关 `clients/gaovm_ui/pubspec.lock` 改动未作为本次修复或提交内容。
+UI 的既有格式提示未在本次修复；UI 锁文件已补齐共享 API client 所需的 `ffi 2.2.0` 传递依赖。
+如需验证 Beta UI，请使用符合 [UI SDK 约束](clients/gaovm_ui/pubspec.yaml) 的 Flutter/Dart，不能用控制平面的 Dart 3.9.0 运行 UI。
 
 ## 4. 原生 VM 验收顺序
 
