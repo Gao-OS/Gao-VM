@@ -218,6 +218,36 @@ void main() {
       final tree = await MaintenanceTree.open(state);
       PreservedColdState? preserved;
       try {
+        for (final relative in [
+          'vms',
+          'vms/failed-vm',
+          'artifacts',
+          'artifacts/failed-run',
+          'logs',
+          '.staging',
+          '.staging/interrupted',
+          'run',
+        ]) {
+          final directory = await Directory('${state.path}/$relative').create();
+          imageFileMode(directory.path, 0x1c0);
+        }
+        for (final entry in {
+          'vms/failed-vm/disk.raw': [0, 255, 2, 127],
+          'vms/failed-vm/nvram.bin': [3, 0, 254],
+          'artifacts/failed-run/diagnostic': utf8.encode(
+            'retain failed output',
+          ),
+          'logs/serial.log': utf8.encode('retain serial history'),
+          '.staging/interrupted/unknown': utf8.encode('never discard staging'),
+          'run/retained-metadata': utf8.encode(
+            'included, not snapshot-excluded',
+          ),
+        }.entries) {
+          final file = await File(
+            '${state.path}/${entry.key}',
+          ).writeAsBytes(entry.value, flush: true);
+          imageFileMode(file.path, 0x180);
+        }
         fence = await MaintenanceStateFence.begin(lease);
         final before = await tree.capture(nativeMetadata: true);
         var checked = false;
@@ -252,6 +282,12 @@ void main() {
         final retained = await MaintenanceTree.open(Directory(preserved.path));
         try {
           await retained.verify(before, nativeMetadata: true);
+          expect(
+            await File(
+              '${preserved.path}/run/retained-metadata',
+            ).readAsString(),
+            'included, not snapshot-excluded',
+          );
         } finally {
           retained.close();
         }
@@ -275,6 +311,72 @@ void main() {
       } finally {
         preserved?.close();
         tree.close();
+        storage.close();
+        parent.close();
+      }
+    },
+    skip: !Platform.isMacOS,
+  );
+
+  test(
+    'preservation refuses special runtime entries instead of omitting them',
+    () async {
+      final parent = await OwnedImageDirectory.open(temporary);
+      final storage = parent.createDirectory('preservation-work');
+      final run = await Directory('${state.path}/run').create();
+      imageFileMode(run.path, 0x1c0);
+      final socketPath = '${run.path}/retained.sock';
+      final socket = await ServerSocket.bind(
+        InternetAddress(socketPath, type: InternetAddressType.unix),
+        0,
+      );
+      try {
+        fence = await MaintenanceStateFence.begin(lease);
+        final bytes = await File('${state.path}/gaovm.db').readAsBytes();
+        await expectLater(
+          lease.preserveForRollback(
+            fence!,
+            storage,
+            'retained-current',
+            verifyPreparedInputs: () async => fail('special entry was omitted'),
+          ),
+          throwsFormatException,
+        );
+        expect(await state.exists(), true);
+        expect(maintenancePathEntryExists(socketPath), true);
+        expect(await File('${state.path}/gaovm.db').readAsBytes(), bytes);
+        expect(
+          await Directory('${storage.path}/retained-current').exists(),
+          true,
+        );
+        expect(
+          await Directory('${storage.path}/retained-current/state').exists(),
+          false,
+        );
+        final actual = await OwnedImageDirectory.open(state);
+        try {
+          final contender = await actual.tryAcquireMaintenanceLock(
+            '.gaovmd.lock',
+            create: false,
+          );
+          try {
+            expect(contender, isNull);
+          } finally {
+            contender?.close();
+          }
+        } finally {
+          actual.close();
+        }
+        await lease.verify();
+        await expectLater(
+          MaintenanceStateFence.requireUnfenced(state),
+          throwsA(isA<MaintenanceFenceActive>()),
+        );
+      } catch (_) {
+        retainInputs = true;
+        rethrow;
+      } finally {
+        await socket.close();
         storage.close();
         parent.close();
       }
