@@ -11,6 +11,7 @@
 - 核心代码已进入验收收尾；这不表示所有测试或原生 VM 场景已经通过。
 - 不做 Chrome integration，不追加 Flutter UI、MCP、VM clone 等 P1/Beta 功能。
 - 默认使用新的私有测试状态和测试镜像；不替换已安装 app，不复用重要数据，不自动注册服务。
+- 2026-10-19 用户确认 GaoOS 尚不存在。先推进通用 ARM64 Linux 的独立原生验收；GaoOS 镜像下的 Guest/TestRun 实测保留为未完成项，本次没有批准缩减 PRD 发布门槛。当天两轮只读清点仍各有 13 个 unresolved PID，原生 VM 验收继续等待宿主清点恢复，见 [最新复核](docs/FIRST_RELEASE_ACCEPTANCE.md#2026-10-19-补充与复核)。
 - 旧的 [验收账本](docs/MVP_ACCEPTANCE.md) 保留了历史完整目标和扩展工作记录。继续工作时遵循本次首版验收范围，不因其中仍列有升级/回滚缺口而恢复扩展开发。
 
 ## 1. 切机后的准备

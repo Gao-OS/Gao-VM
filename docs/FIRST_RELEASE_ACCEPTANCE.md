@@ -3,6 +3,19 @@
 日期：2026-10-16。**已生成本机开发候选包，尚未达到首版发布门槛。** 本检查点续接
 [REMAINING_WORK.md](../REMAINING_WORK.md)，不扩大到升级/回滚、Flutter UI、MCP 或 clone；不做 Chrome integration。
 
+## 2026-10-19 补充与复核
+
+用户确认 **GaoOS 尚不存在**。先使用已准备的 Ubuntu ARM64 输入推进
+通用 VM 验收；实际 GaoOS 镜像下的 readiness、Guest exec 和 TestRun 验收仍待 GaoOS 可用后完成。
+Ubuntu 结果不能记作 GaoOS 通过，本次没有批准修改 [PRD 发布门槛](PRD.md#13-发布门槛)。
+
+在已推送的 `d6e94fc59b53f10ed871d5f5e1c85fe92e8ba63d` 上复核保存的 Dart SDK hash 后，
+只读 census 两轮仍各有 **13 个 unresolved PID**，均返回 `proc_pidpath errno = 2`，probe 退出码 `2`。
+两轮 PID 集合一致，与 10 月 16 日的集合不同。
+收据、完整 stdout/stderr 和汇总保存在证据目录的 `2026-10-19-recheck-1a2ol3yb/`。
+宿主清点仍不完整，因此没有启动 VM 或重跑 daemon 全套，也没有操作这些进程。
+需要宿主环境所有者重启受影响的 app/session 或重启机器，再按下文恢复顺序重新清点。
+
 ## 基线、环境与证据
 
 - 代码基线：`c1ee3ce546a21930f1ab6236f74b171ba923b596`；分支：`codex/first-release-acceptance`。
