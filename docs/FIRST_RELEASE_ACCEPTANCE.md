@@ -5,9 +5,10 @@
 
 ## 2026-10-19 补充与复核
 
-用户确认 **GaoOS 尚不存在**，并选择 **Alpine Linux aarch64 作为默认测试系统**。先使用 Alpine 推进
-通用 VM 验收；实际 GaoOS 镜像下的 readiness、Guest exec 和 TestRun 验收仍待 GaoOS 可用后完成。
-Alpine 结果覆盖通用 Linux；GaoOS 专属验收及 [PRD 发布门槛](PRD.md#13-发布门槛) 保持不变。
+用户确认 **GaoOS 尚不存在**，并批准 **Alpine Linux aarch64 用于首版验收**。真实 boot、Guest
+readiness、exec 和 TestRun 的首版证据在 Alpine 上完成；GaoOS-specific profile、镜像及版本集成延后，
+不阻塞首版。依据 [已批准的 PRD 修订](PRD.md#2026-10-19-首版范围修订用户已批准)，其余通用 P0、
+原生 VZ/vsock、认证、generation、进程清点和 artifact 要求继续适用；当前尚无原生通过证据。
 
 在已推送的 `d6e94fc59b53f10ed871d5f5e1c85fe92e8ba63d` 上复核保存的 Dart SDK hash 后，
 只读 census 两轮仍各有 **13 个 unresolved PID**，均返回 `proc_pidpath errno = 2`，probe 退出码 `2`。
@@ -15,6 +16,11 @@ Alpine 结果覆盖通用 Linux；GaoOS 专属验收及 [PRD 发布门槛](PRD.m
 收据、完整 stdout/stderr 和汇总保存在证据目录的 `2026-10-19-recheck-1a2ol3yb/`。
 宿主清点仍不完整，因此没有启动 VM 或重跑 daemon 全套，也没有操作这些进程。
 需要宿主环境所有者重启受影响的 app/session 或重启机器，再按下文恢复顺序重新清点。
+
+批准 Alpine 首版范围后，在已推送的 `a8eec590493321db13ed32ac79292714bc82ad75` 上再次复核，
+两轮仍各有 **13 个 unresolved PID**、`proc_pidpath errno = 2`，probe 退出码 `2`。
+收据与 stdout/stderr 保存在 `2026-10-19-alpine-release-census-s7my31jp/`；未启动 VM、未重跑
+daemon 全套、未操作这些进程。镜像离线准备不解除该宿主阻塞。
 
 ## 基线、环境与证据
 
@@ -109,7 +115,7 @@ archive SHA-256 为 `e9d5bfdb0cd0462d5deb44c1d4495bd82b510d681504efdf057925ced6b
 ELF header 确认为 ARM64、静态链接、无动态 interpreter 或 `DT_NEEDED`；构建退出码为 `0`。
 SHA-256 为 `f7d5aa16de081e262bd7222851e7aacf1aa8d362fdd55681f054a5a22d8bcf3d`。
 同目录 `manifest.json` 和 `acceptance/guest-linux-build/` 保存工具链、锁文件 hash 与原始构建日志。
-它尚未在 Linux 运行或装入 GaoOS，不能据此认定 vsock、Guest readiness 或 TestRun 已通过。
+它尚未在 Linux 运行，不能据此认定 vsock、Guest readiness 或 TestRun 已通过。
 
 ### 当前默认：Alpine Linux aarch64
 
@@ -156,7 +162,7 @@ QCOW2 无 backing，GPT 主备 CRC、partition bounds 和 ARM64 Image header 已
 从实际 root partition 提取 ext4，保留 root label/UUID，仅在可丢弃副本内停用独立 `/boot`、`/boot/efi`
 挂载；修改前后 `e2fsck -f -n` 均通过。输入保持只读、静止，供 public import 再创建 managed writable copy。
 准备脚本的一次 whitespace-parser 失败与修正后的成功收据均已保留。Ubuntu 仅供无 Agent 的通用 Linux 验收，
-不能代替实际 GaoOS/Guest/TestRun 输入或通过证明。
+未安装 resident service，不能代替 agent-enabled Guest/TestRun 输入或通过证明。
 
 ## 恢复顺序与命令
 
@@ -214,8 +220,8 @@ bash scripts/e2e_macos14_happy_path.sh --multi-vm
 
 - Linux 实际 boot/serial、framebuffer/input、手动关窗后 VM 存活、双 VM 显示与独立磁盘/driver 生命周期。
 - 单 VM driver crash 与旧 generation 拒绝、双 VM daemon restart、无 orphan；幂等 retry、revision 冲突、event cursor resume 及私有 UDS/token 默认值。
-- 实际包含 resident Guest service 的 GaoOS 镜像来源与构建；按 [Guest development acceptance](GUEST_DEVELOPMENT_ACCEPTANCE.md) 显式开启入口，在匹配 VM spec/port 下先观察 `guest_agent_ready`。
-- GaoOS exec 成功/非零退出、timeout/cancel、输出 spill、两 VM 隔离，以及 TestRun 成功清理/失败保留和公开下载的实际 bytes/digest。
+- 实际包含 resident Guest service 的 Alpine ARM64 镜像来源与安装策略；按 [Guest development acceptance](GUEST_DEVELOPMENT_ACCEPTANCE.md) 显式开启入口，在匹配 VM spec/port 下先观察 `guest_agent_ready`。GaoOS-specific 集成延后。
+- Alpine exec 成功/非零退出、timeout/cancel、输出 spill、两 VM 隔离，以及 TestRun 成功清理/失败保留和公开下载的实际 bytes/digest。
 - 具体 app 的手动安装、service 同意/启动/重启/卸载验收，以及所选分发方式需要的签名验证（需要公证时另做 notarization）；现有组装与只读 status 不覆盖这些动作。
 - 清点和启动恢复后，最终 checkout 的 daemon 默认并发全套通过结果，以及对应候选版本的远端 CI/Tests 通过证据。
 

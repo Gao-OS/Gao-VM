@@ -8,7 +8,7 @@ PRD release gate or installed-service acceptance.
 
 ## Default test OS
 
-Alpine Linux `aarch64` is the default OS for generic first-release testing,
+Alpine Linux `aarch64` is the approved first-release acceptance OS,
 chosen on 2026-10-19. Pin one stable release's source URL, checksum and preparation
 steps with the resulting image hashes. The current pinned inputs and their
 validation limits are recorded in the [acceptance checkpoint](FIRST_RELEASE_ACCEPTANCE.md).
@@ -27,9 +27,11 @@ captured serial output; GaoVM's serial capture is output-only. Keep credentials
 unchanged in the disposable test disk. Supply the matching initramfs in both
 smoke modes.
 
-This smoke disables the Guest Agent. Installing `gaovm-guestd` for separate
-Guest/TestRun tests is an explicit later step; Alpine results cover generic Linux
-behavior, while GaoOS-specific acceptance remains pending.
+This smoke disables the Guest Agent. Separate Guest/TestRun acceptance requires
+an Alpine image with the resident `gaovm-guestd` and its least-privilege service
+policy installed. The [approved PRD amendment](PRD.md#2026-10-19-首版范围修订用户已批准)
+defers GaoOS-specific integration; all generic P0 and native evidence requirements
+still apply.
 
 ## Prepare and run
 
@@ -169,10 +171,11 @@ mise exec dart@3.9.0 -- dart analyze
 mise exec dart@3.9.0 -- dart format --output=none --set-exit-if-changed bin lib test tool
 ```
 
-The actual native branch remains unrun on the Intel development host. Even a
+The native scenarios remain unverified; the Apple Silicon host's process census
+is still blocked as recorded in the [checkpoint](FIRST_RELEASE_ACCEPTANCE.md). Even a
 passing native smoke receipt only establishes its selected public runtime/display
 or three-VM independence scenario: it does not prove framebuffer/input,
-manual-close guest survival, GaoOS guest exec/TestRun artifacts, simultaneous
+manual-close guest survival, Alpine guest exec/TestRun artifacts, simultaneous
 windows, multi-VM fault recovery, crash/daemon-restart recovery, signed
 installed-service behavior, upgrade rollback or distribution.
-Those remain separate PRD/M8 gates and require recorded native evidence.
+Use the current checkpoint for the remaining PRD/M8 evidence and deferred work.

@@ -4,6 +4,11 @@ The user accepted this default-off development entry on 2026-10-14. It enables
 the existing native Guest bridge for development acceptance, not a release-ready
 Guest product or proof of Apple Silicon/GaoOS execution.
 
+On 2026-10-19 the user approved Alpine ARM64 for first-release native acceptance,
+with GaoOS-specific integration deferred. The [PRD amendment](PRD.md#2026-10-19-首版范围修订用户已批准)
+changes the test OS; all runtime, authentication and evidence requirements below
+remain in force.
+
 ## Explicit opt-in
 
 `gaovmd --guest-development-acceptance true` enables the entry. Omission or
@@ -66,13 +71,20 @@ existing driver's negotiated session; use a fresh daemon/driver generation.
 
 ## Native acceptance remains separate
 
-On the user's Apple Silicon machine, supply a real GaoOS image containing the
+On the user's Apple Silicon machine, supply a real Alpine ARM64 image containing the
 [resident Guest service](../guest/gaovm_guestd/README.md), import/provision it
 through the public API, and wait for `guest_agent_ready`. Follow the existing
 [Guest exec](GUEST_EXEC_CLI.md) and [TestRun](TEST_RUNS.md) workflows. Verify
 terminal Operations, downloaded bytes/digests and failure retention, rather than
 calling an HTTP acceptance, capability advertisement or bridge acknowledgement
 an executed test.
+
+Use a dedicated non-login service account, private service-owned artifact/spool
+roots, a finite explicit I/O budget and a verified descendant-retirement policy.
+The executable's inherited UID/GID and `PR_SET_NO_NEW_PRIVS` do not install that
+policy. Keep the unmodified no-Agent smoke image separate, and retain image
+provenance and static preparation receipts. Offline installation is not proof of
+module loading, peer-CID admission, readiness, command execution or safe shutdown.
 
 Native closing evidence still requires peer CID verification, two-VM isolation,
 timeout/cancellation, output spill, daemon restart, and public artifact downloads.

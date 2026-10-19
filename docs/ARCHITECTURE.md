@@ -6,7 +6,7 @@ status: accepted
 m0_contract: frozen
 architecture_generation: v2
 target_milestone: Multi-VM Agent Testing MVP
-updated: 2026-09-04
+updated: 2026-10-19
 tags:
   - gaovm
   - virtualization
@@ -16,6 +16,12 @@ tags:
 ---
 
 # GaoVM 架构设计
+
+## 2026-10-19 首版验收范围修订（用户已批准）
+
+按 [PRD 首版范围修订](PRD.md#2026-10-19-首版范围修订用户已批准)，以 Alpine Linux ARM64 作为首版默认测试系统，完成原定 GaoOS 的真实 Guest readiness、exec、TestRun 和 E2E 发布证据；兼容的其他 ARM64 Linux 输入仍可显式提供。GaoOS-specific profile/版本集成延后，GaoOS 仍是后续重点 Guest Profile。本修订不引入隐式默认 VM、默认镜像或发行版专属 runtime，也不改变既有 bundle/metadata 契约。
+
+所有通用 P0 能力与原生证据要求保持不变，包括认证、generation、进程清点、真实 VZ/vsock 和 artifact 验证；组件测试不替代真实 E2E。Flutter UI、MCP 和其他 P1/Beta 仍不作为首版前置。
 
 ## 1. 文档目的
 
@@ -1029,7 +1035,7 @@ driver 必须实现 `VZVirtualMachineDelegate`，把以下事件传给 daemon：
 
 ### 14.1 定位
 
-Guest Agent 是可选能力，不是运行通用 Linux VM 的必要条件；Guest protocol v1 core 与 GaoOS Guest Agent readiness/exec 是 GaoOS 自动化测试的 P0 组件。
+Guest Agent 是可选能力，不是运行通用 Linux VM 的必要条件；Guest protocol v1 core 与 Linux Guest Agent readiness/exec 是自动化测试的 P0 组件，首版在 Alpine ARM64 中验收，GaoOS-specific 集成延后。
 
 建议 reference implementation：
 
@@ -1132,7 +1138,7 @@ TestRun 必须产生：
 - failure classification。
 
 当前实现的持久化阶段、host artifact 采集、无 VM abort completion 与仍未完成的
-边界见 [TEST_RUNS.md](TEST_RUNS.md)；组件证据不能替代完整 GaoOS E2E 验收。
+边界见 [TEST_RUNS.md](TEST_RUNS.md)；组件证据不能替代完整原生 Guest/TestRun E2E 验收（首版使用 Alpine ARM64）。
 
 ---
 

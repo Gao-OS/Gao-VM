@@ -11,7 +11,7 @@
 - 核心代码已进入验收收尾；这不表示所有测试或原生 VM 场景已经通过。
 - 不做 Chrome integration，不追加 Flutter UI、MCP、VM clone 等 P1/Beta 功能。
 - 默认使用新的私有测试状态和测试镜像；不替换已安装 app，不复用重要数据，不自动注册服务。
-- 2026-10-19 用户确认 GaoOS 尚不存在，并选择 **Alpine Linux aarch64 作为默认测试系统**。先推进通用 Linux 的独立原生验收；GaoOS 镜像下的 Guest/TestRun 实测保留为未完成项，本次没有批准缩减 PRD 发布门槛。当天两轮只读清点仍各有 13 个 unresolved PID，原生 VM 验收继续等待宿主清点恢复，见 [最新复核](docs/FIRST_RELEASE_ACCEPTANCE.md#2026-10-19-补充与复核)。
+- 2026-10-19 用户确认 GaoOS 尚不存在，并批准 **Alpine Linux aarch64 用于首版验收**：真实 boot、Guest readiness/exec 和 TestRun 证据均在 Alpine 上补齐；GaoOS-specific profile、镜像及版本集成延后，不阻塞首版。通用 P0 与运行时/安全要求保留，见 [已批准的 PRD 修订](docs/PRD.md#2026-10-19-首版范围修订用户已批准)。当天最新两轮只读清点仍各有 13 个 unresolved PID，原生 VM 验收继续等待宿主清点恢复，见 [最新复核](docs/FIRST_RELEASE_ACCEPTANCE.md#2026-10-19-补充与复核)。
 - 旧的 [验收账本](docs/MVP_ACCEPTANCE.md) 保留了历史完整目标和扩展工作记录。继续工作时遵循本次首版验收范围，不因其中仍列有升级/回滚缺口而恢复扩展开发。
 
 ## 1. 切机后的准备
@@ -109,9 +109,10 @@ mise exec dart@3.9.0 -- bash scripts/e2e_macos14_happy_path.sh --multi-vm
 [验收场景索引](docs/MVP_ACCEPTANCE.md#milestone-and-acceptance-scenario-boundaries) 留存证据，不把脚本收据扩写成全场景通过。
 如果 cleanup 失败，先确认原有测试 VM/driver 的身份与退出，再决定下一次运行，不自动清理或盲目重跑。
 
-## 5. GaoOS Guest / TestRun 闭环
+## 5. Alpine Guest / TestRun 首版闭环
 
-- 使用实际包含 [Guest service](guest/gaovm_guestd/README.md) 的 GaoOS 镜像；Mac 上的 Rust 测试程序不是 Linux Guest service。
+- 使用实际包含 [Guest service](guest/gaovm_guestd/README.md) 的 Alpine ARM64 镜像；无 Agent 的 smoke 输入与 agent-enabled 输入分开保留。Mac 上的 Rust 测试程序不是 Linux Guest service，交叉构建或离线安装也不证明原生运行。
+- 为 resident service 配置专用非登录账号、私有 artifact/spool 根目录、显式有限 I/O budget 和后代进程清退策略；保留 host CID 2 检查，不用 root service 或自动重启掩盖失败。
 - 按 [默认关闭的 Guest 开发验收入口](docs/GUEST_DEVELOPMENT_ACCEPTANCE.md) 显式开启 `--guest-development-acceptance true`，保留 UID、token、hello、capability、generation 检查。
 - VM spec 也必须启用匹配的 `guest_agent` 和 port；driver 须按 [构建说明](README.md#building-source-components) 具备 virtualization entitlement。
 - 先验证真实 `guest_agent_ready`，再按 [Guest exec](docs/GUEST_EXEC_CLI.md)、[TestRun](docs/TEST_RUNS.md)、[steps](docs/TEST_RUN_STEPS.md) 和 [产物收集](docs/TEST_RUN_ARTIFACTS.md) 验证。
