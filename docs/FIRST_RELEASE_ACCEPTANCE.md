@@ -22,6 +22,10 @@ readiness、exec 和 TestRun 的首版证据在 Alpine 上完成；GaoOS-specifi
 收据与 stdout/stderr 保存在 `2026-10-19-alpine-release-census-s7my31jp/`；未启动 VM、未重跑
 daemon 全套、未操作这些进程。镜像离线准备不解除该宿主阻塞。
 
+随后在 census fixture 修复提交 `56ce2a37a999d2d0b44986fdb72f5d13c62594af` 上复核，
+两轮 unresolved PID 集合与修复前完全一致，仍为 13 个、probe 退出码 `2`，没有新增 unresolved PID。
+收据位于 `2026-10-19-alpine-after-fixture-w35zx0h8/`；该结果没有解除启动屏障。
+
 ## 基线、环境与证据
 
 - 代码基线：`c1ee3ce546a21930f1ab6236f74b171ba923b596`；分支：`codex/first-release-acceptance`。
@@ -145,6 +149,35 @@ eb983aabed32fbf17ccca2ce5e0090d06d860caa52a93ed416d775f18b04d0d9a347366d0dae86ec
 两轮仍各有 13 个 unresolved PID、退出码 `2`；完整记录位于 `2026-10-19-alpine-host-recheck-icptgtlj/`。
 因此仍未启动 VM；原生验收继续等待宿主清点恢复。
 
+### 首版 Guest/TestRun 输入：Alpine resident service
+
+已在独立的 `alpine-guest/` 中完成离线准备，保留上述无 Agent 的 smoke 输入不变。
+`Image`、`initramfs-virt` 与基线逐字节一致；新的 `alpine-guest-root.raw` 为 **1 GiB**，
+SHA-256 为 `43a3bdc3a45d83737ba87419c87415582309100ec200c8ee0096f1af9c8f860f`。
+三个输入均封存为 `0400`，仍需通过 public import 创建独立 writable copy。
+
+该可丢弃 root 安装了上述静态 ARM64 `gaovm-guestd`，并启用专用 OpenRC service：
+
+- 锁定的非登录账号 `gaovm`，UID/GID `400:400`；既有账号及凭据保留。
+- `/var/lib/gaovm/source` 与 `/var/lib/gaovm/spool` 归该账号所有，均为 `0700`；父目录由 root 所有。
+- 固定 port `10777`、显式 `300` 秒 I/O budget、`no_new_privs`；不自动重启或清空 crash spool。
+- 受 root 保护的独立 cgroup2，限制 128 个进程、512 MiB memory，并要求完整清退后代。
+  原生验证仍须确认实际权限、UID/GID drop、cgroup 限制和退出行为。stock OpenRC 0.63.2 的
+  cleanup presence check 与 unified group 路径不一致，因此 fixture 显式检查实际 group；
+  forced cleanup、身份不明、非空 spool 或未确认生命周期均保留持久标记并拒绝重启。
+- 仅在副本停用四个 tiny-cloud runlevel link，避免 metadata 改写测试环境。
+  保留 `tty1`/`hvc0` getty，加入匹配的 vsock、virtio GPU 和实际 USB keyboard/pointer 所需模块。
+
+准备与独立审计记录位于 `alpine-guest/preparation-receipt.json`；脚本、命令和原始日志保留在同目录。
+installed bytes、账号记录保留、权限、runlevel link、模块依赖闭包与内核配置、shell syntax、
+10 项纯文本 guard predicate 检查和最终只读 `e2fsck -f -n` 均通过。
+协调者另复核三个封存文件的完整 SHA-256、大小和模式，见 `alpine-guest/parent-sealed-verification.json`。
+
+状态为 **PREPARED_NOT_BOOT_TESTED**。未运行 Linux executable、VM 或宿主服务；模块存在和 getty 配置
+不证明 boot、可见 framebuffer/input、vsock peer CID、Guest readiness、exec、TestRun 或安全关机。
+按 [Guest 开发验收入口](GUEST_DEVELOPMENT_ACCEPTANCE.md) 在完整宿主清点后显式启用 daemon 开关与匹配 VM spec。
+原有单/三 VM smoke 仍使用 `alpine/` 无 Agent 输入；它不会自动开启 Guest/TestRun 验收。
+
 ### 历史准备：Ubuntu
 
 10 月 16 日准备的 Ubuntu 输入作为历史证据保留在 `images/`，**从未启动 VM**；
@@ -225,6 +258,17 @@ bash scripts/e2e_macos14_happy_path.sh --multi-vm
 - 具体 app 的手动安装、service 同意/启动/重启/卸载验收，以及所选分发方式需要的签名验证（需要公证时另做 notarization）；现有组装与只读 status 不覆盖这些动作。
 - 清点和启动恢复后，最终 checkout 的 daemon 默认并发全套通过结果，以及对应候选版本的远端 CI/Tests 通过证据。
 
-基线远端 [CI 38871778044](https://github.com/Gao-OS/Gao-VM/actions/runs/38871778044) 的 legacy census fixture
+历史基线 [CI 38871778044](https://github.com/Gao-OS/Gao-VM/actions/runs/38871778044) 的 legacy census fixture
 发生 broken pipe；[Tests 38871778273](https://github.com/Gao-OS/Gao-VM/actions/runs/38871778273) 的 Swift
-fragmented-prefix fixture 发送失败。本机结果与修复已分开记录，尚无修复后远端 workflow 通过证明。
+fragmented-prefix fixture 发送失败。
+
+10 月 19 日复核 `a8eec59` 的 [CI 39218910448](https://github.com/Gao-OS/Gao-VM/actions/runs/39218910448)，
+legacy census 用例仍在 readiness 写入阶段 broken pipe；两个普通 daemon startup 用例在该次 CI 通过。
+`56ce2a3` 将 copied/re-signed Apple binary 换为新编译的 host-native readiness fixture，移除 stdin write/close
+前置条件，并保留全部 fail-closed 断言、提前退出诊断及已拥有 child 的退出确认。
+本机定向用例 1 通过，整个 legacy migration 文件 15 通过，格式与分析通过；未重跑 daemon 全套。
+`legacy-census-fixture-repair/receipt.json` 保存命令、退出码及工具输出转录，未单独捕获原始 stdout/stderr，
+不能把该记录表述为独立原始双流日志。Hosted early child exit 的原因尚未在本机复现。
+
+远端确认应按修复后对应 SHA 的 workflow 结果记录，不能以本机定向通过替代。
+`CI` 在分支 push 时运行；`Tests` 仅在 main push 或面向 main 的 PR 上运行，普通分支 push 不会触发它。
