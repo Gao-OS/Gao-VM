@@ -6,6 +6,31 @@ for UC-01/UC-03 and M3/M4/M5/M7/M8 verification. The optional `--multi-vm` mode
 adds the three-VM independence scenario from AC-01. Neither mode is the full
 PRD release gate or installed-service acceptance.
 
+## Default test OS
+
+Alpine Linux `aarch64` is the default OS for generic first-release testing,
+chosen on 2026-10-19. Pin one stable release's source URL, checksum and preparation
+steps with the resulting image hashes. The current pinned inputs and their
+validation limits are recorded in the [acceptance checkpoint](FIRST_RELEASE_ACCEPTANCE.md).
+The harness continues to take explicit image paths, so other Linux guests remain
+supported.
+
+The recipe uses `console=hvc0 root=/dev/vda rw`. Prepare an uncompressed ARM64
+Linux `Image`, its matching initramfs, and a raw disk containing the root
+filesystem directly on the device. For Alpine cloud kernels packaged as EFI
+zboot, extract and decompress the embedded payload and validate the ARM64 Image
+header. An installer ISO, QCOW2 image or partitioned
+disk requiring `root=/dev/vdaN` cannot be used as that raw root input. Check that
+the initramfs includes the required virtio block and filesystem modules and that
+the guest supports the virtio console. A getty on `hvc0` exposes a login prompt in
+captured serial output; GaoVM's serial capture is output-only. Keep credentials
+unchanged in the disposable test disk. Supply the matching initramfs in both
+smoke modes.
+
+This smoke disables the Guest Agent. Installing `gaovm-guestd` for separate
+Guest/TestRun tests is an explicit later step; Alpine results cover generic Linux
+behavior, while GaoOS-specific acceptance remains pending.
+
 ## Prepare and run
 
 Use Apple Silicon macOS 14+ with Xcode command-line tools and Dart 3.9.0. Prepare
@@ -22,9 +47,9 @@ Resolve the pinned dependencies first, from the repository root:
 (cd clients/gaovm_cli && mise exec dart@3.9.0 -- dart pub get --enforce-lockfile)
 mise exec dart@3.9.0 -- bash scripts/e2e_macos14_happy_path.sh --help
 
-KERNEL_PATH=/absolute/images/kernel \
-INITRD_PATH=/absolute/images/initrd \
-DISK_PATH=/absolute/images/root.raw \
+KERNEL_PATH=/absolute/images/alpine/Image \
+INITRD_PATH=/absolute/images/alpine/initramfs-virt \
+DISK_PATH=/absolute/images/alpine/alpine-root.raw \
 mise exec dart@3.9.0 -- bash scripts/e2e_macos14_happy_path.sh
 ```
 
@@ -82,8 +107,9 @@ automatically retried. Display status alone is not runtime or guest readiness.
 Use the same prepared inputs and append `--multi-vm`:
 
 ```sh
-KERNEL_PATH=/absolute/images/kernel \
-DISK_PATH=/absolute/images/root.raw \
+KERNEL_PATH=/absolute/images/alpine/Image \
+INITRD_PATH=/absolute/images/alpine/initramfs-virt \
+DISK_PATH=/absolute/images/alpine/alpine-root.raw \
 mise exec dart@3.9.0 -- bash scripts/e2e_macos14_happy_path.sh --multi-vm
 ```
 

@@ -5,9 +5,9 @@
 
 ## 2026-10-19 补充与复核
 
-用户确认 **GaoOS 尚不存在**。先使用已准备的 Ubuntu ARM64 输入推进
+用户确认 **GaoOS 尚不存在**，并选择 **Alpine Linux aarch64 作为默认测试系统**。先使用 Alpine 推进
 通用 VM 验收；实际 GaoOS 镜像下的 readiness、Guest exec 和 TestRun 验收仍待 GaoOS 可用后完成。
-Ubuntu 结果不能记作 GaoOS 通过，本次没有批准修改 [PRD 发布门槛](PRD.md#13-发布门槛)。
+Alpine 结果覆盖通用 Linux；GaoOS 专属验收及 [PRD 发布门槛](PRD.md#13-发布门槛) 保持不变。
 
 在已推送的 `d6e94fc59b53f10ed871d5f5e1c85fe92e8ba63d` 上复核保存的 Dart SDK hash 后，
 只读 census 两轮仍各有 **13 个 unresolved PID**，均返回 `proc_pidpath errno = 2`，probe 退出码 `2`。
@@ -111,7 +111,38 @@ SHA-256 为 `f7d5aa16de081e262bd7222851e7aacf1aa8d362fdd55681f054a5a22d8bcf3d`�
 同目录 `manifest.json` 和 `acceptance/guest-linux-build/` 保存工具链、锁文件 hash 与原始构建日志。
 它尚未在 Linux 运行或装入 GaoOS，不能据此认定 vsock、Guest readiness 或 TestRun 已通过。
 
-通用 Linux 输入已准备在证据目录的 `images/`，**从未启动 VM**：
+### 当前默认：Alpine Linux aarch64
+
+已准备官方 [Alpine 3.24.1 ARM64 generic tiny r0 cloud image](https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/cloud/generic_alpine-3.24.1-aarch64-uefi-tiny-r0.qcow2)
+派生的测试输入。固定源属于受支持的 v3.24 分支；此次查询的最新安装媒体为 3.24.2，
+该分支的 generic ARM64 cloud build 为 3.24.1 r0。源镜像 SHA-512 与官方 sidecar 一致：
+
+```text
+eb983aabed32fbf17ccca2ce5e0090d06d860caa52a93ed416d775f18b04d0d9a347366d0dae86ec2ae3923b6c728bb9ec1995fcb036dd63b467125e4b42a7dd
+```
+
+| 输入 | 相对 `acceptance/` 的路径 | SHA-256 |
+| --- | --- | --- |
+| 未压缩 ARM64 kernel | `alpine/Image` | `8b216f74e7f89def4604adf69e2345437363aff4819101bb1551c9e83cd35cdd` |
+| 匹配 initramfs | `alpine/initramfs-virt` | `4348187771c75fb534b0c6ed6fafc38158d13622c9a7df0c47931349c8b0f322` |
+| 独立 whole-root ext4 disk | `alpine/alpine-root.raw` | `684ce91b8a9e0273aafd8dabb15b2e37669bb6270d586457486cedda4774cc76` |
+
+状态为 **PREPARED_NOT_BOOT_TESTED**。`alpine/` 保留准备脚本，`alpine/preparation-receipt.json`
+记录固定来源、命令与退出码、大小和 hash。QCOW2 integrity、GPT 主备 CRC、修改后 `e2fsck -f -n`、ARM64 Image header，
+以及 `6.18.35-0-virt` kernel/initramfs 的 virtio block、console 和 ext4 依赖检查通过。
+原始 kernel 的 EFI zboot wrapper 已解出匹配的未压缩 payload；首次直接检查 wrapper 的失败也保留在证据中。
+仅在可丢弃 root 副本中停用独立 EFI 挂载并增加 `hvc0` getty；原 root label/UUID、`ttyAMA0` 和账号凭据保持。
+没有安装 Guest Agent 或增加自动登录。三个输入均为 `0400`，供公开 import 创建独立 writable copy。
+这些静态检查未覆盖 Linux boot、framebuffer/input、vsock 或 TestRun。
+
+选择 Alpine 后，在 `80e36b5e4a79baad740c6357e2bd0867615b75ca` 上再次只读清点，
+两轮仍各有 13 个 unresolved PID、退出码 `2`；完整记录位于 `2026-10-19-alpine-host-recheck-icptgtlj/`。
+因此仍未启动 VM；原生验收继续等待宿主清点恢复。
+
+### 历史准备：Ubuntu
+
+10 月 16 日准备的 Ubuntu 输入作为历史证据保留在 `images/`，**从未启动 VM**；
+当前默认测试系统已改为 Alpine，恢复执行使用下文的 Alpine 路径：
 
 | 输入 | 相对 `acceptance/` 的路径 |
 | --- | --- |
@@ -163,9 +194,9 @@ gaovm_dart="$gaovm_acceptance/sdk/dart-sdk/bin/dart"
 
 ```sh
 DART_BIN="$gaovm_dart" \
-KERNEL_PATH="$gaovm_acceptance/images/Image" \
-INITRD_PATH="$gaovm_acceptance/images/noble-server-cloudimg-arm64-initrd-generic" \
-DISK_PATH="$gaovm_acceptance/images/ubuntu-root.raw" \
+KERNEL_PATH="$gaovm_acceptance/alpine/Image" \
+INITRD_PATH="$gaovm_acceptance/alpine/initramfs-virt" \
+DISK_PATH="$gaovm_acceptance/alpine/alpine-root.raw" \
 bash scripts/e2e_macos14_happy_path.sh
 ```
 
@@ -173,9 +204,9 @@ bash scripts/e2e_macos14_happy_path.sh
 
 ```sh
 DART_BIN="$gaovm_dart" \
-KERNEL_PATH="$gaovm_acceptance/images/Image" \
-INITRD_PATH="$gaovm_acceptance/images/noble-server-cloudimg-arm64-initrd-generic" \
-DISK_PATH="$gaovm_acceptance/images/ubuntu-root.raw" \
+KERNEL_PATH="$gaovm_acceptance/alpine/Image" \
+INITRD_PATH="$gaovm_acceptance/alpine/initramfs-virt" \
+DISK_PATH="$gaovm_acceptance/alpine/alpine-root.raw" \
 bash scripts/e2e_macos14_happy_path.sh --multi-vm
 ```
 

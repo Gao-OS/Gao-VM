@@ -11,7 +11,7 @@
 - 核心代码已进入验收收尾；这不表示所有测试或原生 VM 场景已经通过。
 - 不做 Chrome integration，不追加 Flutter UI、MCP、VM clone 等 P1/Beta 功能。
 - 默认使用新的私有测试状态和测试镜像；不替换已安装 app，不复用重要数据，不自动注册服务。
-- 2026-10-19 用户确认 GaoOS 尚不存在。先推进通用 ARM64 Linux 的独立原生验收；GaoOS 镜像下的 Guest/TestRun 实测保留为未完成项，本次没有批准缩减 PRD 发布门槛。当天两轮只读清点仍各有 13 个 unresolved PID，原生 VM 验收继续等待宿主清点恢复，见 [最新复核](docs/FIRST_RELEASE_ACCEPTANCE.md#2026-10-19-补充与复核)。
+- 2026-10-19 用户确认 GaoOS 尚不存在，并选择 **Alpine Linux aarch64 作为默认测试系统**。先推进通用 Linux 的独立原生验收；GaoOS 镜像下的 Guest/TestRun 实测保留为未完成项，本次没有批准缩减 PRD 发布门槛。当天两轮只读清点仍各有 13 个 unresolved PID，原生 VM 验收继续等待宿主清点恢复，见 [最新复核](docs/FIRST_RELEASE_ACCEPTANCE.md#2026-10-19-补充与复核)。
 - 旧的 [验收账本](docs/MVP_ACCEPTANCE.md) 保留了历史完整目标和扩展工作记录。继续工作时遵循本次首版验收范围，不因其中仍列有升级/回滚缺口而恢复扩展开发。
 
 ## 1. 切机后的准备
@@ -35,7 +35,7 @@ for gaovm_package in libs/gaovm_models libs/gaovm_rpc libs/gaovm_api_client daem
 done
 ```
 
-`uname -m` 应为 `arm64`。原生 VM 需要可启动的 ARM64 Linux/GaoOS kernel、可选 initrd 和现有 raw disk；使用绝对路径、静止输入和可丢弃副本。
+`uname -m` 应为 `arm64`。默认使用 Alpine Linux aarch64；准备匹配的未压缩 ARM64 kernel、initramfs 和 whole-root raw disk，具体要求见 [Alpine 输入说明](docs/NATIVE_VM_SMOKE.md#default-test-os)。其他 Linux/GaoOS 输入仍可显式提供；使用绝对路径、静止输入和可丢弃副本。
 
 ## 2. 先复核两个已知启动失败
 
@@ -83,17 +83,18 @@ UI 的既有格式提示未在本次修复；UI 锁文件已补齐共享 API cli
 保留测试状态，不注册服务；不要把组件测试或 `doctor` 通过当成 VM 已能启动。
 
 ```sh
-KERNEL_PATH=/absolute/test-images/kernel \
-INITRD_PATH=/absolute/test-images/initrd \
-DISK_PATH=/absolute/test-images/root.raw \
+KERNEL_PATH=/absolute/test-images/alpine/Image \
+INITRD_PATH=/absolute/test-images/alpine/initramfs-virt \
+DISK_PATH=/absolute/test-images/alpine/alpine-root.raw \
 mise exec dart@3.9.0 -- bash scripts/e2e_macos14_happy_path.sh
 
-KERNEL_PATH=/absolute/test-images/kernel \
-DISK_PATH=/absolute/test-images/root.raw \
+KERNEL_PATH=/absolute/test-images/alpine/Image \
+INITRD_PATH=/absolute/test-images/alpine/initramfs-virt \
+DISK_PATH=/absolute/test-images/alpine/alpine-root.raw \
 mise exec dart@3.9.0 -- bash scripts/e2e_macos14_happy_path.sh --multi-vm
 ```
 
-不需要 initrd 时去掉 `INITRD_PATH`；第二条命令若需要 initrd，也必须显式提供。
+默认 Alpine 输入在两种模式都显式提供匹配的 initramfs；其他不需要 initrd 的输入可去掉 `INITRD_PATH`。
 三 VM 场景需要三份 writable disk 空间，以及至少支持两个各 2 CPU/2 GiB VM 的运行预算。
 
 需要补齐的实际观察：
