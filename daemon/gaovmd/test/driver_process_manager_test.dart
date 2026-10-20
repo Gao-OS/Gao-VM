@@ -1209,8 +1209,14 @@ void main() {
         markTestSkipped('Swift driver integration requires macOS');
         return;
       }
+      final buildPath = await Process.run('/usr/bin/xcrun', [
+        'swift',
+        'build',
+        '--show-bin-path',
+      ], workingDirectory: '../../drivers/vz_macos');
+      expect(buildPath.exitCode, 0, reason: '${buildPath.stderr}');
       final executable = File(
-        '${Directory.current.path}/../../drivers/vz_macos/.build/$target/debug/gaovm-driver-vz',
+        '${(buildPath.stdout as String).trim()}/gaovm-driver-vz',
       );
       if (!await executable.exists()) {
         markTestSkipped('build drivers/vz_macos before this integration');
@@ -1268,9 +1274,14 @@ void main() {
       markTestSkipped('Swift VZ driver is only built on macOS');
       return;
     }
+    final buildPath = await Process.run('/usr/bin/xcrun', [
+      'swift',
+      'build',
+      '--show-bin-path',
+    ], workingDirectory: '../../drivers/vz_macos');
+    expect(buildPath.exitCode, 0, reason: '${buildPath.stderr}');
     final executable = File(
-      '${Directory.current.path}/../../drivers/vz_macos/'
-      '.build/$target/debug/gaovm-driver-vz',
+      '${(buildPath.stdout as String).trim()}/gaovm-driver-vz',
     );
     if (!await executable.exists()) {
       markTestSkipped('build drivers/vz_macos before running this integration');

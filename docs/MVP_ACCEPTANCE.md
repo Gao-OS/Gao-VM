@@ -1,5 +1,18 @@
 # MVP acceptance ledger
 
+## Current scope — approved 2026-10-19
+
+The [approved PRD amendment](PRD.md#2026-10-19-首版范围修订用户已批准)
+uses Alpine ARM64 for native first-release Guest readiness, exec and TestRun E2E
+evidence; GaoOS-specific profile/version integration is deferred. Generic P0
+capabilities and real native evidence requirements remain. See the
+[current acceptance checkpoint](FIRST_RELEASE_ACCEPTANCE.md) for current results,
+blockers and remaining work; prepared images are not boot or Guest acceptance.
+
+The older scope/status wording and dated entries below are preserved as historical
+records. They do not override that amendment or the current checkpoint, and their
+test results must retain the original evidence boundaries.
+
 Checked against [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md),
 [PRD.md](PRD.md) and [ARCHITECTURE.md](ARCHITECTURE.md) on 2026-10-13.
 The ordinary local matrix baseline is `b75b5a1` on local `main`, including failed-VM

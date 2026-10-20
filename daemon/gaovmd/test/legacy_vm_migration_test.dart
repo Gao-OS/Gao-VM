@@ -278,20 +278,19 @@ void main() {
       );
       final previous = await leases.list();
       expect(previous, hasLength(1));
-      final executable = await File(
-        '/bin/cat',
-      ).copy('${fixture.temporary.path}/unresolved-process');
-      final chmod = await Process.run('/bin/chmod', ['700', executable.path]);
-      expect(chmod.exitCode, 0);
-      // Re-sign the disposable copy and await execution before unlinking it;
-      // an unstarted copied platform binary is not a valid census fixture.
-      final signed = await Process.run('/usr/bin/codesign', [
-        '--force',
-        '--sign',
-        '-',
+      final executable = File('${fixture.temporary.path}/unresolved-process');
+      // Build a host-native fixture instead of re-signing an Apple platform
+      // binary. It announces readiness without a write to a possibly dead child.
+      final compiled = await Process.run('/usr/bin/xcrun', [
+        'clang',
+        '-Wall',
+        '-Wextra',
+        '-Werror',
+        'test/fixtures/unresolved_census.c',
+        '-o',
         executable.path,
       ]);
-      expect(signed.exitCode, 0, reason: '${signed.stderr}');
+      expect(compiled.exitCode, 0, reason: '${compiled.stderr}');
       final canonical = await executable.resolveSymbolicLinks();
       final process = await Process.start(canonical, const []);
       final stream = process.stdout.transform(utf8.decoder).asBroadcastStream();
@@ -304,11 +303,16 @@ void main() {
       fixture.children.add(child);
       final output = StreamIterator(stream.transform(const LineSplitter()));
       try {
-        process.stdin.writeln('native-fixture-ready');
-        expect(
-          await output.moveNext().timeout(const Duration(seconds: 5)),
-          isTrue,
+        final ready = await output.moveNext().timeout(
+          const Duration(seconds: 5),
         );
+        if (!ready) {
+          final result = await child.result();
+          fail(
+            'native census fixture exited before readiness: '
+            '${result.exitCode}; stderr: ${result.stderr}',
+          );
+        }
         expect(output.current, 'native-fixture-ready');
         final inventory = MacOsDriverInventory(executablePath: canonical);
         expect(await inventory.inspect(process.pid), isNotNull);
@@ -353,14 +357,16 @@ void main() {
           );
         }
       } finally {
-        await process.stdin.close();
         final retired = await child.terminate();
-        await output.cancel();
-        if (!retired)
-          throw StateError(
-            'unconfirmed fixture PID ${child.pid}; retained at ${fixture.temporary.path}',
-          );
-        await child.result();
+        try {
+          await output.cancel();
+        } finally {
+          if (!retired)
+            throw StateError(
+              'unconfirmed fixture PID ${child.pid}; retained at ${fixture.temporary.path}',
+            );
+          await child.result();
+        }
       }
     },
     skip: !Platform.isMacOS,

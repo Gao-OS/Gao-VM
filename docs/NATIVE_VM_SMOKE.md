@@ -6,6 +6,33 @@ for UC-01/UC-03 and M3/M4/M5/M7/M8 verification. The optional `--multi-vm` mode
 adds the three-VM independence scenario from AC-01. Neither mode is the full
 PRD release gate or installed-service acceptance.
 
+## Default test OS
+
+Alpine Linux `aarch64` is the approved first-release acceptance OS,
+chosen on 2026-10-19. Pin one stable release's source URL, checksum and preparation
+steps with the resulting image hashes. The current pinned inputs and their
+validation limits are recorded in the [acceptance checkpoint](FIRST_RELEASE_ACCEPTANCE.md).
+The harness continues to take explicit image paths, so other Linux guests remain
+supported.
+
+The recipe uses `console=hvc0 root=/dev/vda rw`. Prepare an uncompressed ARM64
+Linux `Image`, its matching initramfs, and a raw disk containing the root
+filesystem directly on the device. For Alpine cloud kernels packaged as EFI
+zboot, extract and decompress the embedded payload and validate the ARM64 Image
+header. An installer ISO, QCOW2 image or partitioned
+disk requiring `root=/dev/vdaN` cannot be used as that raw root input. Check that
+the initramfs includes the required virtio block and filesystem modules and that
+the guest supports the virtio console. A getty on `hvc0` exposes a login prompt in
+captured serial output; GaoVM's serial capture is output-only. Keep credentials
+unchanged in the disposable test disk. Supply the matching initramfs in both
+smoke modes.
+
+This smoke disables the Guest Agent. Separate Guest/TestRun acceptance requires
+an Alpine image with the resident `gaovm-guestd` and its least-privilege service
+policy installed. The [approved PRD amendment](PRD.md#2026-10-19-首版范围修订用户已批准)
+defers GaoOS-specific integration; all generic P0 and native evidence requirements
+still apply.
+
 ## Prepare and run
 
 Use Apple Silicon macOS 14+ with Xcode command-line tools and Dart 3.9.0. Prepare
@@ -22,9 +49,9 @@ Resolve the pinned dependencies first, from the repository root:
 (cd clients/gaovm_cli && mise exec dart@3.9.0 -- dart pub get --enforce-lockfile)
 mise exec dart@3.9.0 -- bash scripts/e2e_macos14_happy_path.sh --help
 
-KERNEL_PATH=/absolute/images/kernel \
-INITRD_PATH=/absolute/images/initrd \
-DISK_PATH=/absolute/images/root.raw \
+KERNEL_PATH=/absolute/images/alpine/Image \
+INITRD_PATH=/absolute/images/alpine/initramfs-virt \
+DISK_PATH=/absolute/images/alpine/alpine-root.raw \
 mise exec dart@3.9.0 -- bash scripts/e2e_macos14_happy_path.sh
 ```
 
@@ -82,8 +109,9 @@ automatically retried. Display status alone is not runtime or guest readiness.
 Use the same prepared inputs and append `--multi-vm`:
 
 ```sh
-KERNEL_PATH=/absolute/images/kernel \
-DISK_PATH=/absolute/images/root.raw \
+KERNEL_PATH=/absolute/images/alpine/Image \
+INITRD_PATH=/absolute/images/alpine/initramfs-virt \
+DISK_PATH=/absolute/images/alpine/alpine-root.raw \
 mise exec dart@3.9.0 -- bash scripts/e2e_macos14_happy_path.sh --multi-vm
 ```
 
@@ -143,10 +171,11 @@ mise exec dart@3.9.0 -- dart analyze
 mise exec dart@3.9.0 -- dart format --output=none --set-exit-if-changed bin lib test tool
 ```
 
-The actual native branch remains unrun on the Intel development host. Even a
+The native scenarios remain unverified; the Apple Silicon host's process census
+is still blocked as recorded in the [checkpoint](FIRST_RELEASE_ACCEPTANCE.md). Even a
 passing native smoke receipt only establishes its selected public runtime/display
 or three-VM independence scenario: it does not prove framebuffer/input,
-manual-close guest survival, GaoOS guest exec/TestRun artifacts, simultaneous
+manual-close guest survival, Alpine guest exec/TestRun artifacts, simultaneous
 windows, multi-VM fault recovery, crash/daemon-restart recovery, signed
 installed-service behavior, upgrade rollback or distribution.
-Those remain separate PRD/M8 gates and require recorded native evidence.
+Use the current checkpoint for the remaining PRD/M8 evidence and deferred work.

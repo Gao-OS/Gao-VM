@@ -5,7 +5,7 @@ document: prd
 status: accepted
 m0_contract: frozen
 target_release: Multi-VM Agent Testing MVP
-updated: 2026-09-04
+updated: 2026-10-19
 tags:
   - gaovm
   - prd
@@ -15,6 +15,12 @@ tags:
 ---
 
 # GaoVM 产品需求文档（PRD）
+
+## 2026-10-19 首版范围修订（用户已批准）
+
+GaoOS 尚不存在。用户批准以 **Alpine Linux ARM64** 作为首版默认验收系统，替代原定 GaoOS 的真实 Guest readiness、exec、TestRun 与 E2E 发布证据；其他兼容 ARM64 Linux 输入仍可显式提供。GaoOS-specific profile、真实镜像及版本集成验收延后，不再阻塞首版；现有 GaoOS bundle/metadata 契约与通用 image import 能力保留，实际 GaoOS 集成属于后续交付。
+
+本修订优先于本文既有的首版 GaoOS-only 验收表述，覆盖 GST-001、AC-05、Guest/TestRun 追踪及 §13/§14；GaoOS 产品愿景保持不变。所有通用 P0 能力、Apple Silicon 上真实 VZ/vsock/Guest 执行与 artifact 证据、认证、generation、进程清点及其他发布门槛不变。准备镜像或组件测试不等于原生验收通过；Flutter UI、MCP 和其他 P1/Beta 功能仍不阻塞首版。
 
 ## 1. 产品概述
 
@@ -147,7 +153,7 @@ Multi-VM Agent Testing MVP
 -异步 operations；
 - durable events/SSE；
 - CLI；
-- GaoOS Guest Agent；
+- Linux Guest Agent（首版在 Alpine ARM64 验收；GaoOS 集成延后）；
 - guest readiness 与 exec；
 - TestRun；
 - artifact collection；
@@ -273,8 +279,8 @@ M0 冻结以下 scope 解释：Guest protocol v1 的 `hello/capabilities`、heal
 | API-001..012 | M0、M4 | OpenAPI validation/contract tests；HTTP/1.1-over-UDS integration；SSE resume |
 | OP-001..007 | M1、M2、M4 | repository/reconciliation/cancel/conflict tests |
 | EVT-001..006 | M1、M4 | transactional-outbox, cursor-resume and non-blocking-log tests |
-| GST-001..007 | M0、M3、M6 | guest protocol contract tests；GaoOS readiness/exec E2E |
-| TST-001..010 | M1、M6 | TestRun state-machine, cleanup, artifact and GaoOS E2E |
+| GST-001..007 | M0、M3、M6 | guest protocol contract tests；真实 Alpine ARM64 readiness/exec E2E |
+| TST-001..010 | M1、M6 | TestRun state-machine, cleanup, artifact and 真实 Alpine ARM64 E2E |
 | SCH-001..005 | M1、M2 | admission/lease/recovery tests |
 | CLI-001..008 | M7 | CLI-to-public-API integration；JSON/exit-code contract tests |
 
@@ -330,6 +336,8 @@ M0 冻结以下 scope 解释：Guest protocol v1 的 `hello/capabilities`、heal
 | SPEC-014 | P2 | bridged network。 |
 
 ## 8.4 Image 与 VM Bundle
+
+按 2026-10-19 修订，IMG-001/IMG-003 的 GaoOS bundle/metadata 字段契约保留，真实 GaoOS profile/version 集成验收延后；其余 image P0 要求不变。
 
 | ID | 优先级 | 需求 |
 |---|---:|---|
@@ -394,7 +402,7 @@ M0 冻结以下 scope 解释：Guest protocol v1 的 `hello/capabilities`、heal
 
 | ID | 优先级 | 需求 |
 |---|---:|---|
-| GST-001 | P0 | GaoOS 提供可选 `gaovm-guestd`。 |
+| GST-001 | P0 | 提供可选 Linux `gaovm-guestd`，首版在 Alpine ARM64 中实际运行；GaoOS 集成延后。 |
 | GST-002 | P0 | host 与 guest 使用 virtio-vsock。 |
 | GST-003 | P0 | 提供 health 与 system.info。 |
 | GST-004 | P0 | 提供 guest exec，返回 exit code、stdout、stderr、duration。 |
@@ -694,9 +702,9 @@ Operation 或执行/收集记录引用的 artifact 不得自动删除。清理�
 - event sequence 继续递增；
 -没有 stale socket/orphan。
 
-### AC-05 GaoOS Guest readiness
+### AC-05 Linux Guest readiness（首版 Alpine ARM64）
 
-启动 GaoOS VM：
+启动已安装 `gaovm-guestd` 的真实 Alpine ARM64 VM：
 
 - VZ running 不等价于 guest ready；
 - Guest Agent 建连后状态变为 ready；
@@ -761,8 +769,8 @@ Multi-VM Agent Testing MVP 只有在以下条件全部满足时才能发布：
    - 多 VM 并行测试；
    - driver crash recovery；
    - daemon restart recovery；
-   - GaoOS guest exec；
-   - TestRun artifact；
+   - 真实 Alpine ARM64 Guest readiness 与 guest exec；
+   - Alpine ARM64 TestRun 成功清理、失败保留与实际下载的 artifact；
    - idempotency；
    - event resume。
 7. driver 已正确 codesign 并具备 virtualization entitlement。
@@ -776,8 +784,8 @@ Multi-VM Agent Testing MVP 只有在以下条件全部满足时才能发布：
 
 MVP 成功不是以“能打开 VM 窗口”为标准，而是：
 
-- Agent 可以不依赖 GUI 完成 GaoOS 测试闭环；
--同一台 Mac 可同时管理和运行多个 GaoOS 版本；
+- Agent 可以不依赖 GUI 完成 Alpine ARM64 测试闭环；
+-同一台 Mac 可同时管理和运行多个隔离的 ARM64 Linux VM；
 -单 VM 故障不影响其他 VM；
 -测试失败留下可复现环境或完整 artifact；
 -用户可以通过 CLI/public API 接管 Agent 创建的 VM（Beta 后也可通过 UI）；

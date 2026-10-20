@@ -1,21 +1,26 @@
 # GaoVM
 
-GaoVM is a macOS-native, multi-VM manager for ARM64 Linux guests built on Apple's `Virtualization.framework`. GaoOS is its first Guest Profile and automated-test target, while the VM core remains guest-independent.
+GaoVM is a macOS-native, multi-VM manager for ARM64 Linux guests built on Apple's `Virtualization.framework`. Alpine ARM64 is the default first-release test OS; GaoOS remains a planned Guest Profile, while the VM core remains guest-independent.
 
 ## Project Status
 
 The project began as a single-VM prototype. The current source implements the
 multi-VM daemon composition, durable public API, guest-exec and TestRun workers,
-and CLI; native Apple Silicon/GaoOS and installed-service release acceptance are
-still pending. Component tests do not establish MVP completion. The canonical
-documents are:
+and CLI; native Alpine ARM64 Guest/TestRun and installed-service release acceptance
+are still pending. Component tests do not establish MVP completion.
+
+**2026-10-19 approved scope:** Alpine ARM64 supplies the native first-release
+Guest readiness, exec and TestRun E2E evidence; GaoOS-specific profile/version
+integration is deferred. See the [approved PRD amendment](docs/PRD.md#2026-10-19-首版范围修订用户已批准)
+and [current acceptance checkpoint](docs/FIRST_RELEASE_ACCEPTANCE.md). Prepared
+images do not establish native acceptance. The canonical documents are:
 
 - [Product requirements](docs/PRD.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Development plan](docs/DEVELOPMENT_PLAN.md)
 - [Non-negotiable implementation rules](AGENTS.md)
 
-Those documents are frozen for M0. Legacy prototype commands and JSON state paths documented below are historical references, not alternatives to the SQLite/public-API target. The current CLI migration checkpoint is described below.
+Those documents define the frozen M0 contract with the dated approved scope amendment above. Legacy prototype commands and JSON state paths documented below are historical references, not alternatives to the SQLite/public-API target. The current CLI migration checkpoint is described below.
 
 The public API now lists current per-VM log metadata through
 `GET /v1/vms/{vm_id}/logs`, with an optional driver/serial/guest kind filter.

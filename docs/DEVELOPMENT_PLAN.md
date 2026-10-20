@@ -5,7 +5,7 @@ document: development-plan
 status: accepted
 m0_contract: frozen
 target_milestone: Multi-VM Agent Testing MVP
-updated: 2026-09-04
+updated: 2026-10-19
 tags:
   - gaovm
   - development-plan
@@ -15,6 +15,12 @@ tags:
 ---
 
 # GaoVM Multi-VM 与 Agent API 开发计划
+
+## 2026-10-19 首版范围修订（用户已批准）
+
+按 [PRD 首版范围修订](PRD.md#2026-10-19-首版范围修订用户已批准)，首版默认使用 Alpine Linux ARM64 完成原定 GaoOS 的真实 Guest readiness、exec、TestRun 和 E2E 验收；兼容的其他 ARM64 Linux 输入仍可显式提供。GaoOS-specific profile、真实镜像及版本集成延后，不阻塞首版；既有 GaoOS manifest/bundle 契约与通用 P0 image 能力保留。本文的 GaoOS 长期目标不变，首版里程碑与 PR 027 按此修订执行。
+
+真实 Apple Silicon VZ/vsock、Guest 执行、artifact、故障恢复及其余通用 P0 发布证据仍必须补齐；不得用准备好的镜像、组件测试或 runtime running 代替。认证、generation、进程清点及 Flutter UI/MCP/P1 的既有边界不变。
 
 ## 1. 目标
 
@@ -771,6 +777,8 @@ vms/<vm-id>.gaovm/
 
 #### M5.6 GaoOS profile manifest
 
+字段契约保留；真实 GaoOS profile/version 集成按 2026-10-19 修订延后。
+
 可识别：
 
 ```text
@@ -797,7 +805,7 @@ guest_agent_expected
 
 ### 验收
 
--同时从不同 GaoOS image 创建多个隔离 VM；
+-同时从不同 ARM64 Linux image 创建多个隔离 VM（首版默认 Alpine）；
 -删除 VM 不影响 base image；
 - image import/managed-disk provisioning 可通过 operation 查询。
 
@@ -807,7 +815,7 @@ guest_agent_expected
 
 ### 目标
 
-完成 AI Agent 管理和测试 GaoOS 的闭环。
+完成 AI Agent 管理和测试 Linux Guest 的闭环；首版使用 Alpine ARM64，GaoOS 集成延后。
 
 ### 任务
 
@@ -897,9 +905,9 @@ test result
 system info
 ```
 
-#### M6.8 GaoOS E2E
+#### M6.8 真实 Linux Guest E2E（首版 Alpine ARM64）
 
-真实 GaoOS test image：
+在 Apple Silicon 上启动实际包含 `gaovm-guestd` 的 Alpine ARM64 test image：
 
 - Guest Agent ready；
 -执行 smoke test；
@@ -922,7 +930,7 @@ system info
 
 ### 验收
 
-- Agent 可完全通过 API 发起并完成 GaoOS 测试；
+- Agent 可完全通过 API 发起并完成真实 Alpine ARM64 测试；
 -不需要打开 display；
 -失败环境和 artifact 可追踪；
 -无 Guest Agent VM 仍可基础管理。
@@ -1046,7 +1054,7 @@ Apple Silicon self-hosted CI：
 -daemon restart；
 -display；
 -serial；
--GaoOS Guest Agent；
+-Alpine ARM64 Guest Agent readiness/exec（真实 vsock）；
 -TestRun。
 
 #### M8.2 Packaging
@@ -1083,7 +1091,7 @@ Apple Silicon self-hosted CI：
 
 - quick start；
 -API guide；
--GaoOS image build/import；
+-Alpine ARM64 测试镜像准备/import（GaoOS-specific 集成文档延后）；
 -Agent automation；
 -troubleshooting；
 -data backup/export。
@@ -1126,7 +1134,7 @@ Apple Silicon self-hosted CI：
 | 024 | Guest session/readiness/exec | 014/017/023 | 否 |
 | 025 | Artifact service | 020/024 | 与 026 |
 | 026 | TestRun state machine | 007/017/024 | 与 025 |
-| 027 | GaoOS real E2E | 021/022/024/026 | 否 |
+| 027 | Alpine ARM64 real Guest/TestRun E2E（GaoOS 集成延后） | 021/022/024/026 | 否 |
 | 028 | MCP adapter（Beta，不阻塞 MVP） | 019/026 | 与 029/030 |
 | 029 | Flutter UI（Beta，不阻塞 MVP） | 017/018/019 | 与 028/030 |
 | 030 | Packaging/launchd/codesign | 014/019 | 与 028/029 |
@@ -1263,7 +1271,7 @@ Schema CI
 -entitlement；
 -multiple VM。
 
-### GaoOS end-to-end
+### Linux Guest end-to-end（首版 Alpine ARM64）
 
 - image import；
 - create；
@@ -1392,6 +1400,6 @@ Phase 5: expose legacy CLI adapter
 
 第二个纵向切片再替换一台 fake driver 为真实 VZ driver。
 
-第三个纵向切片加入 GaoOS Guest Agent/TestRun。
+第三个纵向切片加入 Linux Guest Agent/TestRun，首版以 Alpine ARM64 实测；GaoOS 集成后续交付。
 
 这种顺序可以尽早证明多 VM 领域模型，而不是继续把现有单 VM happy path 做得更深。

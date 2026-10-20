@@ -117,8 +117,18 @@ void main() {
     });
 
     test('assembles the real cross-built Swift service helper', () async {
+      final buildPath = await Process.run('/usr/bin/xcrun', [
+        'swift',
+        'build',
+        '-c',
+        'release',
+        '--triple',
+        'arm64-apple-macosx14.0',
+        '--show-bin-path',
+      ], workingDirectory: '../../services/macos_service');
+      expect(buildPath.exitCode, 0, reason: '${buildPath.stderr}');
       final service = File(
-        '../../services/macos_service/.build/arm64-apple-macosx/release/gaovm-service',
+        '${(buildPath.stdout as String).trim()}/gaovm-service',
       );
       if (!await service.exists()) {
         markTestSkipped('cross-build the ARM64 release service helper first');
